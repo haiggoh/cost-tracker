@@ -2,6 +2,16 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.1.3] — 2026-09-03
+
+### Fixed
+- **Restored `docs/ROADMAP.md`, which 0.1.2 shipped empty.** The bump script read and
+  wrote the file in one expression — `open(p,"w").write(open(p).read())` — and `"w"`
+  truncates before the read runs, so the content was gone before it was ever read.
+  `tests/test_version_consistency.sh` caught it immediately, which is the argument
+  for that test: the damage was to a file nothing else reads at runtime, so nothing
+  else would have noticed.
+
 ## [0.1.2] — 2026-09-03
 
 ### Added
