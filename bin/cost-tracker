@@ -36,6 +36,7 @@ Environment overrides (all optional):
   COST_TRACKER_SAVINGS_CMD  argv (shell-split) printing savings-ledger JSON
 """
 import argparse
+import glob
 import json
 import os
 import re
@@ -58,13 +59,167 @@ HISTORY_PATH = os.environ.get(
 TODAY = os.environ.get("COST_TRACKER_TODAY") or datetime.now(timezone.utc).date().isoformat()
 
 
-def cap_usd():
+# --- the cap: learned from the gateway's own refusal -------------------------
+# The gateway will not TELL us the cap (/key/info is 403 for a virtual key scoped to
+# llm_api_routes) but it SHOUTS it the moment the cap is hit:
+#
+#   API Error: Request rejected (429) · Budget has been exceeded!
+#   Key=Joyia-Code-M4m (sk-...YxHg) Current cost: 40.11333501999997, Max budget: 40.0
+#
+# That message is persisted into the transcript as an assistant turn, so the cap is
+# READABLE after all — just from the refusal rather than from an API. The most recent
+# observation is the cap until a newer refusal says otherwise.
+#
+# Only the per-KEY scope is usable as a daily denominator. The same message shape also
+# carries `Team=<uuid>` for the SHARED team cap (historically 1300 → 1400), and using
+# that as a personal daily cap would divide by a number 35x too large. Scope is
+# therefore recorded and filtered on, never assumed.
+KILL_RE = re.compile(
+    r"Budget has been exceeded!\s*"
+    r"(?P<scope>Key|Team)=(?P<label>[^\s(]+)"
+    r"(?:\s*\((?P<keyhint>[^)]*)\))?"
+    r"\s*Current cost:\s*(?P<cost>[0-9]+(?:\.[0-9]+)?)\s*,\s*"
+    r"Max budget:\s*(?P<cap>[0-9]+(?:\.[0-9]+)?)"
+)
+
+CONFIG_DIR = os.environ.get(
+    "COST_TRACKER_CONFIG_DIR", os.path.expanduser("~/.claude/cost-tracker")
+)
+CONFIG_PATH = os.path.join(CONFIG_DIR, "cap.json")
+TRANSCRIPTS_DIR = os.environ.get(
+    "COST_TRACKER_PROJECTS_DIR", os.path.expanduser("~/.claude/projects")
+)
+
+
+def read_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_config(data):
+    """Best-effort: a cap we cannot cache is a cap we look up again, not an error."""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp, CONFIG_PATH)      # atomic: a reader never sees half a file
+        return True
+    except OSError:
+        return False
+
+
+def learn_cap(max_files=500, since_days=365):
+    """Scan transcripts for the newest budget-kill message and return what it said.
+
+    Returns a dict (never written here — the caller decides) with the observation and
+    its provenance, or a `found: false` record. Bounded on purpose: newest-mtime-first,
+    a file limit and an age limit, because this reads whole transcripts and must stay a
+    rare operation. It is NEVER called from the statusline path.
+
+    A file's mtime only approximates its records' timestamps, so the winner is chosen by
+    the RECORD's own timestamp across everything scanned, not by file order.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
+    paths = []
+    for pat in ("*/*.jsonl", "*.jsonl"):
+        paths.extend(glob.glob(os.path.join(TRANSCRIPTS_DIR, pat)))
+    try:
+        paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    except OSError:
+        pass
+    paths = paths[:max_files]
+    best = {}          # scope -> observation
+    scanned = 0
+    for path in paths:
+        try:
+            f = open(path, "r", errors="ignore")
+        except OSError:
+            continue
+        scanned += 1
+        with f:
+            for line in f:
+                # cheap substring reject first: parsing every transcript line as JSON
+                # to find a rare error turn is orders of magnitude slower.
+                if "Budget has been exceeded" not in line:
+                    continue
+                m = KILL_RE.search(line)
+                if not m:
+                    continue
+                try:
+                    d = json.loads(line)
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                # ONLY a real refusal counts. `isApiErrorMessage` is set by Claude Code
+                # on the turn it writes for a rejected request; PROSE that merely quotes
+                # the message — a note, a plan, an assistant explaining a past kill — has
+                # no such marker. This matters: the first probe of this learner picked up
+                # the error text out of the very session that was investigating it, and
+                # would have "learned" the cap from a sentence rather than from the
+                # gateway. Any conversation ABOUT a budget kill is a poisoned source.
+                if d.get("isApiErrorMessage") is not True:
+                    continue
+                ts = d.get("timestamp") or ""
+                scope = m.group("scope").lower()
+                obs = {
+                    "cap_usd": float(m.group("cap")),
+                    "cost_at_kill_usd": float(m.group("cost")),
+                    "scope": scope,
+                    "label": m.group("label"),
+                    "key_hint": m.group("keyhint") or "",
+                    "observed_at": ts,
+                    "source_file": os.path.basename(path),
+                    "raw": m.group(0)[:300],
+                }
+                prev = best.get(scope)
+                if prev is None or (obs["observed_at"] or "") >= (prev["observed_at"] or ""):
+                    best[scope] = obs
+    result = {
+        "contract": 1,
+        "learned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "files_scanned": scanned,
+        "files_available": len(paths),
+        "found": bool(best.get("key")),
+        "key": best.get("key"),
+        "team": best.get("team"),
+    }
+    return result
+
+
+def learned_cap(auto_learn=False):
+    """The learned per-key cap and its provenance, or (None, provenance-or-None).
+
+    auto_learn=True performs the ONE first-run scan when no config exists yet. The
+    result is written even when nothing was found, so a machine that has never hit the
+    cap does not re-scan every transcript on every invocation. `cap --learn` re-scans on
+    demand; that is what "the daily budget cap changed" should run.
+    """
+    cfg = read_config()
+    if cfg is None and auto_learn:
+        cfg = learn_cap()
+        write_config(cfg)
+    if not cfg:
+        return None, None
+    key = cfg.get("key")
+    if not key or not key.get("cap_usd"):
+        return None, cfg
+    return float(key["cap_usd"]), cfg
+
+
+def cap_usd(auto_learn=False):
     """The daily cap, or None. None is a real answer, not zero.
 
-    The authoritative cap lives on the gateway, but llmgw's /key/info returns
-    403 for a virtual key scoped to llm_api_routes, so it is unreadable from
-    here. Rather than invent a number, an unset cap prints spend with no
-    denominator. Never probes the network: this runs in the statusline path.
+    Resolution order, most explicit first:
+      1. COST_TRACKER_CAP_USD / BUDGET_TALLY_CAP_USD — a deliberate override always wins.
+      2. the cap LEARNED from the gateway's own refusal message (see learn_cap).
+      3. None — spend prints with no denominator rather than an invented one.
+    Never probes the network, and never scans transcripts unless auto_learn is set, so
+    the statusline path stays cheap.
     """
     for var in ("COST_TRACKER_CAP_USD", "BUDGET_TALLY_CAP_USD"):
         raw = os.environ.get(var)
@@ -75,7 +230,8 @@ def cap_usd():
                 continue
             if v > 0:
                 return v
-    return None
+    cap, _cfg = learned_cap(auto_learn=auto_learn)
+    return cap
 
 
 # --- parsing -----------------------------------------------------------------
@@ -459,7 +615,13 @@ def collect(period="today", since=None, fast=False):
         savings = read_savings(PERIODS.get(period, ("", "--today"))[1] if not since
                               else "--since=" + since)
 
-    cap = cap_usd()
+    cap = cap_usd(auto_learn=not fast)
+    cap_source = "unset"
+    if cap is not None:
+        if os.environ.get("COST_TRACKER_CAP_USD") or os.environ.get("BUDGET_TALLY_CAP_USD"):
+            cap_source = "env override"
+        else:
+            cap_source = "learned from a budget-kill message"
     return {
         "contract": CONTRACT,
         "period": PERIODS.get(period, (period, ""))[0] if not since else f"since {since}",
@@ -469,6 +631,7 @@ def collect(period="today", since=None, fast=False):
                        + ("this UTC day" if len(days) == 1 else "these UTC days")),
         "cloud_usd": round(cloud_total, 4),
         "cap_usd": cap,
+        "cap_source": cap_source,
         "pct_of_cap": (round(cloud_total / cap, 4) if cap else None),
         "sessions": {sid: {"period_usd": round(s["period_usd"], 4),
                            "lifetime_usd": round(s["lifetime_usd"], 4),
@@ -567,11 +730,58 @@ def render_statusline(data):
     return seg
 
 
+def render_cap(cfg, resolved, measured_today=None):
+    """Show the cap AND where it came from. A cap with no provenance is a number
+    someone will later have to re-derive; this prints the refusal it was read from."""
+    lines = []
+    env_override = None
+    for var in ("COST_TRACKER_CAP_USD", "BUDGET_TALLY_CAP_USD"):
+        if os.environ.get(var):
+            env_override = var
+            break
+    if resolved is None:
+        lines.append("cap: UNSET — spend is printed with no denominator, never an invented one.")
+    else:
+        lines.append(f"cap: ${resolved:.2f} / day")
+    if env_override:
+        lines.append(f"  source: ${os.environ[env_override]} from ${env_override} "
+                     "(an explicit override always wins)")
+    key = (cfg or {}).get("key")
+    if key:
+        lines.append("  learned from the gateway's own refusal:")
+        lines.append(f"    Max budget:  ${key['cap_usd']:.2f}")
+        lines.append(f"    at a cost of ${key['cost_at_kill_usd']:.2f} when it refused")
+        lines.append(f"    scope        {key['scope']}={key['label']} {key['key_hint']}")
+        lines.append(f"    observed     {key['observed_at'] or 'unknown'}")
+        lines.append(f"    transcript   {key['source_file']}")
+    elif cfg:
+        lines.append(f"  no budget-kill message found in {cfg.get('files_scanned', 0)} "
+                     "transcript(s) — nothing to learn from yet, which is a good sign.")
+        lines.append(f"  last looked:   {cfg.get('learned_at', 'never')}")
+    else:
+        lines.append("  never looked. Run `cost-tracker cap --learn`.")
+    team = (cfg or {}).get("team")
+    if team:
+        lines.append(f"  (also seen: the SHARED team cap ${team['cap_usd']:.2f} for "
+                     f"{team['label']} — informational only, never used as a daily "
+                     "denominator)")
+    if resolved and measured_today is not None and measured_today > resolved:
+        lines.append("")
+        lines.append(f"  ⚠ today's measured spend (${measured_today:.2f}) EXCEEDS this cap "
+                     "without a refusal.")
+        lines.append("    Either the cap was raised, or the measurement is wrong. Re-read it "
+                     "with `cost-tracker cap --learn`;")
+        lines.append("    the newest refusal wins, so a raised cap is picked up the first time "
+                     "the new one is hit.")
+    return "\n".join(lines)
+
+
 def render_doctor(data):
     lines = [f"cost-tracker doctor — ledger dir: {LEDGER_DIR}",
              f"                     history:    {HISTORY_PATH}",
              f"today (UTC): {data['today_utc']}   cap: "
-             + (f"${data['cap_usd']:.2f}" if data["cap_usd"] else "unset (no denominator printed)")]
+             + (f"${data['cap_usd']:.2f}" if data["cap_usd"] else "unset (no denominator printed)")
+             + f"   [{data.get('cap_source') or 'unset'}]"]
     lines.append("")
     if data.get("reset_anchored_sessions"):
         lines.append("COUNTER RESETS (a resumed session) — %d in this period:"
@@ -658,6 +868,14 @@ def main(argv=None):
     doc = sub.add_parser("doctor", help="show quarantined records and resolved config")
     doc.add_argument("--json", action="store_true")
 
+    cp = sub.add_parser("cap", help="show the daily cap and where it came from")
+    cp.add_argument("--learn", action="store_true",
+                    help="re-read the cap from the newest budget-kill message now "
+                         "(run this when the daily budget cap has changed)")
+    cp.add_argument("--set", metavar="USD", dest="set_cap",
+                    help="record a cap by hand instead of learning one")
+    cp.add_argument("--json", action="store_true")
+
     args = ap.parse_args(argv)
     cmd = args.cmd or "report"
     if cmd == "report" and args.cmd is None:
@@ -669,6 +887,42 @@ def main(argv=None):
             date.fromisoformat(since)
         except ValueError:
             ap.error("--since needs a YYYY-MM-DD date")
+
+    if cmd == "cap":
+        if args.set_cap:
+            try:
+                manual = float(args.set_cap)
+            except ValueError:
+                ap.error("--set needs a number")
+            if manual <= 0:
+                ap.error("--set needs a positive number")
+            cfg = read_config() or {"contract": 1}
+            cfg["key"] = {
+                "cap_usd": manual, "cost_at_kill_usd": 0.0, "scope": "key",
+                "label": "(set by hand)", "key_hint": "",
+                "observed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "source_file": "(manual)",
+                "raw": "set by hand with `cost-tracker cap --set`",
+            }
+            cfg["found"] = True
+            cfg["learned_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if not write_config(cfg):
+                print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+                return 0
+        elif args.learn:
+            cfg = learn_cap()
+            write_config(cfg)
+        else:
+            cfg = read_config()
+        resolved = cap_usd()
+        if args.json:
+            print(json.dumps({"contract": CONTRACT, "cap_usd": resolved,
+                              "config_path": CONFIG_PATH, "config": cfg},
+                             indent=2, sort_keys=True))
+            return 0
+        measured = collect("today", fast=True)["cloud_usd"]
+        print(render_cap(cfg, resolved, measured_today=measured))
+        return 0
 
     period = getattr(args, "period", "today")
     data = collect(period, since, fast=getattr(args, "fast", False))

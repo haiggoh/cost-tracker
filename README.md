@@ -36,6 +36,7 @@ per-session table is printed so a reader can audit the label instead of trusting
 | `cost-tracker report [--today\|--week\|--month\|--since D] [--json] [--full-ids]` | per-session breakdown for a period |
 | `cost-tracker statusline` | `today: cloud $30.12/$40 · local saved $4.80` |
 | `cost-tracker doctor` | quarantined records grouped by (reason, session) + resolved config |
+| `cost-tracker cap [--learn] [--set USD]` | the daily cap and the refusal it was read from |
 
 Periods longer than today read the append-only history log, grouped by
 `(session_id, utc_date)` with the last row per group winning — the per-session
@@ -60,9 +61,15 @@ one-way: status line → ledger → reports.
   that negative delta reported $16.07 of real spend as $0.00. Such a day is anchored
   at the reset instead and its figure is marked `*` and named a floor, because spend
   earlier the same day is not in the ledger.
-- **An unset cap prints no denominator.** llmgw's `/key/info` returns 403 for a
-  virtual key scoped to `llm_api_routes`, so the authoritative cap is unreadable
-  from here. Set `COST_TRACKER_CAP_USD` to get a percentage; nothing is invented.
+- **The cap is learned from the gateway's own refusal.** `/key/info` returns 403 for a
+  virtual key scoped to `llm_api_routes`, so the cap cannot be asked for — but it is
+  stated outright whenever the gateway refuses (`… Current cost: 40.11, Max budget:
+  40.0`), and that turn is persisted in the transcript. cost-tracker reads the newest
+  refusal once, caches it in `~/.claude/cost-tracker/cap.json` with its provenance, and
+  re-reads it on `cap --learn`. Only the per-**key** scope is used: the same message
+  shape also carries the shared **team** cap, 35x larger. Prose quoting the message is
+  rejected — the learner keys on `isApiErrorMessage`, not on the text. With no learned
+  and no configured cap, spend prints without a denominator; nothing is invented.
 - **Not measured ≠ zero.** An absent or unrecognised savings ledger reports as
   unmeasured, never as `$0.00`.
 - **Local traffic never enters cloud spend.** The gate is the endpoint, not an env
@@ -88,9 +95,10 @@ Set `COST_TRACKER_CAP_USD=40` (or `BUDGET_TALLY_CAP_USD`) for a cap.
 ```sh
 pytest tests/                            # 48 tests, incl. a 33-case fixture matrix
 bash tests/test_budget_ledger.sh         # 23 tests for the capture chain
-bash tests/test_statusline_render.sh     # 33 tests for the renderer contract
+bash tests/test_statusline_render.sh     # 34 tests for the renderer contract
 bash tests/test_wire_statusline.sh       # 20 tests for wiring, backup, rollback
 bash tests/test_version_consistency.sh   # manifest / changelog / roadmap agree
+# pytest covers both suites: 55 reporting tests + 12 cap-learning tests
 ```
 
 The pytest suite is mutation-tested: seven planted defects (lifetime-as-daily,
@@ -103,7 +111,9 @@ zeroed savings, ignored period window) are all caught.
 |---|---|
 | `COST_TRACKER_LEDGER_DIR` | `~/.claude/cost-ledger` |
 | `COST_TRACKER_HISTORY` | `~/.claude/cost-ledger-history.log` |
-| `COST_TRACKER_CAP_USD` | unset (falls back to `BUDGET_TALLY_CAP_USD`) |
+| `COST_TRACKER_CAP_USD` | unset (falls back to `BUDGET_TALLY_CAP_USD`, then the learned cap) |
+| `COST_TRACKER_CONFIG_DIR` | `~/.claude/cost-tracker` — where the learned cap is cached |
+| `COST_TRACKER_PROJECTS_DIR` | `~/.claude/projects` — transcripts the learner reads |
 | `COST_TRACKER_TODAY` | today, UTC — override for tests |
 | `COST_TRACKER_SAVINGS_CMD` | auto-discovered `local-agents` savings ledger |
 | `COST_TRACKER_STATUSLINE` | `1` — set `0` to keep the `today:` segment out of the status line |

@@ -91,10 +91,16 @@ mkdir -p "$TMPD/ledger"
 TODAY_UTC="$(date -u +%F)"
 printf '%s 30.12 0\n' "$TODAY_UTC" > "$TMPD/ledger/aaaaaaaa-0000-0000-0000-000000000001"
 printf '%s 5.00 5.00\n' "$TODAY_UTC" > "$TMPD/ledger/aaaaaaaa-0000-0000-0000-000000000002"
+# EVERY store the renderer can reach is redirected into $TMPD. Missing one fails OPEN
+# onto real machine state: the "no cap means no denominator" assertion below started
+# failing the moment this machine learned a real $40 cap, because the config dir was
+# not sandboxed and the test was silently reading it.
 seg_render() {
     printf '%s' "$1" | env COST_TRACKER_STATUSLINE=1 \
         COST_TRACKER_LEDGER_DIR="$TMPD/ledger" \
         COST_TRACKER_HISTORY="$TMPD/nonexistent-history.log" \
+        COST_TRACKER_CONFIG_DIR="$TMPD/no-config" \
+        COST_TRACKER_PROJECTS_DIR="$TMPD/no-transcripts" \
         LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
         COST_TRACKER_CAP_USD="${2:-}" \
         sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g'
@@ -114,6 +120,24 @@ hasnt "COST_TRACKER_STATUSLINE=0 suppresses the segment" "$OUT" "today: cloud"
 has   "and the lifetime figure loses its now-unneeded label" "$OUT" '$3.14'
 hasnt "…which means no bare 'session' prefix when it stands alone" "$OUT" "session \$"
 
+# a LEARNED cap (no env var at all) must reach the segment
+mkdir -p "$TMPD/learned"
+cat > "$TMPD/learned/cap.json" <<'JSON'
+{"contract":1,"found":true,"learned_at":"2026-09-03T00:00:00Z",
+ "key":{"cap_usd":40.0,"cost_at_kill_usd":40.02,"scope":"key","label":"Joyia-Code-M4m",
+        "key_hint":"sk-...XXXX","observed_at":"2026-09-02T02:17:19.496Z",
+        "source_file":"x.jsonl","raw":"Max budget: 40.0"}}
+JSON
+OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=1 \
+    COST_TRACKER_LEDGER_DIR="$TMPD/ledger" \
+    COST_TRACKER_HISTORY="$TMPD/nonexistent-history.log" \
+    COST_TRACKER_CONFIG_DIR="$TMPD/learned" \
+    COST_TRACKER_PROJECTS_DIR="$TMPD/no-transcripts" \
+    LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
+    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+has "a LEARNED cap gives the segment a denominator with no env var set" \
+    "$(printf '%s' "$OUT" | sed -n 1p)" "today: cloud \$30.12/\$40"
+
 # THE SYMLINK CASE, which is how the renderer is actually reached once wired: via
 # ~/.claude/scripts/statusline-render.sh pointing into the plugin. A plain
 # dirname "$0" resolves to the symlink's directory, where the sibling CLI is NOT,
@@ -124,6 +148,8 @@ ln -sf "$(cd -P "$(dirname "$RENDER")" && pwd)/statusline-render.sh" "$TMPD/fake
 OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=1 \
     COST_TRACKER_LEDGER_DIR="$TMPD/ledger" \
     COST_TRACKER_HISTORY="$TMPD/nonexistent-history.log" \
+    COST_TRACKER_CONFIG_DIR="$TMPD/no-config" \
+    COST_TRACKER_PROJECTS_DIR="$TMPD/no-transcripts" \
     LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
     COST_TRACKER_CAP_USD=40 \
     sh "$TMPD/fake-scripts/statusline-render.sh" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"

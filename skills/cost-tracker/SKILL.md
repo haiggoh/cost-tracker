@@ -1,6 +1,6 @@
 ---
 name: cost-tracker
-description: "Use when reporting, reconciling, or reasoning about Claude Code API spend — today's cost, a session's cost, whether a budget cap is close, what local offload saved, or why two spend figures disagree. Also use before writing any dollar figure about token spend into a message, a note, or a status line, and when the cost ledger looks wrong (a total that exceeds the cap, a session counted twice, a figure that dropped). Do NOT use for non-spend statusline work or for gateway auth problems."
+description: "Use when reporting, reconciling, or reasoning about Claude Code API spend — today's cost, a session's cost, whether a budget cap is close, what local offload saved, or why two spend figures disagree. Also use before writing any dollar figure about token spend into a message, a note, or a status line, and when the cost ledger looks wrong (a total that exceeds the cap, a session counted twice, a figure that dropped). ALSO use whenever the daily budget cap has changed, was raised or lowered, or the user says the cap is wrong / out of date — that is a `cost-tracker cap --learn`, which re-reads the cap from the gateway's own refusal message. Do NOT use for non-spend statusline work or for gateway auth problems."
 ---
 
 # cost-tracker
@@ -42,10 +42,18 @@ themselves. Quote it rather than retyping numbers out of it.
 - **A quarantined record is not a missing one.** It counts as $0, is excluded from
   every figure, and is listed by `doctor` with a reason. Never describe a total as
   complete while records are quarantined; say how many sessions are affected.
-- **An unset cap prints no denominator.** The authoritative cap lives on the
-  gateway and llmgw's `/key/info` returns 403 for a scoped virtual key, so it is
-  unreadable from here. Set `COST_TRACKER_CAP_USD` if you want a percentage.
-  Do not substitute a remembered number for a read one.
+- **The cap is LEARNED, not remembered.** llmgw's `/key/info` is 403 for a scoped
+  virtual key, so the cap cannot be asked for — but the gateway states it whenever it
+  refuses: `Budget has been exceeded! Key=… Current cost: 40.11, Max budget: 40.0`.
+  That turn is persisted, so `cost-tracker cap --learn` reads the cap out of the newest
+  refusal and stores it with its provenance. **When the user says the cap changed, run
+  `--learn`** — the newest refusal wins. An explicit `COST_TRACKER_CAP_USD` still beats
+  it, and with neither, spend prints no denominator. Never substitute a remembered
+  number for a read one; `cost-tracker cap` shows exactly which refusal a cap came from.
+- **Prose that quotes the refusal is not evidence.** The learner keys on
+  `isApiErrorMessage`, the marker Claude Code sets on a rejected turn. A conversation
+  *about* a budget kill — including this one — must never teach the cap. That mistake
+  was made on the first probe of the feature.
 - **`local saved: not measured` is not `$0.00`.** Zero saved claims local work
   happened and was worth nothing; not-measured says nothing priced it. Reporting an
   absent savings ledger as zero understates savings forever while looking right.

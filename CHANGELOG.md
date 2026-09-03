@@ -2,6 +2,59 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.3.0] — 2026-09-03
+
+### Added — the cap is learned from the gateway's own refusal
+The daily cap could not be *asked* for: llmgw's `/key/info` returns 403 for a virtual
+key scoped to `llm_api_routes`. But the gateway states it plainly every time it refuses,
+and that turn is persisted in the transcript:
+
+```
+API Error: Request rejected (429) · Budget has been exceeded!
+Key=Joyia-Code-M4m (sk-...YxHg) Current cost: 40.11333501999997, Max budget: 40.0
+```
+
+- `cost-tracker cap` — the resolved cap plus the refusal it was read from: the value,
+  the cost at which the gateway refused, the scope, when it was observed, and which
+  transcript it came from. A cap with no provenance is a number someone has to
+  re-derive later.
+- `cost-tracker cap --learn` — re-read it now. **This is what "the daily budget cap
+  changed" should run**; the newest refusal wins. `--set USD` records one by hand with
+  honest provenance.
+- Learned once, lazily, on the first report — and the *not found* result is cached too,
+  so a machine that has never hit the cap does not re-read every transcript on every
+  invocation. The statusline path (`--fast`) may READ a learned cap but never goes
+  looking for one. Cached at `~/.claude/cost-tracker/cap.json`, outside the plugin, so
+  updates never touch it.
+- Resolution order: `COST_TRACKER_CAP_USD` / `BUDGET_TALLY_CAP_USD` → learned cap →
+  none. An explicit override always wins; with nothing at all, spend still prints
+  without a denominator rather than an invented one.
+- Only the per-**key** scope is usable. The same message shape carries the shared
+  **team** cap (historically 1300 → 1400); using that as a personal daily denominator
+  would divide by a number 35x too large, so scope is recorded and filtered on, never
+  assumed. A team observation is kept and shown as informational only.
+- If measured spend passes the cap with no refusal, `cap` says the cap is probably
+  stale and points at `--learn` instead of printing 150% and looking broken.
+
+### Fixed before it shipped
+- **Prose that quotes the refusal is not a source.** The first probe of this learner
+  read the message out of the very session that was investigating it — a sentence, not
+  a gateway response — and would have learned a cap from it. The learner now requires
+  `isApiErrorMessage`, the marker Claude Code sets on a rejected turn, which no amount
+  of quoting reproduces. Any conversation *about* a budget kill is a poisoned source.
+
+### Fixed
+- `tests/test_statusline_render.sh` was not sandboxing the config or transcripts dir, so
+  the "no cap means no denominator" assertion started reading this machine's real
+  learned cap and failed. Every store the renderer can reach is now redirected into the
+  temp dir — a missing one fails OPEN onto live state, which is the worse failure.
+
+### Added
+- `tests/test_cap_learning.py` — 12 tests: real refusal vs quoted prose, newest wins
+  within and across files, team cap never promoted, env override precedence, learn-once
+  caching, the fast path never scanning, `--set` provenance, a stale-cap warning, and a
+  malformed config being ignored rather than fatal. Mutation-tested 6/6.
+
 ## [0.2.0] — 2026-09-03
 
 ### Changed — a resumed session's spend is recovered instead of dropped

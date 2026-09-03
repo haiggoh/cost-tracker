@@ -2,7 +2,7 @@
 
 ## Current released version
 
-`0.2.0`
+`0.3.0`
 
 If this disagrees with `.claude-plugin/plugin.json`, treat everything below as
 suspect — the manifest is authoritative. `tests/test_version_consistency.sh`
@@ -10,6 +10,8 @@ asserts the two agree, along with the top numbered CHANGELOG heading.
 
 ## Shipped
 
+- The daily cap, learned from the gateway's own refusal message (`cap --learn`).
+- Reset-anchored attribution for resumed sessions (see 0.2.0).
 - Three labelled axes (session / today / local) and the per-session table.
 - Period reporting from the grouped history log.
 - Quarantine with grouped diagnostics.
