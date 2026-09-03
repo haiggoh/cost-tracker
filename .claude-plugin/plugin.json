@@ -1,6 +1,6 @@
 {
   "name": "cost-tracker",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Reports Claude Code spend on three explicitly labelled axes — session lifetime, today across all sessions, and free local inference — from the authoritative statusline cost ledger. Period-aware (today / week / month / --since), quarantines structurally invalid records with visible diagnostics instead of counting them, and ships the statusline wrapper PATTERN rather than claiming the status line.",
   "author": {
     "name": "Heiko Brantsch"

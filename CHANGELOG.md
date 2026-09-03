@@ -2,6 +2,22 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.1.2] — 2026-09-03
+
+### Added
+- `tests/test_statusline_render.sh` — 24 tests covering the renderer contract this
+  plugin inherited, including the one the contract explicitly asked to keep a
+  regression for: the field-shift bug. Fields are extracted in a single jq pass and
+  read with one `read`; when the delimiter was a TAB, an absent `.effort.level`
+  silently pushed the DIRECTORY into the effort slot, because tab is an IFS
+  whitespace character and `read` collapses runs of it. `\037` (ASCII US) is not
+  whitespace, so empty fields survive. Reverting the delimiter to a tab fails four
+  of these assertions.
+- Also asserted: absent fields are dropped rather than printed as `null` or `$0.00`,
+  variable-length names stay off line 1 so a long project name cannot wrap it, and
+  the renderer exits 0 on every malformed payload — a renderer bug must never blank
+  the status line.
+
 ## [0.1.1] — 2026-09-03
 
 ### Fixed
