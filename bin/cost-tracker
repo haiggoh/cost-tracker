@@ -239,6 +239,42 @@ def read_history():
 
 # --- savings (the local axis) -------------------------------------------------
 
+def read_savings_fast():
+    """Today's savings read straight from the DERIVED rollup — no subprocess.
+
+    The statusline path cannot afford to spawn the savings ledger on every render, and
+    the rollup exists precisely so a status line can read it without parsing a growing
+    log. Staleness is checked rather than assumed: the rollup records the event count it
+    was built from, so a log that has grown since means the rollup is behind and the
+    honest answer is None (unmeasured), not a stale number presented as current.
+    """
+    d = os.environ.get("LOCAL_AGENTS_LEDGER_DIR") or os.path.expanduser("~/.claude/local-agents")
+    rollup, events = os.path.join(d, "rollup.json"), os.path.join(d, "savings.jsonl")
+    try:
+        with open(rollup) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or "rows" not in data:
+        return None
+    try:
+        with open(events, errors="ignore") as f:
+            n = sum(1 for line in f if line.strip())
+    except OSError:
+        n = None
+    if n is not None and data.get("source_events") != n:
+        return None                      # rollup is behind the log: unmeasured, not stale
+    total, count = 0.0, 0
+    for row in data.get("rows") or []:
+        if row.get("day") != TODAY:
+            continue
+        if row.get("saved_usd") is None:
+            continue
+        total += float(row["saved_usd"])
+        count += int(row.get("events") or 0)
+    return {"saved_usd": round(total, 4), "events": count}
+
+
 def read_savings(period_flag):
     """Savings from the local-agents savings ledger, or None if unavailable.
 
@@ -312,11 +348,17 @@ def period_days(period, since=None):
     return days
 
 
-def collect(period="today", since=None):
+def collect(period="today", since=None, fast=False):
     """Build the report data. Membership is explicit in every field name."""
     days = set(period_days(period, since))
     ledger = read_ledger()
-    hist_groups, hist_bad = read_history()
+    # FAST PATH (statusline): the per-session ledger dir alone answers "today", so the
+    # history log — hundreds of thousands of lines on a long-lived machine — is not read
+    # at all. It is only needed for periods the overwritten ledger file cannot describe.
+    if fast:
+        hist_groups, hist_bad = {}, []
+    else:
+        hist_groups, hist_bad = read_history()
 
     quarantined = [
         {"source": "ledger", "session_id": r.session_id, "reason": r.reason, "raw": r.raw}
@@ -350,8 +392,11 @@ def collect(period="today", since=None):
 
     cloud_total = sum(s["period_usd"] for s in sessions.values())
     local_sessions = [sid for sid, s in sessions.items() if s["axis"] == "local"]
-    savings = read_savings(PERIODS.get(period, ("", "--today"))[1] if not since
-                           else "--since=" + since)
+    if fast:
+        savings = read_savings_fast()
+    else:
+        savings = read_savings(PERIODS.get(period, ("", "--today"))[1] if not since
+                              else "--since=" + since)
 
     cap = cap_usd()
     return {
@@ -510,6 +555,9 @@ def main(argv=None):
 
     st = sub.add_parser("statusline", help="one-line statusline segment (today)")
     st.add_argument("--json", action="store_true")
+    st.add_argument("--fast", action="store_true",
+                    help="skip the history log and read savings from the derived rollup; "
+                         "for the per-render statusline path")
 
     doc = sub.add_parser("doctor", help="show quarantined records and resolved config")
     doc.add_argument("--json", action="store_true")
@@ -527,7 +575,7 @@ def main(argv=None):
             ap.error("--since needs a YYYY-MM-DD date")
 
     period = getattr(args, "period", "today")
-    data = collect(period, since)
+    data = collect(period, since, fast=getattr(args, "fast", False))
 
     if getattr(args, "json", False):
         print(json.dumps(data, indent=2, sort_keys=True))

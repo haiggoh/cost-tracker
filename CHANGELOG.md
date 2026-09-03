@@ -2,6 +2,27 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.1.4] — 2026-09-03
+
+### Added
+- **The `today:` segment now actually renders in the status line.** Until now the CLI
+  could produce the frozen segment but nothing displayed it, so the status line still
+  showed only a session-lifetime figure. `statusline-render.sh` appends it when a
+  sibling `bin/cost-tracker` is present; opt out with `COST_TRACKER_STATUSLINE=0`.
+- **The lifetime figure is labelled `session $3.14` only when the today segment is
+  present.** Two dollar figures on one line must each name their axis or this
+  reproduces the very mislabel the plugin exists to prevent; alone, the label would be
+  noise, so it is not added.
+- `cost-tracker statusline --fast` — skips the history log (the ledger dir alone can
+  answer "today") and reads savings straight from the derived rollup instead of
+  spawning the savings ledger. 51ms rather than 192ms; a full render goes from ~49ms
+  to ~116ms. Staleness is checked, not assumed: if the savings log has grown past the
+  event count the rollup was built from, the answer is *unmeasured* rather than a stale
+  number presented as current.
+- 8 more renderer tests for the segment, and the pre-existing renderer assertions now
+  pin `COST_TRACKER_STATUSLINE=0` — with it on, "a missing cost is not rendered as
+  $0.00" would fail against a correct renderer on any day with $0.00 of spend.
+
 ## [0.1.3] — 2026-09-03
 
 ### Fixed

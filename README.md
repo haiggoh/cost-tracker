@@ -84,7 +84,7 @@ Set `COST_TRACKER_CAP_USD=40` (or `BUDGET_TALLY_CAP_USD`) for a cap.
 ```sh
 pytest tests/                            # 48 tests, incl. a 33-case fixture matrix
 bash tests/test_budget_ledger.sh         # 23 tests for the capture chain
-bash tests/test_statusline_render.sh     # 24 tests for the renderer contract
+bash tests/test_statusline_render.sh     # 32 tests for the renderer contract
 bash tests/test_wire_statusline.sh       # 20 tests for wiring, backup, rollback
 bash tests/test_version_consistency.sh   # manifest / changelog / roadmap agree
 ```
@@ -102,5 +102,6 @@ zeroed savings, ignored period window) are all caught.
 | `COST_TRACKER_CAP_USD` | unset (falls back to `BUDGET_TALLY_CAP_USD`) |
 | `COST_TRACKER_TODAY` | today, UTC — override for tests |
 | `COST_TRACKER_SAVINGS_CMD` | auto-discovered `local-agents` savings ledger |
+| `COST_TRACKER_STATUSLINE` | `1` — set `0` to keep the `today:` segment out of the status line |
 
 MIT.

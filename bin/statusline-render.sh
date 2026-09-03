@@ -104,9 +104,35 @@ if [ -n "$CTX_PCT" ]; then
 fi
 [ -n "$CTXSTR" ] && LINE1="${LINE1}${SEP}${CYAN}${CTXSTR}${RESET}"
 
-[ -n "$COST_FMT" ] && LINE1="${LINE1}${SEP}${YELLOW}\$${COST_FMT}${RESET}"
+# --- the TODAY segment (cost-tracker) ----------------------------------------
+# Two dollar figures on one line MUST each name their axis, or this reproduces the
+# mislabel bug the plugin exists to prevent: the renderer's own figure is the
+# SESSION LIFETIME, while the segment below is TODAY ACROSS ALL SESSIONS. So the
+# lifetime figure is prefixed "session" only when the today segment is actually
+# present — when it is alone there is nothing to confuse it with, and the label
+# would just be noise.
+#
+# Opt out with COST_TRACKER_STATUSLINE=0. --fast keeps this off the history log and
+# reads savings from the derived rollup, so it adds ~50ms rather than ~190ms. Wrapped
+# so that a failure loses the segment and nothing else: this file must always exit 0.
+TODAY_SEG=
+if [ "${COST_TRACKER_STATUSLINE:-1}" != "0" ]; then
+    CT_BIN="$(dirname "$0")/cost-tracker"
+    if [ -x "$CT_BIN" ]; then
+        TODAY_SEG=$(python3 "$CT_BIN" statusline --fast 2>/dev/null | head -1) || TODAY_SEG=
+    fi
+fi
+
+if [ -n "$COST_FMT" ]; then
+    if [ -n "$TODAY_SEG" ]; then
+        LINE1="${LINE1}${SEP}${YELLOW}session \$${COST_FMT}${RESET}"
+    else
+        LINE1="${LINE1}${SEP}${YELLOW}\$${COST_FMT}${RESET}"
+    fi
+fi
 [ -n "$FIVEH" ]  && LINE1="${LINE1}${SEP}${MAGENTA}5h ${FIVEH}%${RESET}"
 [ -n "$SEVEND" ] && LINE1="${LINE1}${SEP}${MAGENTA}7d ${SEVEND}%${RESET}"
+[ -n "$TODAY_SEG" ] && LINE1="${LINE1}${SEP}${YELLOW}${TODAY_SEG}${RESET}"
 
 # Line 2 carries the VARIABLE-LENGTH names (dir / branch / worktree), which can be
 # arbitrarily long per project -- keeping them off line 1 stops it from wrapping.
