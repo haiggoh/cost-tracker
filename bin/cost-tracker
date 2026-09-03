@@ -1,0 +1,551 @@
+#!/usr/bin/env python3
+"""cost-tracker — what did today cost, and on which axis?
+
+THE ONE RULE: every dollar figure this tool prints names its own membership.
+An unlabelled dollar figure is the bug this tool exists to prevent. On
+2026-08-10 a spend line labelled "prior sessions" silently included the
+running session and so under-counted ~$14 of $18.16; the label had inferred
+membership from session age instead of stating what it summed. So:
+
+  THREE AXES, ALWAYS LABELLED
+    session   one Claude Code session's LIFETIME cost (may span UTC days)
+    today     gateway spend across ALL sessions with an entry on one UTC day
+    local     localhost inference — free compute, reported as savings, never
+              added to cloud spend
+
+Reads (never writes) two stores produced by the statusline capture wrapper:
+
+  ~/.claude/cost-ledger/<session_id>   one line, latest render wins
+        "<utc_date> <cum> [<baseline>] [<local_phantom_cum>]"
+  ~/.claude/cost-ledger-history.log    append-only, one line per render
+        "<iso_ts> <session_id> <utc_date> <cum> <baseline> [<raw_cost>]"
+
+The per-session file is OVERWRITTEN every render, so it can only answer
+"today". Any longer period comes from the history log, grouped by
+(session_id, utc_date) with the LAST row per group winning — never by adding
+rows, and never by adding into an assumed-membership subtotal.
+
+Structurally invalid records are QUARANTINED with a visible reason, never
+counted as a session and never silently dropped. `doctor` prints them.
+
+Environment overrides (all optional):
+  COST_TRACKER_LEDGER_DIR   default ~/.claude/cost-ledger
+  COST_TRACKER_HISTORY      default ~/.claude/cost-ledger-history.log
+  COST_TRACKER_CAP_USD      daily cap; falls back to BUDGET_TALLY_CAP_USD, then unset
+  COST_TRACKER_TODAY        override "today" as YYYY-MM-DD (tests)
+  COST_TRACKER_SAVINGS_CMD  argv (shell-split) printing savings-ledger JSON
+"""
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
+
+CONTRACT = 1
+
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+LEDGER_DIR = os.environ.get(
+    "COST_TRACKER_LEDGER_DIR", os.path.expanduser("~/.claude/cost-ledger")
+)
+HISTORY_PATH = os.environ.get(
+    "COST_TRACKER_HISTORY", os.path.expanduser("~/.claude/cost-ledger-history.log")
+)
+TODAY = os.environ.get("COST_TRACKER_TODAY") or datetime.now(timezone.utc).date().isoformat()
+
+
+def cap_usd():
+    """The daily cap, or None. None is a real answer, not zero.
+
+    The authoritative cap lives on the gateway, but llmgw's /key/info returns
+    403 for a virtual key scoped to llm_api_routes, so it is unreadable from
+    here. Rather than invent a number, an unset cap prints spend with no
+    denominator. Never probes the network: this runs in the statusline path.
+    """
+    for var in ("COST_TRACKER_CAP_USD", "BUDGET_TALLY_CAP_USD"):
+        raw = os.environ.get(var)
+        if raw:
+            try:
+                v = float(raw)
+            except ValueError:
+                continue
+            if v > 0:
+                return v
+    return None
+
+
+# --- parsing -----------------------------------------------------------------
+
+class Record:
+    """One parsed ledger record. `valid` False means QUARANTINED with a reason."""
+
+    __slots__ = ("session_id", "valid", "reason", "day", "cum", "baseline",
+                 "phantom", "axis", "raw")
+
+    def __init__(self, session_id, raw, valid, reason="", day=None, cum=0.0,
+                 baseline=0.0, phantom=None, axis=""):
+        self.session_id = session_id
+        self.raw = raw
+        self.valid = valid
+        self.reason = reason
+        self.day = day
+        self.cum = cum
+        self.baseline = baseline
+        self.phantom = phantom
+        self.axis = axis
+
+    @property
+    def day_usd(self):
+        """Spend attributable to self.day — the delta over the baseline carried
+        into that day. NOT the lifetime cumulative: charging a multi-day
+        session's whole lifetime to the day it last rendered once showed a
+        4-day $75 session as 189% of a $40 cap."""
+        if not self.valid or self.axis == "local":
+            return 0.0
+        return self.cum - self.baseline
+
+    @property
+    def lifetime_usd(self):
+        """The session axis: cumulative cost since the session began."""
+        if not self.valid or self.axis == "local":
+            return 0.0
+        return self.cum
+
+
+def _valid_date(s):
+    if not DATE_RE.match(s):
+        return False
+    try:
+        date.fromisoformat(s)
+    except ValueError:
+        return False       # shape-valid but not a real date, e.g. 2026-13-45
+    return True
+
+
+def parse_ledger_fields(session_id, fields, raw):
+    """Apply the validation rules in a fixed order, so a record with two
+    problems always reports the same one."""
+    if len(fields) < 2:
+        return Record(session_id, raw, False, "too-few-fields")
+    if len(fields) > 4:
+        return Record(session_id, raw, False, "too-many-fields")
+    if not _valid_date(fields[0]):
+        # A history line starts with an ISO timestamp and lands here — which is
+        # why history is kept OUTSIDE the ledger dir. Structural, not luck.
+        return Record(session_id, raw, False, "bad-date")
+    nums = []
+    for f in fields[1:]:
+        try:
+            nums.append(float(f))
+        except ValueError:
+            return Record(session_id, raw, False, "non-numeric")
+    cum = nums[0]
+    baseline = nums[1] if len(nums) >= 2 else 0.0
+    phantom = nums[2] if len(nums) >= 3 else None
+    if cum < 0 or baseline < 0:
+        return Record(session_id, raw, False, "negative-cost")
+    # A local render zeroes the cost field while the baseline keeps the cumulative
+    # carried into the day, so cum == 0 with baseline > 0 is the LOCAL signature —
+    # not an anomaly. It is also the only shape a pre-2026-08-29 local record has,
+    # since field 4 did not exist yet. This is structural, not a heuristic: cum is a
+    # LIFETIME cumulative, so a cloud session that has already spent can never
+    # report 0 again. Quarantining these (an earlier version of this parser did)
+    # discards 139 real records on this machine and calls working capture broken.
+    legacy_local = (cum == 0.0 and baseline > 0.0)
+    if baseline > cum and not legacy_local:
+        # cum and baseline BOTH nonzero with baseline larger is a genuine capture
+        # anomaly. Clamping it to 0 would hide that behind a plausible figure, so
+        # quarantine it and let `doctor` show it.
+        return Record(session_id, raw, False, "baseline-exceeds-cumulative")
+    # Free compute must never enter cloud spend, and a zero here is a suppressed
+    # phantom, not a session that has yet to spend.
+    axis = "local" if ((phantom is not None or legacy_local) and cum == 0.0) else "cloud"
+    return Record(session_id, raw, True, "", fields[0], cum, baseline, phantom, axis)
+
+
+def parse_ledger_line(session_id, text):
+    fields = text.split()
+    return parse_ledger_fields(session_id, fields, text.strip())
+
+
+def read_ledger():
+    """Every record currently in the ledger dir, valid or quarantined."""
+    out = []
+    try:
+        names = sorted(os.listdir(LEDGER_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if name.endswith(".tmp") or name.startswith("."):
+            continue
+        path = os.path.join(LEDGER_DIR, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", errors="ignore") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if not text.strip():
+            out.append(Record(name, "", False, "empty"))
+            continue
+        out.append(parse_ledger_line(name, text))
+    return out
+
+
+def read_history():
+    """Group history rows by (session_id, utc_date), LAST row per group wins.
+
+    Rows are cumulative snapshots, so summing rows would multiply-count a
+    session by however many times its statusline rendered. Grouping is the
+    whole point: D15's rule is group by (session_id, UTC day) and sum groups.
+    """
+    groups = {}
+    quarantined = []
+    try:
+        f = open(HISTORY_PATH, "r", errors="ignore")
+    except OSError:
+        return groups, quarantined
+    with f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 5:
+                quarantined.append((lineno, "too-few-fields", line))
+                continue
+            _ts, sid, day = parts[0], parts[1], parts[2]
+            rec = parse_ledger_fields(sid, [day] + parts[3:5], line)
+            if not rec.valid:
+                quarantined.append((lineno, rec.reason, line))
+                continue
+            # field 6 (raw pre-gate cost) marks a local render: cost was zeroed
+            # but the phantom kept accruing, so the axis is legible after the fact.
+            if len(parts) >= 6:
+                try:
+                    raw_cost = float(parts[5])
+                except ValueError:
+                    raw_cost = 0.0
+                if rec.cum == 0.0 and raw_cost > 0:
+                    rec.axis = "local"
+            groups[(sid, day)] = rec       # later line wins
+    return groups, quarantined
+
+
+# --- savings (the local axis) -------------------------------------------------
+
+def read_savings(period_flag):
+    """Savings from the local-agents savings ledger, or None if unavailable.
+
+    None is not zero. Zero saved is a claim that local work happened and was
+    worth nothing; None says nothing measured it. Reporting an absent ledger
+    as $0.00 understates savings forever and looks correct while doing it.
+    """
+    cmd = os.environ.get("COST_TRACKER_SAVINGS_CMD")
+    if cmd:
+        argv = shlex.split(cmd)
+    else:
+        found = _find_savings_ledger()
+        if not found:
+            return None
+        argv = [sys.executable, found]
+    argv = argv + ["report", period_flag, "--json"]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or "saved_usd" not in data:
+        return None
+    return data
+
+
+def _find_savings_ledger():
+    import glob as _glob
+    roots = [
+        os.path.expanduser("~/ClaudeWorkspace/local-agents/bin/savings-ledger.py"),
+    ]
+    roots += sorted(_glob.glob(os.path.expanduser(
+        "~/.claude/plugins/cache/*/local-agents/*/bin/savings-ledger.py")), reverse=True)
+    for p in roots:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+# --- periods ------------------------------------------------------------------
+
+PERIODS = {
+    "today": ("today", "--today"),
+    "week": ("last 7 days", "--week"),
+    "month": ("last 30 days", "--month"),
+}
+
+
+def period_days(period, since=None):
+    """The inclusive list of UTC dates a period covers, newest last."""
+    today = date.fromisoformat(TODAY)
+    if since:
+        start = date.fromisoformat(since)
+    elif period == "week":
+        start = today - timedelta(days=6)
+    elif period == "month":
+        start = today - timedelta(days=29)
+    else:
+        start = today
+    if start > today:
+        start = today
+    days, d = [], start
+    while d <= today:
+        days.append(d.isoformat())
+        d += timedelta(days=1)
+    return days
+
+
+def collect(period="today", since=None):
+    """Build the report data. Membership is explicit in every field name."""
+    days = set(period_days(period, since))
+    ledger = read_ledger()
+    hist_groups, hist_bad = read_history()
+
+    quarantined = [
+        {"source": "ledger", "session_id": r.session_id, "reason": r.reason, "raw": r.raw}
+        for r in ledger if not r.valid
+    ]
+    quarantined += [
+        {"source": f"history:{lineno}", "session_id": "", "reason": reason, "raw": raw}
+        for lineno, reason, raw in hist_bad
+    ]
+
+    # (session_id, day) -> record. History first, then let the live ledger win
+    # for the day it describes: it is the newest render of that session.
+    merged = dict(hist_groups)
+    for r in ledger:
+        if r.valid:
+            merged[(r.session_id, r.day)] = r
+
+    per_session_day = {k: v for k, v in merged.items() if k[1] in days}
+
+    sessions = defaultdict(lambda: {"period_usd": 0.0, "lifetime_usd": 0.0,
+                                    "days": [], "axis": "cloud"})
+    for (sid, day), rec in sorted(per_session_day.items()):
+        s = sessions[sid]
+        s["period_usd"] += rec.day_usd
+        # lifetime is a cumulative, so the LARGEST seen is the session's total —
+        # never a sum of per-day cumulatives.
+        s["lifetime_usd"] = max(s["lifetime_usd"], rec.lifetime_usd)
+        s["days"].append(day)
+        if rec.axis == "local" and s["period_usd"] == 0.0:
+            s["axis"] = "local"
+
+    cloud_total = sum(s["period_usd"] for s in sessions.values())
+    local_sessions = [sid for sid, s in sessions.items() if s["axis"] == "local"]
+    savings = read_savings(PERIODS.get(period, ("", "--today"))[1] if not since
+                           else "--since=" + since)
+
+    cap = cap_usd()
+    return {
+        "contract": CONTRACT,
+        "period": PERIODS.get(period, (period, ""))[0] if not since else f"since {since}",
+        "period_days_utc": sorted(days),
+        "today_utc": TODAY,
+        "membership": ("all sessions with a ledger or history entry on "
+                       + ("this UTC day" if len(days) == 1 else "these UTC days")),
+        "cloud_usd": round(cloud_total, 4),
+        "cap_usd": cap,
+        "pct_of_cap": (round(cloud_total / cap, 4) if cap else None),
+        "sessions": {sid: {"period_usd": round(s["period_usd"], 4),
+                           "lifetime_usd": round(s["lifetime_usd"], 4),
+                           "days": s["days"], "axis": s["axis"]}
+                     for sid, s in sorted(sessions.items())},
+        "local_sessions": sorted(local_sessions),
+        "local_saved_usd": (savings.get("saved_usd") if savings else None),
+        "local_events": (savings.get("events") if savings else None),
+        "quarantined": quarantined,
+    }
+
+
+# --- rendering ----------------------------------------------------------------
+
+def render_table(data, short_ids=True):
+    """The per-session breakdown table (D16). The table IS the audit of the
+    label: a reader can add the Period column themselves and see exactly which
+    sessions the total is made of, instead of trusting a prose scope."""
+    lines = []
+    period = data["period"]
+    lines.append(f"cost-tracker — period: {period} (UTC {data['period_days_utc'][0]}"
+                 + (f" … {data['period_days_utc'][-1]}" if len(data['period_days_utc']) > 1 else "")
+                 + ")")
+    lines.append(f"membership: {data['membership']}")
+    lines.append("")
+    idw = 12 if short_ids else 36
+    head = f"{'session':<{idw}}  {'axis':<6}  {period + ' $':>14}  {'session lifetime $':>18}"
+    lines.append(head)
+    lines.append("-" * len(head))
+    if not data["sessions"]:
+        lines.append("(no sessions in this period)")
+    for sid, s in data["sessions"].items():
+        sid_disp = sid[:idw] if short_ids else sid
+        lines.append(f"{sid_disp:<{idw}}  {s['axis']:<6}  {s['period_usd']:>14.2f}  "
+                     f"{s['lifetime_usd']:>18.2f}")
+    lines.append("-" * len(head))
+    # The total fills ONLY the period column. A "total lifetime" would be the sum
+    # of overlapping cumulatives across different sessions — a number with no
+    # meaning, and exactly the kind of figure this tool refuses to print.
+    lines.append(f"{'TOTAL cloud':<{idw}}  {'':<6}  {data['cloud_usd']:>14.2f}  "
+                 f"{'—':>18}")
+    cap = data["cap_usd"]
+    if cap:
+        lines.append(f"{'cap':<{idw}}  {'':<6}  {cap:>14.2f}  "
+                     f"{'(' + format(data['pct_of_cap'] * 100, '.0f') + '% used)':>18}")
+    if data["local_saved_usd"] is not None:
+        lines.append(f"{'local saved':<{idw}}  {'local':<6}  "
+                     f"{data['local_saved_usd']:>14.2f}  "
+                     f"{'(' + str(data['local_events']) + ' dispatches)':>18}")
+    else:
+        lines.append("local saved   local   not measured (savings ledger unavailable)")
+    if data["local_sessions"]:
+        lines.append(f"note: {len(data['local_sessions'])} local session(s) contribute $0 "
+                     "to cloud spend by design")
+    if data["quarantined"]:
+        sids = {q["session_id"] or _sid_from_raw(q["raw"]) for q in data["quarantined"]}
+        lines.append(f"⚠ {len(data['quarantined'])} record(s) across {len(sids)} session(s) "
+                     "QUARANTINED as structurally invalid — run `cost-tracker doctor`")
+    return "\n".join(lines)
+
+
+def render_statusline(data):
+    """The frozen one-line statusline segment.
+
+      with a cap:    today: cloud $30.12/$40 · local saved $4.80
+      without a cap: today: cloud $12.40 · local saved $4.80
+
+    The axis word is part of the string, not decoration: this segment coexists
+    with the renderer's own session-lifetime "$<cost>", and two unlabelled
+    dollar figures on one line is the mislabel trap all over again.
+    """
+    cap = data["cap_usd"]
+    label = "today" if len(data["period_days_utc"]) == 1 else data["period"]
+    if cap:
+        seg = f"{label}: cloud ${data['cloud_usd']:.2f}/${cap:.0f}"
+    else:
+        seg = f"{label}: cloud ${data['cloud_usd']:.2f}"
+    if data["local_saved_usd"] is not None:
+        seg += f" · local saved ${data['local_saved_usd']:.2f}"
+    return seg
+
+
+def render_doctor(data):
+    lines = [f"cost-tracker doctor — ledger dir: {LEDGER_DIR}",
+             f"                     history:    {HISTORY_PATH}",
+             f"today (UTC): {data['today_utc']}   cap: "
+             + (f"${data['cap_usd']:.2f}" if data["cap_usd"] else "unset (no denominator printed)")]
+    q = data["quarantined"]
+    lines.append("")
+    if not q:
+        lines.append("No quarantined records. Every record parsed as a valid session-day.")
+        return "\n".join(lines)
+    # GROUPED by (reason, session): one bad session renders its statusline hundreds
+    # of times, so an ungrouped list is 131 near-identical lines that hide the fact
+    # that only two sessions are affected. The count is the volume; the group is the
+    # finding.
+    groups = defaultdict(lambda: {"n": 0, "example": "", "sources": set()})
+    for item in q:
+        key = (item["reason"], item["session_id"] or _sid_from_raw(item["raw"]))
+        g = groups[key]
+        g["n"] += 1
+        g["sources"].add(item["source"].split(":")[0])
+        if not g["example"]:
+            g["example"] = item["raw"]
+    lines.append(f"{len(q)} QUARANTINED record(s) in {len(groups)} group(s) — each counted "
+                 "as $0 and excluded from every figure, never silently dropped:")
+    for (reason, sid), g in sorted(groups.items(), key=lambda kv: -kv[1]["n"]):
+        lines.append(f"  [{reason}] session {sid or '(unknown)'} — {g['n']} record(s) "
+                     f"in {'+'.join(sorted(g['sources']))}")
+        lines.append(f"      e.g. {g['example'][:140]!r}")
+    lines.append("")
+    lines.append("baseline-exceeds-cumulative with BOTH values nonzero is the pre-2026-08-29")
+    lines.append("local->cloud handoff: the cost field was accruing real cloud spend while the")
+    lines.append("baseline still held the suppressed local phantom, so that day's true split is")
+    lines.append("unrecoverable. The endpoint-change guard in cost-ledger-capture.sh prevents")
+    lines.append("new ones; these are historical and stay quarantined rather than guessed at.")
+    return "\n".join(lines)
+
+
+def _sid_from_raw(raw):
+    """A history line carries its session id in field 2; the ledger record does not
+    carry one at all (the FILENAME is the id, which the caller already passed)."""
+    parts = raw.split()
+    return parts[1] if len(parts) > 1 and "T" in parts[0] else ""
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="cost-tracker",
+        description="Report Claude Code spend on three labelled axes: session, today, local.")
+    sub = ap.add_subparsers(dest="cmd")
+
+    def add_period(p):
+        g = p.add_mutually_exclusive_group()
+        g.add_argument("--today", action="store_const", const="today", dest="period")
+        g.add_argument("--week", action="store_const", const="week", dest="period")
+        g.add_argument("--month", action="store_const", const="month", dest="period")
+        p.add_argument("--since", metavar="YYYY-MM-DD")
+        p.add_argument("--json", action="store_true")
+        p.set_defaults(period="today")
+
+    rep = sub.add_parser("report", help="per-session breakdown table for a period")
+    add_period(rep)
+    rep.add_argument("--full-ids", action="store_true", help="print full session UUIDs")
+
+    st = sub.add_parser("statusline", help="one-line statusline segment (today)")
+    st.add_argument("--json", action="store_true")
+
+    doc = sub.add_parser("doctor", help="show quarantined records and resolved config")
+    doc.add_argument("--json", action="store_true")
+
+    args = ap.parse_args(argv)
+    cmd = args.cmd or "report"
+    if cmd == "report" and args.cmd is None:
+        args = ap.parse_args(["report"] + (argv or []))
+
+    since = getattr(args, "since", None)
+    if since:
+        try:
+            date.fromisoformat(since)
+        except ValueError:
+            ap.error("--since needs a YYYY-MM-DD date")
+
+    period = getattr(args, "period", "today")
+    data = collect(period, since)
+
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    if cmd == "statusline":
+        print(render_statusline(data))
+    elif cmd == "doctor":
+        print(render_doctor(data))
+    else:
+        print(render_table(data, short_ids=not getattr(args, "full_ids", False)))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        sys.exit(0)
+    except Exception as e:               # a reporting bug must never break a caller
+        print(f"cost-tracker: skipped ({e})", file=sys.stderr)
+        sys.exit(0)

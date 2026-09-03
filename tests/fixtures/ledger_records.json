@@ -1,0 +1,365 @@
+[
+  {
+    "name": "two_field_legacy",
+    "case": "two-field legacy",
+    "content": "2026-09-02 12.5",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "two_field_legacy_zero",
+    "case": "two-field legacy",
+    "content": "2026-09-03 0",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "three_field_current",
+    "case": "three-field current",
+    "content": "2026-09-03 100 40",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 60,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "three_field_current_history",
+    "case": "three-field current",
+    "content": "2026-09-02 100 40",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "malformed_bad_date",
+    "case": "malformed",
+    "content": "2026-13-45 12.5",
+    "expect": {
+      "valid": false,
+      "reason": "bad-date",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "malformed_bad_date_text",
+    "case": "malformed",
+    "content": "not-a-date 12.5",
+    "expect": {
+      "valid": false,
+      "reason": "bad-date",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "history_style_timestamp",
+    "case": "history-style-timestamp",
+    "content": "2026-09-03T10:11:12Z 12.5",
+    "expect": {
+      "valid": false,
+      "reason": "bad-date",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "history_style_timestamp_fields",
+    "case": "history-style-timestamp",
+    "content": "2026-09-03T10:11:12Z 12.5 5",
+    "expect": {
+      "valid": false,
+      "reason": "bad-date",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "multi_day_earlier",
+    "case": "multi-day (dated an earlier day)",
+    "content": "2026-09-02 250 100",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "multi_day_earlier_legacy",
+    "case": "multi-day (dated an earlier day)",
+    "content": "2026-08-31 999",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "resumed_local_then_cloud",
+    "case": "resumed (local phantom then cloud)",
+    "content": "2026-09-03 50 20 10",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 30,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "resumed_local_then_cloud_history",
+    "case": "resumed (local phantom then cloud)",
+    "content": "2026-09-02 50 20 10",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "compacted_large_cumulative",
+    "case": "compacted (ordinary valid three-field record with a large cumulative)",
+    "content": "2026-09-03 1000000 250000",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 750000,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "compacted_large_cumulative_history",
+    "case": "compacted (ordinary valid three-field record with a large cumulative)",
+    "content": "2026-09-02 1000000 250000",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "gateway_cloud",
+    "case": "gateway (ordinary cloud)",
+    "content": "2026-09-03 42.75",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 42.75,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "gateway_cloud_history",
+    "case": "gateway (ordinary cloud)",
+    "content": "2026-09-02 42.75",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "local_field2_zero",
+    "case": "local (four fields with field2 exactly 0)",
+    "content": "2026-09-03 0 0 0",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "local"
+    }
+  },
+  {
+    "name": "local_field2_zero_history",
+    "case": "local (four fields with field2 exactly 0)",
+    "content": "2026-09-02 0 0 0",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "local"
+    }
+  },
+  {
+    "name": "too_few_fields",
+    "case": "malformed",
+    "content": "2026-09-03",
+    "expect": {
+      "valid": false,
+      "reason": "too-few-fields",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "too_many_fields",
+    "case": "too-many-fields",
+    "content": "2026-09-03 10 5 1 2",
+    "expect": {
+      "valid": false,
+      "reason": "too-many-fields",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "non_numeric_field2",
+    "case": "non-numeric",
+    "content": "2026-09-03 abc",
+    "expect": {
+      "valid": false,
+      "reason": "non-numeric",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "non_numeric_field3",
+    "case": "non-numeric",
+    "content": "2026-09-03 10 xyz",
+    "expect": {
+      "valid": false,
+      "reason": "non-numeric",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "baseline_exceeds_cumulative",
+    "case": "baseline-exceeds-cumulative",
+    "content": "2026-09-03 10 50",
+    "expect": {
+      "valid": false,
+      "reason": "baseline-exceeds-cumulative",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "baseline_exceeds_cumulative_four_fields",
+    "case": "baseline-exceeds-cumulative",
+    "content": "2026-09-03 10 50 5",
+    "expect": {
+      "valid": false,
+      "reason": "baseline-exceeds-cumulative",
+      "today_usd": 0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "legacy_local_no_field4",
+    "case": "local (legacy 3-field, cost zeroed)",
+    "content": "2026-09-03 0 5.5",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0.0,
+      "axis": "local"
+    }
+  },
+  {
+    "name": "legacy_local_no_field4_earlier",
+    "case": "local (legacy 3-field, cost zeroed)",
+    "content": "2026-08-27 0 114.25017249999998",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0.0,
+      "axis": "local"
+    }
+  },
+  {
+    "name": "preguard_handoff_anomaly",
+    "case": "baseline-exceeds-cumulative",
+    "content": "2026-09-03 1.11415125 3.6144925",
+    "expect": {
+      "valid": false,
+      "reason": "baseline-exceeds-cumulative",
+      "today_usd": 0.0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "empty_file",
+    "case": "malformed",
+    "content": "",
+    "expect": {
+      "valid": false,
+      "reason": "empty",
+      "today_usd": 0.0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "whitespace_only",
+    "case": "malformed",
+    "content": "   \n",
+    "expect": {
+      "valid": false,
+      "reason": "empty",
+      "today_usd": 0.0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "trailing_newline_valid",
+    "case": "three-field current",
+    "content": "2026-09-03 7.5 2.5\n",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 5.0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "comma_decimal_locale",
+    "case": "non-numeric",
+    "content": "2026-09-03 12,5",
+    "expect": {
+      "valid": false,
+      "reason": "non-numeric",
+      "today_usd": 0.0,
+      "axis": ""
+    }
+  },
+  {
+    "name": "zero_delta_today",
+    "case": "gateway (ordinary cloud)",
+    "content": "2026-09-03 9.75 9.75",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0.0,
+      "axis": "cloud"
+    }
+  },
+  {
+    "name": "negative_cumulative",
+    "case": "malformed",
+    "content": "2026-09-03 -5",
+    "expect": {
+      "valid": false,
+      "reason": "negative-cost",
+      "today_usd": 0.0,
+      "axis": ""
+    }
+  }
+]

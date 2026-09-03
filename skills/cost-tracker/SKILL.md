@@ -1,0 +1,75 @@
+---
+name: cost-tracker
+description: "Use when reporting, reconciling, or reasoning about Claude Code API spend — today's cost, a session's cost, whether a budget cap is close, what local offload saved, or why two spend figures disagree. Also use before writing any dollar figure about token spend into a message, a note, or a status line, and when the cost ledger looks wrong (a total that exceeds the cap, a session counted twice, a figure that dropped). Do NOT use for non-spend statusline work or for gateway auth problems."
+---
+
+# cost-tracker
+
+## The one rule
+
+**Every dollar figure names its own membership.** An unlabelled figure is not a
+minor style problem; it is the failure mode this tool was built after.
+
+On 2026-08-10 a spend line labelled "prior sessions" silently included the running
+session and under-counted **$14 of $18.16**. The label had *inferred* membership
+from session age — a long-running session already has a ledger entry, so it was in
+the total all along. The fix is not a better guess; it is never guessing:
+
+| Axis | Means | Never |
+|---|---|---|
+| `session` | one session's LIFETIME cost, possibly across several UTC days | called "today" |
+| `today` | gateway spend across ALL sessions with an entry on one UTC day | assumed to exclude the current session |
+| `local` | localhost inference — free compute, reported as savings | added to cloud spend |
+
+Two dollar figures on one line with only one label is the same bug wearing a hat.
+The status line already shows a session-lifetime `$cost`; the segment this plugin
+adds says `today: cloud …` out loud for exactly that reason.
+
+## Commands
+
+```
+cost-tracker report                      # today, per-session table
+cost-tracker report --week   --json      # 7 days; --month, --since YYYY-MM-DD
+cost-tracker statusline                  # today: cloud $30.12/$40 · local saved $4.80
+cost-tracker doctor                      # quarantined records + resolved config
+```
+
+The table **is** the audit of the label — a reader can total the period column
+themselves. Quote it rather than retyping numbers out of it.
+
+## Reading it honestly
+
+- **A quarantined record is not a missing one.** It counts as $0, is excluded from
+  every figure, and is listed by `doctor` with a reason. Never describe a total as
+  complete while records are quarantined; say how many sessions are affected.
+- **An unset cap prints no denominator.** The authoritative cap lives on the
+  gateway and llmgw's `/key/info` returns 403 for a scoped virtual key, so it is
+  unreadable from here. Set `COST_TRACKER_CAP_USD` if you want a percentage.
+  Do not substitute a remembered number for a read one.
+- **`local saved: not measured` is not `$0.00`.** Zero saved claims local work
+  happened and was worth nothing; not-measured says nothing priced it. Reporting an
+  absent savings ledger as zero understates savings forever while looking right.
+- **A period longer than today comes from the history log**, grouped by
+  `(session_id, utc_date)` with the last row winning. Rows are cumulative
+  snapshots: summing them multiplies a session by how many times it rendered.
+- **Local sessions show $0 cloud by design.** `<date> 0 <baseline>` is a local
+  record, not a corrupt one — the cost field is zeroed while the baseline keeps the
+  cumulative carried in.
+
+## When a figure looks wrong
+
+1. `cost-tracker doctor` — quarantine first, grouped by session.
+2. `cost-tracker report --json` — the exact per-session split.
+3. `~/.claude/cost-ledger-history.log` — one row per statusline render, so an
+   anomaly stays diagnosable after the per-session file has been overwritten.
+
+Do not "fix" a figure by clamping it. `baseline-exceeds-cumulative` with both
+values nonzero is a real pre-2026-08-29 local→cloud handoff whose split is
+unrecoverable; it stays quarantined rather than guessed at.
+
+## Wiring on a machine
+
+A session has one status line, so this plugin never claims it. It ships the wrapper
+pattern; `install/wire-statusline.sh` (dry-run by default) points a machine's
+`~/.claude/scripts/` copies at the plugin, backs up what it replaces, and rolls
+back if the chain stops rendering.
