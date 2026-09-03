@@ -52,9 +52,16 @@ themselves. Quote it rather than retyping numbers out of it.
 - **A period longer than today comes from the history log**, grouped by
   `(session_id, utc_date)` with the last row winning. Rows are cumulative
   snapshots: summing them multiplies a session by how many times it rendered.
-- **Local sessions show $0 cloud by design.** `<date> 0 <baseline>` is a local
-  record, not a corrupt one — the cost field is zeroed while the baseline keeps the
-  cumulative carried in.
+- **Local sessions show $0 cloud by design.** A local render zeroes the cost field
+  while the baseline keeps the cumulative carried in. With field 4 present that is
+  unambiguously local; a 3-field `<date> 0 <baseline>` (before 2026-08-29) could
+  equally be a resumed counter that has not billed yet, so it reports as `zero`
+  rather than being asserted local. Either way it is $0.
+- **A figure marked `*` is a FLOOR, not an estimate.** The session's cost counter
+  RESET mid-period — Claude Code restarts `total_cost_usd` at 0 when a session is
+  resumed — so the baseline carried into the day describes a counter that no longer
+  exists. The day is anchored at the reset, which means spend earlier that same day,
+  before the reset, is not in the ledger at all. Say "at least $X" for those.
 
 ## When a figure looks wrong
 
@@ -63,9 +70,10 @@ themselves. Quote it rather than retyping numbers out of it.
 3. `~/.claude/cost-ledger-history.log` — one row per statusline render, so an
    anomaly stays diagnosable after the per-session file has been overwritten.
 
-Do not "fix" a figure by clamping it. `baseline-exceeds-cumulative` with both
-values nonzero is a real pre-2026-08-29 local→cloud handoff whose split is
-unrecoverable; it stays quarantined rather than guessed at.
+Do not "fix" a figure by clamping it. A cumulative BELOW its carried-in baseline is
+a resumed counter, and clamping the negative delta to 0 is what reported $16.07 of
+real spend as $0.00 on 2026-08-26 — a plausible-looking figure hiding a whole
+session. Anchor at the reset and label the result a floor.
 
 ## Wiring on a machine
 

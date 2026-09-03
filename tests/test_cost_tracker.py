@@ -29,6 +29,7 @@ def test_fixture_matrix(tmp_path, fx):
     assert rec.valid is exp["valid"], f"{fx['name']}: {rec.reason}"
     assert rec.reason == exp["reason"]
     assert rec.axis == exp["axis"]
+    assert rec.reset_anchored is exp.get("reset_anchored", False)
     # day_usd is the spend attributable to the record's OWN day; the fixture's
     # today_usd is what a "today" report may count, which is 0 for a record dated
     # any other day. Assert both, so neither the record maths nor the period
@@ -38,19 +39,101 @@ def test_fixture_matrix(tmp_path, fx):
     else:
         assert exp["today_usd"] == 0.0
     counted = ct.collect("today")["cloud_usd"]
-    assert counted == pytest.approx(exp["today_usd"])
+    # abs tolerance: collect() rounds published figures to 4dp on purpose, so a
+    # fixture carrying full float precision must not be compared exactly.
+    assert counted == pytest.approx(exp["today_usd"], abs=1e-4)
 
 
 def test_quarantined_records_are_excluded_from_the_total(tmp_path):
     ct, ledger = load_ct(tmp_path)
     (ledger / "aaaaaaaa-0000-0000-0000-000000000001").write_text("2026-09-03 10 4")
-    (ledger / "aaaaaaaa-0000-0000-0000-000000000002").write_text("2026-09-03 1.1 3.6")
+    (ledger / "aaaaaaaa-0000-0000-0000-000000000002").write_text("2026-09-03 -5")
     data = ct.collect("today")
     assert data["cloud_usd"] == pytest.approx(6.0)
     assert len(data["quarantined"]) == 1
-    assert data["quarantined"][0]["reason"] == "baseline-exceeds-cumulative"
+    assert data["quarantined"][0]["reason"] == "negative-cost"
     # a quarantined record is not a session
     assert "aaaaaaaa-0000-0000-0000-000000000002" not in data["sessions"]
+
+
+def test_a_resumed_counter_is_anchored_at_the_reset_not_clamped_to_zero(tmp_path):
+    """The real 2026-08-26 case. Claude Code's total_cost_usd restarts at 0 on resume,
+    so the cumulative falls below the baseline carried into the day. Subtracting the
+    stale baseline is negative and clamping it to 0 reported $16.07 of real spend as
+    $0.00 — which is what budget-tally did, and why this needed fixing rather than
+    quarantining."""
+    ct, ledger = load_ct(tmp_path)
+    sid = "e4d10d09-35c1-46b7-97de-56157c965fcc"
+    (ledger / sid).write_text("2026-09-03 16.06745625 17.350854999999992")
+    data = ct.collect("today")
+    assert data["cloud_usd"] == pytest.approx(16.06745625, abs=1e-4)
+    assert data["reset_anchored_sessions"] == [sid]
+    assert data["sessions"][sid]["reset_anchored"] is True
+    assert data["quarantined"] == []
+    table = ct.render_table(data)
+    assert "16.07*" in table                      # the figure is marked
+    assert "FLOORS" in table                      # and named as a floor
+    assert "RESET" in ct.render_doctor(data)
+
+
+def test_a_reset_that_climbs_back_above_the_stale_baseline_is_still_detected(tmp_path):
+    """Session 960b07ca, 2026-08-24: 0 -> 1.11 -> 3.68 -> 15.998 against a baseline of
+    3.614. The FINAL record looks perfectly ordinary, so anchoring on it alone
+    under-counted the day by exactly that stale $3.61. The reset is only visible in the
+    row sequence, and the live ledger record must not erase what history established."""
+    ct, ledger = load_ct(tmp_path)
+    sid = "960b07ca-a2e8-4bb5-978c-c2b4a9f47bd7"
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        f"2026-09-03T00:33:07Z {sid} 2026-09-03 0 3.6144925 0\n"
+        f"2026-09-03T00:34:21Z {sid} 2026-09-03 1.11415125 3.6144925 1.11415125\n"
+        f"2026-09-03T00:43:16Z {sid} 2026-09-03 3.680644 3.6144925 3.680644\n"
+        f"2026-09-03T09:00:00Z {sid} 2026-09-03 15.99793825 3.6144925 15.99793825\n"
+    )
+    (ledger / sid).write_text("2026-09-03 15.99793825 3.6144925")
+    data = ct.collect("today")
+    assert data["sessions"][sid]["reset_anchored"] is True
+    assert data["cloud_usd"] == pytest.approx(15.99793825, abs=1e-4)  # not 15.998 - 3.614
+
+
+def test_a_mid_day_reset_with_no_baseline_is_detected_from_the_sequence(tmp_path):
+    """A reset needs no baseline to be visible: a cumulative that goes DOWN is one."""
+    ct, ledger = load_ct(tmp_path)
+    sid = "bbbbbbbb-0000-0000-0000-000000000009"
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        f"2026-09-03T01:00:00Z {sid} 2026-09-03 9.0 0 9.0\n"
+        f"2026-09-03T02:00:00Z {sid} 2026-09-03 2.0 0 2.0\n"
+    )
+    data = ct.collect("today")
+    assert data["sessions"][sid]["reset_anchored"] is True
+    assert data["cloud_usd"] == pytest.approx(2.0)
+
+
+def test_a_local_render_is_not_mistaken_for_a_reset(tmp_path):
+    """A local render legitimately reports 0 on every row. Treating each as a
+    cumulative going DOWN would flag every local session as a reset."""
+    ct, ledger = load_ct(tmp_path)
+    sid = "cccccccc-0000-0000-0000-000000000009"
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        f"2026-09-03T01:00:00Z {sid} 2026-09-03 0 0 5.0\n"
+        f"2026-09-03T02:00:00Z {sid} 2026-09-03 0 0 9.0\n"
+    )
+    (ledger / sid).write_text("2026-09-03 0 0 9.0")
+    data = ct.collect("today")
+    assert data["sessions"][sid]["reset_anchored"] is False
+    assert data["sessions"][sid]["axis"] == "local"
+    assert data["cloud_usd"] == 0.0
+
+
+def test_a_pre_field4_zero_is_reported_as_ambiguous_not_asserted_local(tmp_path):
+    ct, ledger = load_ct(tmp_path)
+    sid = "dddddddd-0000-0000-0000-000000000009"
+    (ledger / sid).write_text("2026-09-03 0 114.25")
+    data = ct.collect("today")
+    assert data["sessions"][sid]["axis"] == "zero"
+    assert data["zero_sessions"] == [sid]
+    assert data["local_sessions"] == []
+    assert data["cloud_usd"] == 0.0
+    assert "cannot tell those apart" in ct.render_table(data)
 
 
 def test_local_traffic_never_enters_cloud_spend(tmp_path):
@@ -60,7 +143,9 @@ def test_local_traffic_never_enters_cloud_spend(tmp_path):
     (ledger / "localses0-0000-0000-0000-000000000003").write_text("2026-09-03 0 114.25")
     data = ct.collect("today")
     assert data["cloud_usd"] == pytest.approx(5.0)
-    assert len(data["local_sessions"]) == 2
+    # only the field-4 record is asserted local; the pre-field-4 zero is `zero`
+    assert len(data["local_sessions"]) == 1
+    assert len(data["zero_sessions"]) == 1
 
 
 def test_multi_day_session_counted_once_per_day_not_lifetime(tmp_path):
@@ -210,3 +295,20 @@ def test_non_json_savings_output_is_unmeasured(tmp_path):
     fake.chmod(0o755)
     ct, _ = load_ct(tmp_path, savings_cmd=str(fake))
     assert ct.collect("today")["local_saved_usd"] is None
+
+
+def test_a_cloud_session_that_switches_to_local_mid_day_is_not_a_reset(tmp_path):
+    """The case that actually exposes the guard: a session bills on cloud, then the
+    endpoint switches to localhost and every later render reports 0. Reading that drop
+    as a cumulative going DOWN would flag a normal endpoint switch as a counter reset
+    and re-anchor the day on the local zero."""
+    ct, ledger = load_ct(tmp_path)
+    sid = "eeeeeeee-0000-0000-0000-000000000009"
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        f"2026-09-03T01:00:00Z {sid} 2026-09-03 5.0 0 5.0\n"
+        f"2026-09-03T02:00:00Z {sid} 2026-09-03 0 0 7.5\n"
+        f"2026-09-03T03:00:00Z {sid} 2026-09-03 0 0 9.0\n"
+    )
+    data = ct.collect("today")
+    assert data["sessions"][sid]["reset_anchored"] is False
+    assert data["sessions"][sid]["axis"] == "local"

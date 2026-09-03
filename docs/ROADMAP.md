@@ -2,7 +2,7 @@
 
 ## Current released version
 
-`0.1.5`
+`0.2.0`
 
 If this disagrees with `.claude-plugin/plugin.json`, treat everything below as
 suspect — the manifest is authoritative. `tests/test_version_consistency.sh`
@@ -26,6 +26,10 @@ asserts the two agree, along with the top numbered CHANGELOG heading.
   top-level usage can omit differently priced iterations. The ledger is
   authoritative today because it reads Claude Code's own `total_cost_usd`, so this
   matters only for the reconstruction fallback in `budget-tally.py`.
-- **Historical repair.** Two sessions (2026-08-24, 2026-08-26) hold pre-guard
-  local→cloud handoff records whose true cloud/local split is unrecoverable. They
-  stay quarantined rather than guessed at.
+- ~~**Historical repair.**~~ RESOLVED in 0.2.0, and the diagnosis in earlier versions
+  was wrong. The two sessions (2026-08-24, 2026-08-26) were not local→cloud handoffs:
+  their cost counter RESET on resume, so the cumulative fell below the baseline carried
+  into the day. They are now attributed at the reset rather than quarantined, recovering
+  $16.07 on 2026-08-26 (reported as $0.00 by budget-tally) and $3.61 on 2026-08-24.
+  Remaining limitation, stated rather than fixed: spend earlier in the same day, before
+  the reset, is not in the ledger, so those figures are floors.

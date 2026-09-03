@@ -2,6 +2,45 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.2.0] — 2026-09-03
+
+### Changed — a resumed session's spend is recovered instead of dropped
+The `baseline-exceeds-cumulative` quarantine introduced in 0.1.0 was diagnosing the
+wrong thing. 131 records across two sessions were being reported as structurally
+invalid; investigating them from the history log showed the actual mechanism, and it
+is a real accounting bug rather than corruption:
+
+**Claude Code restarts `total_cost_usd` at 0 when a session is RESUMED.** The ledger's
+baseline still holds the cumulative carried into the day, so the incoming cumulative
+can be *below* it. Subtracting gives a negative delta, and `max(0, …)` — what
+`budget-tally.py` does — reports the day as free. Measured: session e4d10d09 reached
+**$16.07** on 2026-08-26 against a stale baseline of $17.35 and was reported as
+**$0.00**. Session 960b07ca on 2026-08-24 reset at 00:33, climbed back past its stale
+baseline, and lost exactly that $3.61.
+
+- Such a day is now **anchored at the reset**: the day's spend is the cumulative
+  itself. The figure is marked `*` in the table and described as a **floor**, because
+  spend earlier that same day, before the reset, is not in the ledger at all.
+- A reset that later climbs back above the stale baseline is invisible in the final
+  record, so it is detected from the **row sequence** in the history log — and the live
+  ledger record no longer erases a flag history established.
+- A local render legitimately reports 0 on every row and is explicitly not read as a
+  cumulative going down; nor is a session that switches cloud → local mid-day.
+- `<date> 0 <baseline>` with no field 4 is now reported as axis **`zero`** rather than
+  asserted to be `local`. Before 2026-08-29 those two are genuinely
+  indistinguishable — a local render and a resumed counter that has not billed yet
+  look identical — and both are $0, so the honest label is the ambiguous one.
+- `doctor` gained a COUNTER RESETS section naming each affected session-day, and an
+  AMBIGUOUS ZEROS section. There are now **no quarantined records** on the author's
+  machine; quarantine is back to meaning "structurally invalid" only.
+
+### Added
+- 7 tests for the above and 34 fixtures (was 33), including the two real records from
+  the affected sessions. 55 pytest tests total, mutation-tested 6/6 on the new logic:
+  clamping a reset to zero, not detecting it, removing the sequence detector, letting
+  the ledger erase the flag, asserting an ambiguous zero is local, and reading a local
+  render as a reset are all caught.
+
 ## [0.1.5] — 2026-09-03
 
 ### Fixed

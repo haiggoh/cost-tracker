@@ -84,10 +84,10 @@ class Record:
     """One parsed ledger record. `valid` False means QUARANTINED with a reason."""
 
     __slots__ = ("session_id", "valid", "reason", "day", "cum", "baseline",
-                 "phantom", "axis", "raw")
+                 "phantom", "axis", "raw", "reset_anchored")
 
     def __init__(self, session_id, raw, valid, reason="", day=None, cum=0.0,
-                 baseline=0.0, phantom=None, axis=""):
+                 baseline=0.0, phantom=None, axis="", reset_anchored=False):
         self.session_id = session_id
         self.raw = raw
         self.valid = valid
@@ -97,15 +97,32 @@ class Record:
         self.baseline = baseline
         self.phantom = phantom
         self.axis = axis
+        # True when the session's own cumulative RESET below its carried-in baseline —
+        # a resumed session, whose spend is anchored at the reset instead.
+        self.reset_anchored = reset_anchored
 
     @property
     def day_usd(self):
         """Spend attributable to self.day — the delta over the baseline carried
         into that day. NOT the lifetime cumulative: charging a multi-day
         session's whole lifetime to the day it last rendered once showed a
-        4-day $75 session as 189% of a $40 cap."""
-        if not self.valid or self.axis == "local":
+        4-day $75 session as 189% of a $40 cap.
+
+        RESET-ANCHORED case: when a session is RESUMED, Claude Code's
+        total_cost_usd restarts at 0, so the incoming cumulative can be BELOW the
+        baseline carried into the day. The baseline then describes a counter that
+        no longer exists, and the spend accrued since the reset is the cumulative
+        itself. Subtracting the stale baseline yields a negative number; clamping
+        that to 0 (what budget-tally did) reports the day as free. Measured on
+        session e4d10d09, 2026-08-26: cumulative reached $16.07 against a stale
+        baseline of $17.35, so the day was reported as $0.00. Anchoring at the
+        reset recovers it. The known cost is that any spend EARLIER the same day,
+        before the reset, is not recoverable from the ledger — so this figure is a
+        floor, and it is labelled as one wherever it is printed."""
+        if not self.valid or self.axis in ("local", "zero"):
             return 0.0
+        if self.reset_anchored:
+            return self.cum
         return self.cum - self.baseline
 
     @property
@@ -148,23 +165,31 @@ def parse_ledger_fields(session_id, fields, raw):
     phantom = nums[2] if len(nums) >= 3 else None
     if cum < 0 or baseline < 0:
         return Record(session_id, raw, False, "negative-cost")
-    # A local render zeroes the cost field while the baseline keeps the cumulative
-    # carried into the day, so cum == 0 with baseline > 0 is the LOCAL signature —
-    # not an anomaly. It is also the only shape a pre-2026-08-29 local record has,
-    # since field 4 did not exist yet. This is structural, not a heuristic: cum is a
-    # LIFETIME cumulative, so a cloud session that has already spent can never
-    # report 0 again. Quarantining these (an earlier version of this parser did)
-    # discards 139 real records on this machine and calls working capture broken.
-    legacy_local = (cum == 0.0 and baseline > 0.0)
-    if baseline > cum and not legacy_local:
-        # cum and baseline BOTH nonzero with baseline larger is a genuine capture
-        # anomaly. Clamping it to 0 would hide that behind a plausible figure, so
-        # quarantine it and let `doctor` show it.
-        return Record(session_id, raw, False, "baseline-exceeds-cumulative")
-    # Free compute must never enter cloud spend, and a zero here is a suppressed
-    # phantom, not a session that has yet to spend.
-    axis = "local" if ((phantom is not None or legacy_local) and cum == 0.0) else "cloud"
-    return Record(session_id, raw, True, "", fields[0], cum, baseline, phantom, axis)
+    # A cumulative BELOW its own carried-in baseline is not corruption, and this is
+    # the whole reason the earlier "baseline-exceeds-cumulative" quarantine existed:
+    # cum is a lifetime cumulative, so it can only fall if the COUNTER RESTARTED.
+    # Two distinct restarts, told apart by whether any spend is reported at all:
+    #
+    #   cum == 0, baseline > 0  -> a zero-cost render. AMBIGUOUS before 2026-08-29:
+    #       either a local render (the endpoint gate zeroes the cost) or a resumed
+    #       session whose counter has restarted but not yet billed a turn. Field 4
+    #       disambiguates it, and field 4 did not exist before that date — so a
+    #       3-field zero is honestly `zero`, not asserted to be local. Either way it
+    #       contributes $0.
+    #   0 < cum < baseline      -> a RESUMED session, counter restarted and already
+    #       billing. Measured on sessions 960b07ca (2026-08-24) and e4d10d09
+    #       (2026-08-26). The baseline now describes a counter that no longer exists,
+    #       so the day is anchored at the reset — see Record.day_usd.
+    ambiguous_zero = (cum == 0.0 and baseline > 0.0 and phantom is None)
+    counter_reset = (0.0 < cum < baseline)
+    if phantom is not None and cum == 0.0:
+        axis = "local"                 # field 4 present: unambiguously a local render
+    elif ambiguous_zero:
+        axis = "zero"
+    else:
+        axis = "cloud"
+    return Record(session_id, raw, True, "", fields[0], cum, baseline, phantom, axis,
+                  reset_anchored=counter_reset)
 
 
 def parse_ledger_line(session_id, text):
@@ -206,6 +231,16 @@ def read_history():
     """
     groups = {}
     quarantined = []
+    # A reset is only fully visible in the ROW SEQUENCE. Anchoring on the final row
+    # alone misses the case where the counter restarted mid-day and then climbed back
+    # ABOVE the stale baseline before the last render — session 960b07ca on 2026-08-24
+    # went 0 -> 1.11 -> 3.68 -> 15.998 against a baseline of 3.614, so its final row
+    # looks ordinary and the day was under-counted by exactly that stale $3.61. Per
+    # (session, day) we therefore remember the highest cumulative seen and whether it
+    # ever went DOWN. Rows with cum == 0 are skipped: a local render legitimately
+    # reports 0 and would otherwise look like a reset on every single row.
+    peak = {}
+    reset_seen = set()
     try:
         f = open(HISTORY_PATH, "r", errors="ignore")
     except OSError:
@@ -233,7 +268,17 @@ def read_history():
                     raw_cost = 0.0
                 if rec.cum == 0.0 and raw_cost > 0:
                     rec.axis = "local"
-            groups[(sid, day)] = rec       # later line wins
+            key = (sid, day)
+            if rec.cum > 0.0:
+                if rec.cum < peak.get(key, 0.0):
+                    reset_seen.add(key)
+                peak[key] = max(peak.get(key, 0.0), rec.cum)
+            if rec.reset_anchored:
+                reset_seen.add(key)
+            groups[key] = rec              # later line wins
+    for key in reset_seen:
+        if key in groups:
+            groups[key].reset_anchored = True
     return groups, quarantined
 
 
@@ -373,13 +418,25 @@ def collect(period="today", since=None, fast=False):
     # for the day it describes: it is the newest render of that session.
     merged = dict(hist_groups)
     for r in ledger:
-        if r.valid:
-            merged[(r.session_id, r.day)] = r
+        if not r.valid:
+            continue
+        key = (r.session_id, r.day)
+        # The ledger line is the NEWEST render, so it wins on the numbers — but it is a
+        # single line and cannot show a reset that happened earlier in the day and then
+        # climbed back above the stale baseline. That is a fact about the day, observable
+        # only in the row sequence, so carry the flag forward instead of letting the
+        # overwrite erase it. Without this, session 960b07ca's 2026-08-24 reset was
+        # detected in history and then immediately forgotten.
+        prior = merged.get(key)
+        if prior is not None and prior.reset_anchored:
+            r.reset_anchored = True
+        merged[key] = r
 
     per_session_day = {k: v for k, v in merged.items() if k[1] in days}
 
     sessions = defaultdict(lambda: {"period_usd": 0.0, "lifetime_usd": 0.0,
-                                    "days": [], "axis": "cloud"})
+                                    "days": [], "axis": "cloud",
+                                    "reset_anchored": False})
     for (sid, day), rec in sorted(per_session_day.items()):
         s = sessions[sid]
         s["period_usd"] += rec.day_usd
@@ -387,11 +444,15 @@ def collect(period="today", since=None, fast=False):
         # never a sum of per-day cumulatives.
         s["lifetime_usd"] = max(s["lifetime_usd"], rec.lifetime_usd)
         s["days"].append(day)
-        if rec.axis == "local" and s["period_usd"] == 0.0:
-            s["axis"] = "local"
+        if rec.reset_anchored:
+            s["reset_anchored"] = True
+        if rec.axis in ("local", "zero") and s["period_usd"] == 0.0:
+            s["axis"] = rec.axis
 
     cloud_total = sum(s["period_usd"] for s in sessions.values())
     local_sessions = [sid for sid, s in sessions.items() if s["axis"] == "local"]
+    zero_sessions = [sid for sid, s in sessions.items() if s["axis"] == "zero"]
+    reset_sessions = [sid for sid, s in sessions.items() if s["reset_anchored"]]
     if fast:
         savings = read_savings_fast()
     else:
@@ -411,9 +472,12 @@ def collect(period="today", since=None, fast=False):
         "pct_of_cap": (round(cloud_total / cap, 4) if cap else None),
         "sessions": {sid: {"period_usd": round(s["period_usd"], 4),
                            "lifetime_usd": round(s["lifetime_usd"], 4),
-                           "days": s["days"], "axis": s["axis"]}
+                           "days": s["days"], "axis": s["axis"],
+                           "reset_anchored": s["reset_anchored"]}
                      for sid, s in sorted(sessions.items())},
         "local_sessions": sorted(local_sessions),
+        "zero_sessions": sorted(zero_sessions),
+        "reset_anchored_sessions": sorted(reset_sessions),
         "local_saved_usd": (savings.get("saved_usd") if savings else None),
         "local_events": (savings.get("events") if savings else None),
         "quarantined": quarantined,
@@ -441,7 +505,8 @@ def render_table(data, short_ids=True):
         lines.append("(no sessions in this period)")
     for sid, s in data["sessions"].items():
         sid_disp = sid[:idw] if short_ids else sid
-        lines.append(f"{sid_disp:<{idw}}  {s['axis']:<6}  {s['period_usd']:>14.2f}  "
+        mark = "*" if s.get("reset_anchored") else " "
+        lines.append(f"{sid_disp:<{idw}}  {s['axis']:<6}  {s['period_usd']:>13.2f}{mark}  "
                      f"{s['lifetime_usd']:>18.2f}")
     lines.append("-" * len(head))
     # The total fills ONLY the period column. A "total lifetime" would be the sum
@@ -462,6 +527,18 @@ def render_table(data, short_ids=True):
     if data["local_sessions"]:
         lines.append(f"note: {len(data['local_sessions'])} local session(s) contribute $0 "
                      "to cloud spend by design")
+    if data.get("zero_sessions"):
+        lines.append(f"note: {len(data['zero_sessions'])} session(s) reported $0 with a "
+                     "carried-in baseline — either a local render or a just-resumed "
+                     "counter; records before 2026-08-29 cannot tell those apart, and "
+                     "both are $0")
+    if data.get("reset_anchored_sessions"):
+        lines.append(f"* {len(data['reset_anchored_sessions'])} session(s) RESET their cost "
+                     "counter mid-period (a resume), so the baseline carried in describes a "
+                     "counter that no longer exists. Those figures are anchored at the reset "
+                     "and are FLOORS: any spend earlier the same day, before the reset, is "
+                     "not recoverable from the ledger. Subtracting the stale baseline instead "
+                     "would report the day as free — `cost-tracker doctor` explains.")
     if data["quarantined"]:
         sids = {q["session_id"] or _sid_from_raw(q["raw"]) for q in data["quarantined"]}
         lines.append(f"⚠ {len(data['quarantined'])} record(s) across {len(sids)} session(s) "
@@ -495,8 +572,33 @@ def render_doctor(data):
              f"                     history:    {HISTORY_PATH}",
              f"today (UTC): {data['today_utc']}   cap: "
              + (f"${data['cap_usd']:.2f}" if data["cap_usd"] else "unset (no denominator printed)")]
-    q = data["quarantined"]
     lines.append("")
+    if data.get("reset_anchored_sessions"):
+        lines.append("COUNTER RESETS (a resumed session) — %d in this period:"
+                     % len(data["reset_anchored_sessions"]))
+        for sid in data["reset_anchored_sessions"]:
+            s = data["sessions"][sid]
+            lines.append(f"  {sid}  ${s['period_usd']:.2f}  days {','.join(s['days'])}")
+        lines.append("")
+        lines.append("  Claude Code's total_cost_usd restarts at 0 when a session is RESUMED, so")
+        lines.append("  the cumulative can fall BELOW the baseline carried into the day. The")
+        lines.append("  baseline then describes a counter that no longer exists. Subtracting it")
+        lines.append("  gives a negative number, and clamping that to 0 reports the day as free:")
+        lines.append("  measured on session e4d10d09, 2026-08-26 — $16.07 of real spend reported")
+        lines.append("  as $0.00. These figures are anchored at the reset instead, which makes")
+        lines.append("  them FLOORS: spend earlier the same day, before the reset, is gone from")
+        lines.append("  the ledger. A reset that later climbs back above the stale baseline is")
+        lines.append("  invisible in the final record and is detected from the row sequence.")
+        lines.append("")
+    if data.get("zero_sessions"):
+        lines.append("AMBIGUOUS ZEROS — %d session(s) reported $0 against a carried-in baseline."
+                     % len(data["zero_sessions"]))
+        lines.append("  Either a local render (the endpoint gate zeroes the cost) or a resumed")
+        lines.append("  counter that has not billed yet. Field 4 tells them apart and did not")
+        lines.append("  exist before 2026-08-29, so older records are reported as `zero` rather")
+        lines.append("  than asserted to be local. Both contribute $0 either way.")
+        lines.append("")
+    q = data["quarantined"]
     if not q:
         lines.append("No quarantined records. Every record parsed as a valid session-day.")
         return "\n".join(lines)
@@ -518,12 +620,6 @@ def render_doctor(data):
         lines.append(f"  [{reason}] session {sid or '(unknown)'} — {g['n']} record(s) "
                      f"in {'+'.join(sorted(g['sources']))}")
         lines.append(f"      e.g. {g['example'][:140]!r}")
-    lines.append("")
-    lines.append("baseline-exceeds-cumulative with BOTH values nonzero is the pre-2026-08-29")
-    lines.append("local->cloud handoff: the cost field was accruing real cloud spend while the")
-    lines.append("baseline still held the suppressed local phantom, so that day's true split is")
-    lines.append("unrecoverable. The endpoint-change guard in cost-ledger-capture.sh prevents")
-    lines.append("new ones; these are historical and stay quarantined rather than guessed at.")
     return "\n".join(lines)
 
 

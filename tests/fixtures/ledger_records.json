@@ -7,7 +7,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -18,7 +19,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -29,7 +31,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 60,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -40,7 +43,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -51,7 +55,8 @@
       "valid": false,
       "reason": "bad-date",
       "today_usd": 0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -62,7 +67,8 @@
       "valid": false,
       "reason": "bad-date",
       "today_usd": 0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -73,7 +79,8 @@
       "valid": false,
       "reason": "bad-date",
       "today_usd": 0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -84,7 +91,8 @@
       "valid": false,
       "reason": "bad-date",
       "today_usd": 0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -95,7 +103,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -106,7 +115,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -117,7 +127,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 30,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -128,7 +139,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -139,7 +151,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 750000,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -150,7 +163,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -161,7 +175,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 42.75,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -172,7 +187,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -183,7 +199,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "local"
+      "axis": "local",
+      "reset_anchored": false
     }
   },
   {
@@ -194,7 +211,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0,
-      "axis": "local"
+      "axis": "local",
+      "reset_anchored": false
     }
   },
   {
@@ -205,7 +223,8 @@
       "valid": false,
       "reason": "too-few-fields",
       "today_usd": 0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -216,7 +235,8 @@
       "valid": false,
       "reason": "too-many-fields",
       "today_usd": 0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -227,7 +247,8 @@
       "valid": false,
       "reason": "non-numeric",
       "today_usd": 0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -238,62 +259,68 @@
       "valid": false,
       "reason": "non-numeric",
       "today_usd": 0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
-    "name": "baseline_exceeds_cumulative",
-    "case": "baseline-exceeds-cumulative",
+    "name": "counter_reset_three_field",
+    "case": "counter reset (resumed session)",
     "content": "2026-09-03 10 50",
     "expect": {
-      "valid": false,
-      "reason": "baseline-exceeds-cumulative",
-      "today_usd": 0,
-      "axis": ""
+      "valid": true,
+      "reason": "",
+      "today_usd": 10.0,
+      "axis": "cloud",
+      "reset_anchored": true
     }
   },
   {
-    "name": "baseline_exceeds_cumulative_four_fields",
-    "case": "baseline-exceeds-cumulative",
+    "name": "counter_reset_four_field",
+    "case": "counter reset (resumed session)",
     "content": "2026-09-03 10 50 5",
     "expect": {
-      "valid": false,
-      "reason": "baseline-exceeds-cumulative",
-      "today_usd": 0,
-      "axis": ""
+      "valid": true,
+      "reason": "",
+      "today_usd": 10.0,
+      "axis": "cloud",
+      "reset_anchored": true
     }
   },
   {
-    "name": "legacy_local_no_field4",
-    "case": "local (legacy 3-field, cost zeroed)",
+    "name": "ambiguous_zero_three_field",
+    "case": "ambiguous zero (local render or resumed counter)",
     "content": "2026-09-03 0 5.5",
     "expect": {
       "valid": true,
       "reason": "",
       "today_usd": 0.0,
-      "axis": "local"
+      "axis": "zero",
+      "reset_anchored": false
     }
   },
   {
-    "name": "legacy_local_no_field4_earlier",
-    "case": "local (legacy 3-field, cost zeroed)",
+    "name": "ambiguous_zero_three_field_earlier",
+    "case": "ambiguous zero (local render or resumed counter)",
     "content": "2026-08-27 0 114.25017249999998",
     "expect": {
       "valid": true,
       "reason": "",
       "today_usd": 0.0,
-      "axis": "local"
+      "axis": "zero",
+      "reset_anchored": false
     }
   },
   {
-    "name": "preguard_handoff_anomaly",
-    "case": "baseline-exceeds-cumulative",
+    "name": "counter_reset_real_960b07ca_row",
+    "case": "counter reset (resumed session)",
     "content": "2026-09-03 1.11415125 3.6144925",
     "expect": {
-      "valid": false,
-      "reason": "baseline-exceeds-cumulative",
-      "today_usd": 0.0,
-      "axis": ""
+      "valid": true,
+      "reason": "",
+      "today_usd": 1.11415125,
+      "axis": "cloud",
+      "reset_anchored": true
     }
   },
   {
@@ -304,7 +331,8 @@
       "valid": false,
       "reason": "empty",
       "today_usd": 0.0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -315,7 +343,8 @@
       "valid": false,
       "reason": "empty",
       "today_usd": 0.0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -326,7 +355,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 5.0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -337,7 +367,8 @@
       "valid": false,
       "reason": "non-numeric",
       "today_usd": 0.0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
     }
   },
   {
@@ -348,7 +379,8 @@
       "valid": true,
       "reason": "",
       "today_usd": 0.0,
-      "axis": "cloud"
+      "axis": "cloud",
+      "reset_anchored": false
     }
   },
   {
@@ -359,7 +391,20 @@
       "valid": false,
       "reason": "negative-cost",
       "today_usd": 0.0,
-      "axis": ""
+      "axis": "",
+      "reset_anchored": false
+    }
+  },
+  {
+    "name": "counter_reset_real_e4d10d09_final",
+    "case": "counter reset (resumed session)",
+    "content": "2026-09-03 16.06745625 17.350854999999992",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 16.06745625,
+      "axis": "cloud",
+      "reset_anchored": true
     }
   }
 ]

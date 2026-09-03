@@ -54,8 +54,12 @@ one-way: status line → ledger → reports.
 ## Honesty rules it enforces
 
 - **Quarantine, don't clamp.** A structurally invalid record counts as $0, is never
-  treated as a session, and is listed with a reason. Clamping a bad baseline to zero
-  would hide a capture bug behind a plausible figure.
+  treated as a session, and is listed with a reason. Clamping a bad number to zero
+  hides a capture bug behind a plausible figure — measurably: a cumulative below its
+  carried-in baseline is a RESUMED session whose counter restarted at 0, and clamping
+  that negative delta reported $16.07 of real spend as $0.00. Such a day is anchored
+  at the reset instead and its figure is marked `*` and named a floor, because spend
+  earlier the same day is not in the ledger.
 - **An unset cap prints no denominator.** llmgw's `/key/info` returns 403 for a
   virtual key scoped to `llm_api_routes`, so the authoritative cap is unreadable
   from here. Set `COST_TRACKER_CAP_USD` to get a percentage; nothing is invented.
