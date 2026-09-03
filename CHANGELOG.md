@@ -2,6 +2,20 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.1.5] — 2026-09-03
+
+### Fixed
+- **The `today:` segment never appeared in the WIRED setup**, which is the only setup
+  that matters. The renderer found its sibling CLI with `dirname "$0"`, but once wired
+  it is reached as `~/.claude/scripts/statusline-render.sh` — a symlink — so that
+  resolved to a directory with no `cost-tracker` in it and the segment silently
+  vanished. `$0` is now walked through symlinks (bounded at 10 hops, no `readlink -f`,
+  which is not portable to every `/bin/sh`).
+- Every renderer assertion in 0.1.4 ran the script directly in the repo, where the
+  sibling happens to be present, so none of them could see it — it was caught by an
+  end-to-end run against the live chain. There is now a test that invokes the renderer
+  THROUGH a symlink.
+
 ## [0.1.4] — 2026-09-03
 
 ### Added

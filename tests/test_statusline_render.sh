@@ -113,6 +113,23 @@ OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/nu
 hasnt "COST_TRACKER_STATUSLINE=0 suppresses the segment" "$OUT" "today: cloud"
 has   "and the lifetime figure loses its now-unneeded label" "$OUT" '$3.14'
 hasnt "…which means no bare 'session' prefix when it stands alone" "$OUT" "session \$"
+
+# THE SYMLINK CASE, which is how the renderer is actually reached once wired: via
+# ~/.claude/scripts/statusline-render.sh pointing into the plugin. A plain
+# dirname "$0" resolves to the symlink's directory, where the sibling CLI is NOT,
+# and the segment silently vanishes. Every assertion above ran the renderer
+# directly in the repo, so none of them could see this — it was found end-to-end.
+mkdir -p "$TMPD/fake-scripts"
+ln -sf "$(cd -P "$(dirname "$RENDER")" && pwd)/statusline-render.sh" "$TMPD/fake-scripts/statusline-render.sh"
+OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=1 \
+    COST_TRACKER_LEDGER_DIR="$TMPD/ledger" \
+    COST_TRACKER_HISTORY="$TMPD/nonexistent-history.log" \
+    LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
+    COST_TRACKER_CAP_USD=40 \
+    sh "$TMPD/fake-scripts/statusline-render.sh" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+has "the segment still renders when reached THROUGH a symlink" \
+    "$(printf '%s' "$OUT" | sed -n 1p)" "today: cloud \$30.12/\$40"
+
 rm -rf "$TMPD"
 
 echo

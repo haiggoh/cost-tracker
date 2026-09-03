@@ -117,7 +117,23 @@ fi
 # so that a failure loses the segment and nothing else: this file must always exit 0.
 TODAY_SEG=
 if [ "${COST_TRACKER_STATUSLINE:-1}" != "0" ]; then
-    CT_BIN="$(dirname "$0")/cost-tracker"
+    # RESOLVE $0 THROUGH SYMLINKS FIRST. In the wired setup this file is reached as
+    # ~/.claude/scripts/statusline-render.sh, a symlink into the plugin — so a plain
+    # dirname "$0" looks for the CLI in ~/.claude/scripts, where it is not, and the
+    # segment silently never appeared. Found end-to-end, not by the unit tests, which
+    # invoked the renderer directly in the repo where the sibling happens to be there.
+    # No readlink -f: it is not portable to every /bin/sh this may run under.
+    CT_SELF="$0"
+    CT_HOPS=0
+    while [ -L "$CT_SELF" ] && [ "$CT_HOPS" -lt 10 ]; do
+        CT_LINK="$(readlink "$CT_SELF")"
+        case "$CT_LINK" in
+            /*) CT_SELF="$CT_LINK" ;;
+            *)  CT_SELF="$(dirname "$CT_SELF")/$CT_LINK" ;;
+        esac
+        CT_HOPS=$((CT_HOPS + 1))
+    done
+    CT_BIN="$(dirname "$CT_SELF")/cost-tracker"
     if [ -x "$CT_BIN" ]; then
         TODAY_SEG=$(python3 "$CT_BIN" statusline --fast 2>/dev/null | head -1) || TODAY_SEG=
     fi
