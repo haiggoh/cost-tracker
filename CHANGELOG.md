@@ -2,6 +2,24 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.1.1] — 2026-09-03
+
+### Fixed
+- **`install/wire-statusline.sh` no longer leaves a fictional session behind.** Its
+  verification render goes through the real capture path, so it wrote a ledger entry
+  and a history row under a synthetic id — which then appeared as a `wire-check`
+  session in every future report. Both are now removed.
+- **The history cleanup was gated on `grep -v`'s exit code**, which is 1 when it
+  prints nothing — exactly the fresh-install case where the sentinel is the only row
+  in a brand-new history file. A machine with thousands of existing rows would never
+  have exposed it.
+
+### Added
+- `tests/test_wire_statusline.sh` — 20 tests against a temp HOME covering dry-run
+  inertness, symlinking, backup mode preservation (600 stays 600), sentinel cleanup,
+  idempotence, and rollback driven by an actually-broken chain rather than an
+  assumed one. Both fixes above were found by writing it.
+
 ## [0.1.0] — 2026-09-03
 
 First release. Absorbs the hand-maintained cost-accounting chain that had been

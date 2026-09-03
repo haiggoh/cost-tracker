@@ -106,8 +106,30 @@ if [ "$RC" != "0" ] || [ -z "$OUT" ]; then
     done
     exit 1
 fi
-# The check session wrote a real ledger entry; it is not a session, so drop it.
-rm -f "$HOME/.claude/cost-ledger/wire-check-0000-0000-0000-000000000000"
+# The verification render went through the REAL capture path, so it wrote a real
+# ledger entry AND a real history row under a synthetic session id. Neither is a
+# session, and leaving them behind puts a "wire-check" row in every future report —
+# which is precisely the kind of fictional entry this plugin quarantines other tools
+# for. Remove both. The history log is append-only by policy, not by accident, so it
+# is edited here only to delete a line this script itself just wrote, in place, with
+# the mode preserved.
+SENTINEL="wire-check-0000-0000-0000-000000000000"
+rm -f "$HOME/.claude/cost-ledger/$SENTINEL"
+HIST="$HOME/.claude/cost-ledger-history.log"
+if [ -f "$HIST" ] && grep -q "$SENTINEL" "$HIST"; then
+    # NOT `if grep -v ...; then`: grep exits 1 when it prints NOTHING, which is exactly
+    # the fresh-install case where the sentinel is the only row in a brand-new history
+    # file. Gating on the exit code silently skipped the cleanup precisely there, and a
+    # machine with thousands of existing rows would never have shown it. Gate on the
+    # temp file, which grep creates either way.
+    grep -v "$SENTINEL" "$HIST" > "$HIST.wiretmp" 2>/dev/null
+    if [ -f "$HIST.wiretmp" ]; then
+        # cat-into-place rather than mv: mv would install a NEW inode at the default
+        # umask and silently widen the mode of a file that may be 600.
+        cat "$HIST.wiretmp" > "$HIST" && say "  cleaned the verification row out of the history log"
+    fi
+    rm -f "$HIST.wiretmp"
+fi
 
 say ""
 say "VERIFIED — the chain renders:"
