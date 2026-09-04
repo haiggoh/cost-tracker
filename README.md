@@ -37,10 +37,36 @@ per-session table is printed so a reader can audit the label instead of trusting
 | `cost-tracker statusline` | `today: cloud $30.12/$40 · local saved $4.80` |
 | `cost-tracker doctor` | quarantined records grouped by (reason, session) + resolved config |
 | `cost-tracker cap [--learn] [--set USD]` | the daily cap and the refusal it was read from |
+| `cost-tracker calibrate [--json] [--tolerance USD] [--since-days N]` | our daily total vs the gateway's own figure; **exits 1 on a measured undercount** |
 
 Periods longer than today read the append-only history log, grouped by
 `(session_id, utc_date)` with the last row per group winning — the per-session
 ledger file is overwritten on every render, so it can only ever answer "today".
+
+## Calibration — the only external check
+
+This number has been wrong in both directions, and every wrong version agreed with
+itself. So `calibrate` compares it against a figure this tool did not compute: when the
+gateway refuses a request it states `Current cost`, the cumulative **for the key** in the
+current budget window — which is exactly the `today` axis. Those turns are already in the
+transcripts.
+
+Because a refusal blocks the key for the rest of the window, that figure is very nearly
+the day's *final* total: on a day the cap was hit, the ledger should read close to the cap.
+The gap is therefore the error itself, not a bound on it.
+
+Three verdicts, and the third one matters:
+
+- `ok` — our total is at or above the gateway's.
+- `undercount` — our total is below it, i.e. the display promised headroom into a hard stop.
+- `no-data` — the day has a reference but no basis on our side (it predates the history
+  log). Reported as its own verdict rather than as a maximal undercount, which would have
+  inflated the headline from $290 to $701 and aimed the investigation at an attribution
+  bug that cannot exist where there is nothing to attribute.
+
+Two traps it has to handle to avoid inventing findings: repeated refusals within a day are
+one measurement, not fourteen; and a refusal just after 00:00 UTC restates *yesterday's*
+cumulative, because the window resets before the reset propagates.
 
 ## What it reads (and never writes)
 
@@ -93,17 +119,21 @@ Set `COST_TRACKER_CAP_USD=40` (or `BUDGET_TALLY_CAP_USD`) for a cap.
 ## Tests
 
 ```sh
-pytest tests/                            # 48 tests, incl. a 33-case fixture matrix
+pytest tests/                            # 91 tests, incl. a 33-case fixture matrix
 bash tests/test_budget_ledger.sh         # 23 tests for the capture chain
 bash tests/test_statusline_render.sh     # 34 tests for the renderer contract
 bash tests/test_wire_statusline.sh       # 20 tests for wiring, backup, rollback
 bash tests/test_version_consistency.sh   # manifest / changelog / roadmap agree
-# pytest covers both suites: 55 reporting tests + 12 cap-learning tests
+# pytest covers three suites: 55 reporting + 12 cap-learning + 24 calibration
 ```
 
-The pytest suite is mutation-tested: seven planted defects (lifetime-as-daily,
-clamped baseline, local counted as cloud, summed history rows, invented cap,
-zeroed savings, ignored period window) are all caught.
+The pytest suite is mutation-tested. Reporting: seven planted defects (lifetime-as-daily,
+clamped baseline, local counted as cloud, summed history rows, invented cap, zeroed
+savings, ignored period window). Calibration: ten more (summing refusals instead of taking
+the day's max, min for max, dropping either half of the post-midnight staleness rule,
+dropping the `Key=`-scope filter so the 1400 team cap leaks in, treating an overshoot as an
+undercount, ignoring the coverage window, charging a session's lifetime to one day,
+counting local spend as cloud, and exiting 0 on a measured undercount). All caught.
 
 ## Environment
 

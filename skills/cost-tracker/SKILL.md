@@ -32,6 +32,7 @@ cost-tracker report                      # today, per-session table
 cost-tracker report --week   --json      # 7 days; --month, --since YYYY-MM-DD
 cost-tracker statusline                  # today: cloud $30.12/$40 · local saved $4.80
 cost-tracker doctor                      # quarantined records + resolved config
+cost-tracker calibrate                   # our daily totals vs the gateway's own figure
 ```
 
 The table **is** the audit of the label — a reader can total the period column
@@ -71,11 +72,27 @@ themselves. Quote it rather than retyping numbers out of it.
   exists. The day is anchored at the reset, which means spend earlier that same day,
   before the reset, is not in the ledger at all. Say "at least $X" for those.
 
+## ⚠️ The daily total is KNOWN to undercount by ~20%
+
+Do not present `today` as exact. `cost-tracker calibrate` measures it against the gateway's
+own stated cumulative and finds 16 of 17 calibrated days short by $6.84-$9.16 — a median
+**80.8%** of what was actually charged. Because a refusal blocks the key for the rest of
+the window, on every day the cap was hit the ledger should have read close to $40 and read
+~$32 instead.
+
+**What that means when you quote the figure:** treat `today` as a FLOOR, and say so when
+the number is being used to decide whether there is headroom — the error runs in the
+direction that walks a session into a hard stop while the display still promises room.
+Sessions that never render a statusline were the leading suspicion and are now measured
+out: 1-3 turns each, 1-3% of a day, ~10x too small. Never close the gap by scaling or
+clamping; every self-consistent version of this bug was wrong.
+
 ## When a figure looks wrong
 
-1. `cost-tracker doctor` — quarantine first, grouped by session.
-2. `cost-tracker report --json` — the exact per-session split.
-3. `~/.claude/cost-ledger-history.log` — one row per statusline render, so an
+1. `cost-tracker calibrate` — is this day's total externally wrong, and by how much?
+2. `cost-tracker doctor` — quarantine first, grouped by session.
+3. `cost-tracker report --json` — the exact per-session split.
+4. `~/.claude/cost-ledger-history.log` — one row per statusline render, so an
    anomaly stays diagnosable after the per-session file has been overwritten.
 
 Do not "fix" a figure by clamping it. A cumulative BELOW its carried-in baseline is

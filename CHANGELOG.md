@@ -2,6 +2,81 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.4.0] — 2026-09-04
+
+### Added — calibration against the gateway's own figure
+
+The daily total has now been wrong in **both** directions: it over-counted (token
+reconstruction priced cache tokens ~4x high), then under-counted ($31.76 displayed while
+the gateway was already refusing at $40.07), and moving it into a plugin fixed neither.
+Every one of those versions agreed with itself. Internal consistency is therefore not
+evidence, and the only way to know is to compare against a number we did not compute.
+
+A budget refusal states one: `Current cost` is the cumulative **for the key** in the
+current budget window, which is exactly the `today` axis — like-for-like. It is already
+in the transcripts, and there were 119 of them across 37 UTC days on the machine this
+was built on.
+
+- `cost-tracker calibrate` — one row per UTC day that has a refusal to check against:
+  our total, the gateway's, the delta with its sign, and a verdict. `--json` for machines,
+  `--tolerance` and `--since-days` to bound it. **Exits 1 on a measured undercount**, so
+  it can gate a release rather than being a report nobody reads.
+- `find_refusals()` — all refusals, not just the newest. `learn_cap()` now sits on top of
+  it, so the cap learner and the calibrator cannot disagree about what counts as a
+  refusal — including the poisoned-source filter (`isApiErrorMessage`), which keeps a
+  session *discussing* a kill from being read as one.
+- `history_coverage()` and a third verdict, **`no-data`**. Refusals reach back to
+  2026-07-26; the history log starts 2026-08-18. Those 19 earlier days have a reference
+  and no basis on our side, and printing them as maximal undercounts inflated the
+  headline from $290 to **$701** while pointing at an attribution bug that cannot exist
+  where there is nothing to attribute. Absence of a source is not evidence of a defect.
+  Keyed on the log's coverage window, not on "we found no records" — *inside* the window
+  an empty day is the real structural blindness and is still reported.
+- `collect(days=[...])` and `daily_totals()` are built from the same `_merged_records()`
+  assembly the reports use. A harness that computed the total a second way would only
+  prove two implementations agree.
+- **`ours_pct_of_gateway` per day and a median across calibrated days.** A refusal blocks
+  the key for the rest of the budget window, and the window is the UTC day — so the stated
+  cumulative is approximately the day's FINAL total, not merely a floor. The shortfall is
+  the whole error, and the ratio is the number that distinguishes a systematic missing
+  component from a few absent sessions. Median on this machine: **80.8%**. A per-day
+  dollar delta invites "a session was missed"; the same ratio on sixteen days with very
+  different session mixes is a different claim, and it is the one the data supports.
+  Median rather than mean, and no-data days excluded — including them would drag it toward
+  0% and make a one-fifth shortfall look catastrophic.
+
+### Measured — the undercount is real, and it is not missing sessions
+
+**16 of 17 calibrated days undercount, by $6.84–$9.16 — a near-constant 17–23% of each
+day** (ours/gateway 0.775–0.829), independent of session count. The leading suspicion had
+been sessions that never render a statusline and so write no ledger record. Those exist
+and are now measured: 1–3 billable turns each, worth 1–3% of the day. **Real, but ~10x
+too small to explain the gap.** The remaining candidates are per-iteration accounting
+(sub-agent and server-side compaction turns that may never reach `.cost.total_cost_usd`)
+and gateway-side metering of traffic no session attributes to itself.
+
+Deliberately NOT closed by scaling or clamping to match: every previous version of this
+bug was self-consistent, and a fudge factor would restore that comfort while destroying
+the only external check.
+
+### Two traps this had to handle to avoid inventing findings
+- **Repeats.** Once blocked, every further request re-reports the same cached cumulative
+  — 14 of them on 2026-08-24. They are one measurement, not fourteen.
+- **The post-midnight repeat.** The window resets at 00:00 UTC but propagation lags
+  minutes, so a refusal just after midnight restates *yesterday's* cumulative. Counted as
+  the new day it invents a ~$40 reference for a day with almost no spend — a phantom
+  undercount on every such day. Confirmed on 2026-07-31T00:05 and 2026-08-21T00:00. The
+  rule keys on the value repeating **and** the clock, because a genuine post-reset kill
+  the same night states a different figure and is real data (2026-08-21T00:06 does).
+
+### Tests
+21 new pytest cases (161 total, all green), and the calibration subsystem is
+mutation-tested **10/10**: summing refusals instead of taking the day's max, min for max,
+dropping either half of the stale-repeat rule, dropping the `Key=`-scope filter (the
+`Team=` cap is 1400 — 35x), treating an overshoot as an undercount, ignoring the coverage
+window, charging a session's lifetime to one day, counting local spend as cloud, and
+exiting 0 on a measured undercount.
+
 ## [0.3.0] — 2026-09-03
 
 ### Added — the cap is learned from the gateway's own refusal

@@ -114,16 +114,17 @@ def write_config(data):
         return False
 
 
-def learn_cap(max_files=500, since_days=365):
-    """Scan transcripts for the newest budget-kill message and return what it said.
+def find_refusals(max_files=500, since_days=365):
+    """EVERY genuine refusal in the transcripts, oldest first.
 
-    Returns a dict (never written here — the caller decides) with the observation and
-    its provenance, or a `found: false` record. Bounded on purpose: newest-mtime-first,
-    a file limit and an age limit, because this reads whole transcripts and must stay a
-    rare operation. It is NEVER called from the statusline path.
+    `learn_cap` wants only the newest observation per scope; CALIBRATION wants all of
+    them, because each refusal is a free measurement of the true cumulative on its own
+    day. One scan serves both so the two can never disagree about what counts as a
+    refusal — in particular about the poisoned-source filter below.
 
-    A file's mtime only approximates its records' timestamps, so the winner is chosen by
-    the RECORD's own timestamp across everything scanned, not by file order.
+    Bounded on purpose: newest-mtime-first, a file limit and an age limit, because this
+    reads whole transcripts and must stay a rare operation. NEVER called from the
+    statusline path.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
     paths = []
@@ -134,7 +135,7 @@ def learn_cap(max_files=500, since_days=365):
     except OSError:
         pass
     paths = paths[:max_files]
-    best = {}          # scope -> observation
+    observations = []
     scanned = 0
     for path in paths:
         try:
@@ -176,19 +177,39 @@ def learn_cap(max_files=500, since_days=365):
                     "source_file": os.path.basename(path),
                     "raw": m.group(0)[:300],
                 }
-                prev = best.get(scope)
-                if prev is None or (obs["observed_at"] or "") >= (prev["observed_at"] or ""):
-                    best[scope] = obs
-    result = {
+                # The age limit the docstring promises: an observation older than the
+                # cutoff is not evidence about the cap we are under today.
+                if ts and ts < cutoff:
+                    continue
+                observations.append(obs)
+    observations.sort(key=lambda o: o["observed_at"] or "")
+    return {"observations": observations, "files_scanned": scanned,
+            "files_available": len(paths)}
+
+
+def learn_cap(max_files=500, since_days=365):
+    """The newest refusal per scope, as a cacheable config record.
+
+    Returns a dict (never written here — the caller decides) with the observation and its
+    provenance, or a `found: false` record. A file's mtime only approximates its records'
+    timestamps, so the winner is chosen by the RECORD's own timestamp across everything
+    scanned, not by file order.
+    """
+    found = find_refusals(max_files=max_files, since_days=since_days)
+    best = {}          # scope -> observation
+    for obs in found["observations"]:
+        prev = best.get(obs["scope"])
+        if prev is None or (obs["observed_at"] or "") >= (prev["observed_at"] or ""):
+            best[obs["scope"]] = obs
+    return {
         "contract": 1,
         "learned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "files_scanned": scanned,
-        "files_available": len(paths),
+        "files_scanned": found["files_scanned"],
+        "files_available": found["files_available"],
         "found": bool(best.get("key")),
         "key": best.get("key"),
         "team": best.get("team"),
     }
-    return result
 
 
 def learned_cap(auto_learn=False):
@@ -549,9 +570,13 @@ def period_days(period, since=None):
     return days
 
 
-def collect(period="today", since=None, fast=False):
-    """Build the report data. Membership is explicit in every field name."""
-    days = set(period_days(period, since))
+def _merged_records(fast=False):
+    """(session_id, day) -> Record for everything on record, plus the quarantine list.
+
+    Shared by collect() and daily_totals() ON PURPOSE: the calibration harness compares
+    our daily figure against the gateway's, and that comparison is worthless if the
+    reported total and the calibrated total are assembled by two different code paths.
+    """
     ledger = read_ledger()
     # FAST PATH (statusline): the per-session ledger dir alone answers "today", so the
     # history log — hundreds of thousands of lines on a long-lived machine — is not read
@@ -587,6 +612,23 @@ def collect(period="today", since=None, fast=False):
         if prior is not None and prior.reset_anchored:
             r.reset_anchored = True
         merged[key] = r
+    return merged, quarantined
+
+
+def collect(period="today", since=None, fast=False, days=None):
+    """Build the report data. Membership is explicit in every field name.
+
+    `days` overrides the period with an explicit set of UTC dates — how the calibration
+    harness asks for one past day at a time.
+    """
+    if days is not None:
+        days = set(days)
+        label = (sorted(days)[0] if len(days) == 1
+                 else f"{min(days)} … {max(days)}")
+    else:
+        days = set(period_days(period, since))
+        label = PERIODS.get(period, (period, ""))[0] if not since else f"since {since}"
+    merged, quarantined = _merged_records(fast=fast)
 
     per_session_day = {k: v for k, v in merged.items() if k[1] in days}
 
@@ -624,7 +666,7 @@ def collect(period="today", since=None, fast=False):
             cap_source = "learned from a budget-kill message"
     return {
         "contract": CONTRACT,
-        "period": PERIODS.get(period, (period, ""))[0] if not since else f"since {since}",
+        "period": label,
         "period_days_utc": sorted(days),
         "today_utc": TODAY,
         "membership": ("all sessions with a ledger or history entry on "
@@ -644,6 +686,216 @@ def collect(period="today", since=None, fast=False):
         "local_saved_usd": (savings.get("saved_usd") if savings else None),
         "local_events": (savings.get("events") if savings else None),
         "quarantined": quarantined,
+    }
+
+
+# --- calibration against the gateway's own figure -----------------------------
+# The daily total has been wrong in BOTH directions and was internally consistent every
+# time, so internal consistency is not evidence. A refusal states `Current cost` — the
+# cumulative FOR THE KEY in the current budget window, which is exactly the `today` axis.
+# That makes every refusal a free, external measurement of a day we can check ourselves
+# against, and there are 119 of them across 37 UTC days on the machine this was built on.
+#
+# Direction matters: a refusal is a LOWER BOUND (it names the cumulative at that instant,
+# and the day can overshoot — $43.17 is on record). So ours-below-gateway is a defect;
+# ours-above is not.
+
+STALE_REPEAT_WINDOW_MIN = 30     # reset propagation lag, measured at ~5-10 min
+CENT = 0.005                     # "the same figure" for two floats printed to the cent
+
+
+def _minutes_into_utc_day(ts):
+    """Minutes past 00:00 UTC, or None if the timestamp is unusable."""
+    try:
+        return int(ts[11:13]) * 60 + int(ts[14:16])
+    except (ValueError, IndexError, TypeError):
+        return None
+
+
+def gateway_totals(observations, stale_window_min=STALE_REPEAT_WINDOW_MIN):
+    """Per UTC day: the highest cumulative the GATEWAY itself stated, and how it got it.
+
+    Two things that would otherwise manufacture false findings:
+
+    REPEATS. Once blocked, every further request re-reports the same cached cumulative —
+    14 of them on 2026-08-24. They are one measurement, not fourteen.
+
+    THE POST-MIDNIGHT REPEAT. The budget window resets at 00:00 UTC but propagation lags
+    minutes, so a refusal just after midnight restates YESTERDAY's cumulative. Counted as
+    the new day's ground truth it invents a ~$40 reference for a day that has barely
+    spent anything — a phantom undercount on every such day, which is precisely the
+    finding this harness exists to report honestly. Confirmed instances: 2026-07-31T00:05
+    and 2026-08-21T00:00, both repeating the prior day to the cent. The rule keys on the
+    VALUE repeating as well as the clock, because a genuine post-reset kill the same night
+    states a DIFFERENT figure and is real data (2026-08-21T00:06 does exactly that).
+
+    Only the per-KEY scope is a personal daily reference; `Team=` carries the shared cap
+    (1400), and using it would call every day a $1400 undercount.
+    """
+    by_day = defaultdict(list)
+    for obs in observations:
+        if obs.get("scope") != "key":
+            continue
+        ts = obs.get("observed_at") or ""
+        if not _valid_date(ts[:10]):
+            continue
+        by_day[ts[:10]].append(obs)
+
+    out = {}
+    for day in sorted(by_day):
+        prev_cal_day = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+        ref = out.get(prev_cal_day, {}).get("gateway_usd")
+        fresh, stale = [], []
+        for obs in by_day[day]:
+            mins = _minutes_into_utc_day(obs.get("observed_at") or "")
+            if (ref is not None and mins is not None and mins <= stale_window_min
+                    and abs(obs["cost_at_kill_usd"] - ref) <= CENT):
+                stale.append(obs)
+            else:
+                fresh.append(obs)
+        if stale and prev_cal_day in out:
+            out[prev_cal_day]["stale_repeats"] += len(stale)
+        if fresh:
+            best = max(fresh, key=lambda o: o["cost_at_kill_usd"])
+            out[day] = {
+                "gateway_usd": best["cost_at_kill_usd"],
+                "cap_usd": best["cap_usd"],
+                "n_refusals": len(fresh),
+                "first_observed_at": min(o["observed_at"] or "" for o in fresh),
+                "last_observed_at": max(o["observed_at"] or "" for o in fresh),
+                "stale_repeats": 0,
+            }
+    return out
+
+
+def history_coverage():
+    """(first_day, last_day) the history log actually covers, or (None, None).
+
+    This is what makes a day CALIBRATABLE. Refusals reach back further than the log does
+    — on the machine this was built on, back to 2026-07-26 against a log starting
+    2026-08-18 — and for those earlier days our total is not a small figure, it is NO
+    figure. Reporting them as maximal undercounts would inflate the headline from $290 to
+    $701 and aim the investigation at an attribution bug that cannot exist where there is
+    nothing to attribute.
+
+    Keyed on the log's window rather than on "we found no records", because inside the
+    window an empty day is the real structural blindness and must still be reported.
+    Note that pre-coverage ledger FILES do survive on disk as 2-field `<day> 0` records,
+    so a day can look populated while carrying no spend — coverage, not record count, is
+    the honest discriminator.
+    """
+    first = last = None
+    try:
+        f = open(HISTORY_PATH, "r", errors="ignore")
+    except OSError:
+        return None, None
+    with f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 5 or not _valid_date(parts[2]):
+                continue
+            day = parts[2]
+            if first is None or day < first:
+                first = day
+            if last is None or day > last:
+                last = day
+    return first, last
+
+
+def daily_totals(days):
+    """OUR figure for each of `days`: the cloud spend attributable to that UTC day.
+
+    Deliberately built from _merged_records, the same assembly collect() reports from —
+    a calibration harness that computes the total a second way would only ever prove the
+    two implementations agree.
+    """
+    merged, _quarantined = _merged_records()
+    out = {d: {"ours_usd": 0.0, "sessions_counted": 0, "reset_anchored_sessions": 0}
+           for d in days}
+    for (_sid, day), rec in merged.items():
+        row = out.get(day)
+        if row is None:
+            continue
+        row["ours_usd"] += rec.day_usd
+        if rec.valid and rec.axis == "cloud":
+            row["sessions_counted"] += 1
+        if rec.reset_anchored:
+            row["reset_anchored_sessions"] += 1
+    for row in out.values():
+        row["ours_usd"] = round(row["ours_usd"], 4)
+    return out
+
+
+def calibrate(max_files=500, since_days=365, tolerance=0.01):
+    """Compare our daily total against the gateway's stated cumulative, day by day."""
+    found = find_refusals(max_files=max_files, since_days=since_days)
+    gw = gateway_totals(found["observations"])
+    ours = daily_totals(sorted(gw))
+    cov_first, cov_last = history_coverage()
+    rows = []
+    for day in sorted(gw):
+        g, o = gw[day], ours[day]
+        delta = round(o["ours_usd"] - g["gateway_usd"], 4)
+        covered = cov_first is not None and day >= cov_first
+        if not covered:
+            verdict = "no-data"
+        elif delta < -tolerance:
+            # A refusal is a lower bound, so only ours-BELOW-gateway is a defect.
+            verdict = "undercount"
+        else:
+            verdict = "ok"
+        rows.append({
+            "day": day,
+            "ours_usd": o["ours_usd"],
+            "gateway_usd": round(g["gateway_usd"], 4),
+            "delta_usd": delta,
+            "covered": covered,
+            "verdict": verdict,
+            # Our share of a figure the day PROVABLY reached. Once the gateway refuses,
+            # the key is blocked for the rest of the budget window — and the window is the
+            # UTC day — so the stated cumulative is approximately the day's FINAL total,
+            # not merely a floor. The shortfall is therefore the whole error, and a ratio
+            # that holds steady across days with very different session mixes is what
+            # distinguishes a systematic missing component from a few absent sessions.
+            "ours_pct_of_gateway": (round(100.0 * o["ours_usd"] / g["gateway_usd"], 2)
+                                    if g["gateway_usd"] else None),
+            "n_refusals": g["n_refusals"],
+            "stale_repeats": g["stale_repeats"],
+            "cap_usd": g["cap_usd"],
+            "sessions_counted": o["sessions_counted"],
+            "reset_anchored_sessions": o["reset_anchored_sessions"],
+            "last_refusal_at": g["last_observed_at"],
+        })
+    under = [r for r in rows if r["verdict"] == "undercount"]
+    no_data = [r for r in rows if r["verdict"] == "no-data"]
+    worst = min(under, key=lambda r: r["delta_usd"]) if under else None
+    # MEDIAN, not mean: one no-data-adjacent outlier should not move the headline. Only
+    # calibrated days count — a day with no basis would drag the ratio toward 0% and make
+    # a systematic one-fifth shortfall look like a catastrophic one.
+    ratios = sorted(r["ours_pct_of_gateway"] for r in rows
+                    if r["verdict"] != "no-data" and r["ours_pct_of_gateway"] is not None)
+    if ratios:
+        mid = len(ratios) // 2
+        median_pct = (ratios[mid] if len(ratios) % 2
+                      else round((ratios[mid - 1] + ratios[mid]) / 2, 2))
+    else:
+        median_pct = None
+    return {
+        "contract": CONTRACT,
+        "reference": "the gateway's own `Current cost` at a budget refusal (a LOWER bound)",
+        "tolerance_usd": tolerance,
+        "ledger_covers_from": cov_first,
+        "ledger_covers_to": cov_last,
+        "days_with_a_reference": len(rows),
+        "days_calibrated": len(rows) - len(no_data),
+        "no_data_days": len(no_data),
+        "median_pct_of_gateway": median_pct,
+        "undercount_days": len(under),
+        "worst_day": worst["day"] if worst else None,
+        "worst_delta_usd": worst["delta_usd"] if worst else None,
+        "unaccounted_usd": round(-sum(r["delta_usd"] for r in under), 4),
+        "files_scanned": found["files_scanned"],
+        "days": rows,
     }
 
 
@@ -776,6 +1028,68 @@ def render_cap(cfg, resolved, measured_today=None):
     return "\n".join(lines)
 
 
+def render_calibrate(data):
+    """One row per day we have external evidence for. Days without a refusal are ABSENT
+    rather than 'ok': no reference means no opinion, and printing a pass there would
+    dress the absence of evidence up as agreement."""
+    cov = (f"{data['ledger_covers_from']} … {data['ledger_covers_to']}"
+           if data["ledger_covers_from"] else "nothing (no history log)")
+    lines = ["cost-tracker — calibration against the gateway's own figure",
+             f"  reference: {data['reference']}",
+             f"  scanned {data['files_scanned']} transcript(s); "
+             f"{data['days_with_a_reference']} UTC day(s) with a refusal to check against",
+             f"  our ledger covers: {cov}"
+             + (f" — {data['no_data_days']} earlier day(s) have a reference but NO basis "
+                f"on our side" if data["no_data_days"] else ""),
+             ""]
+    if not data["days"]:
+        lines.append("  no refusal on record — nothing to calibrate against.")
+        lines.append("  INCONCLUSIVE, not a pass: this machine has no external reference")
+        lines.append("  for any day, so the daily total is unverified either way.")
+        return "\n".join(lines)
+
+    lines.append(f"  {'day':<12}{'ours':>10}{'gateway':>11}{'delta':>10}  "
+                 f"{'sess':>4} {'kills':>5}  verdict")
+    lines.append("  " + "-" * 62)
+    for r in data["days"]:
+        flag = {"undercount": "UNDERCOUNT", "no-data": "no data (pre-ledger)"}.get(
+            r["verdict"], "ok")
+        note = ""
+        if r["reset_anchored_sessions"]:
+            note = f"  (floor: {r['reset_anchored_sessions']} resumed)"
+        # A no-data day has no delta worth printing: the zero is an absent source, not a
+        # measurement, and a printed -40.09 reads as a finding.
+        ours = "     —" if r["verdict"] == "no-data" else f"{r['ours_usd']:>10.2f}"
+        delta = "        —" if r["verdict"] == "no-data" else f"{r['delta_usd']:>+10.2f}"
+        lines.append(f"  {r['day']:<12}{ours:>10}{r['gateway_usd']:>11.2f}"
+                     f"{delta:>10}  {r['sessions_counted']:>4} "
+                     f"{r['n_refusals']:>5}  {flag}{note}")
+    lines.append("  " + "-" * 62)
+    if data["undercount_days"]:
+        lines.append(f"  {data['undercount_days']} of {data['days_calibrated']} calibrated "
+                     f"UNDERCOUNT — ${data['unaccounted_usd']:.2f} of real spend never "
+                     f"reached our total.")
+        lines.append(f"  worst: {data['worst_day']} at ${data['worst_delta_usd']:.2f}.")
+        if data["median_pct_of_gateway"] is not None:
+            lines.append(f"  we report a median {data['median_pct_of_gateway']:.1f}% of "
+                         f"what the gateway charged.")
+            lines.append("  A refusal BLOCKS the key for the rest of the window, so that "
+                         "figure is very nearly")
+            lines.append("  the day's FINAL total — the gap is the error itself, not a "
+                         "bound on it. A ratio")
+            lines.append("  this steady across different session mixes means a systematic "
+                         "missing component,")
+            lines.append("  not a few sessions that got away.")
+        lines.append("  Do NOT close the gap by scaling or clamping: every previous "
+                     "version of this")
+        lines.append("  bug agreed with itself, and only this external reference "
+                     "catches it.")
+    else:
+        lines.append(f"  every calibrated day agrees with the gateway "
+                     f"(tolerance ${data['tolerance_usd']:.2f}).")
+    return "\n".join(lines)
+
+
 def render_doctor(data):
     lines = [f"cost-tracker doctor — ledger dir: {LEDGER_DIR}",
              f"                     history:    {HISTORY_PATH}",
@@ -868,6 +1182,14 @@ def main(argv=None):
     doc = sub.add_parser("doctor", help="show quarantined records and resolved config")
     doc.add_argument("--json", action="store_true")
 
+    cal = sub.add_parser("calibrate",
+                         help="check our daily totals against the gateway's own figure")
+    cal.add_argument("--json", action="store_true")
+    cal.add_argument("--since-days", type=int, default=365, dest="since_days",
+                     help="how far back to look for refusals (default 365)")
+    cal.add_argument("--tolerance", type=float, default=0.01, metavar="USD",
+                     help="ignore gaps smaller than this (default 0.01)")
+
     cp = sub.add_parser("cap", help="show the daily cap and where it came from")
     cp.add_argument("--learn", action="store_true",
                     help="re-read the cap from the newest budget-kill message now "
@@ -887,6 +1209,16 @@ def main(argv=None):
             date.fromisoformat(since)
         except ValueError:
             ap.error("--since needs a YYYY-MM-DD date")
+
+    if cmd == "calibrate":
+        data = calibrate(since_days=args.since_days, tolerance=args.tolerance)
+        if args.json:
+            print(json.dumps(data, indent=2, sort_keys=True))
+        else:
+            print(render_calibrate(data))
+        # Nonzero on a measured undercount so this can GATE a release rather than being
+        # a report nobody reads. No refusal on record is INCONCLUSIVE, and exits 0.
+        return 1 if data["undercount_days"] else 0
 
     if cmd == "cap":
         if args.set_cap:
