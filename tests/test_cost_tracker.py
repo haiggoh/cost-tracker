@@ -312,3 +312,58 @@ def test_a_cloud_session_that_switches_to_local_mid_day_is_not_a_reset(tmp_path)
     data = ct.collect("today")
     assert data["sessions"][sid]["reset_anchored"] is False
     assert data["sessions"][sid]["axis"] == "local"
+
+
+def test_a_small_day_figure_beside_a_large_lifetime_is_correct_not_a_lost_day(tmp_path):
+    """The 2026-09-08 false alarm, locked in as behaviour rather than fixed as a bug.
+
+    A session that began 17:46Z on day N and crossed midnight reported $0.1164 for
+    day N+1 while its lifetime cumulative stood at $20.596. That was read as the
+    day-boundary logic losing $20.48, and a waypoint was filed against it. It is not
+    a defect: $0.1164 is the spend that accrued AFTER the baseline carried into day
+    N+1, and the remaining $20.48 belongs to day N, where it is counted. The two
+    figures answer different questions and the report prints both on labelled axes.
+
+    Conservation is the assertion that matters: the per-day deltas must sum to the
+    lifetime. A test that only checked the day figure would pass for a genuinely
+    lossy implementation too."""
+    ct, ledger = load_ct(tmp_path, today="2026-09-08")
+    sid = "3065c2cf-0000-0000-0000-000000000001"
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        f"2026-09-07T17:46:00Z {sid} 2026-09-07 0 0 0\n"
+        f"2026-09-07T23:59:00Z {sid} 2026-09-07 20.4796692 0 20.4796692\n"
+        f"2026-09-08T04:00:00Z {sid} 2026-09-08 20.596069250000003 20.4796692 20.596069250000003\n"
+    )
+    (ledger / sid).write_text("2026-09-08 20.596069250000003 20.4796692")
+
+    today = ct.collect("today")
+    assert today["cloud_usd"] == pytest.approx(0.1164, abs=1e-4)
+    assert today["sessions"][sid]["lifetime_usd"] == pytest.approx(20.5961, abs=1e-4)
+
+    # the $20.48 is not lost — it is day N's, and summing the two days recovers the
+    # lifetime exactly. This is the assertion that would fail if a day were dropped.
+    prior = ct.collect("today", since=None, days=["2026-09-07"])
+    assert prior["cloud_usd"] == pytest.approx(20.4797, abs=1e-4)
+    assert prior["cloud_usd"] + today["cloud_usd"] == pytest.approx(20.5961, abs=1e-4)
+
+
+def test_a_transient_mid_crossing_baseline_self_heals_at_the_next_render(tmp_path):
+    """Why the false alarm was transient and could not be reproduced afterwards.
+
+    The capture wrapper sets day N+1's baseline from the prior record's cumulative.
+    A render that lands mid-crossing can therefore write a baseline that momentarily
+    over-states what carried in, making the day figure too SMALL. The next render
+    re-reads its own record, takes the same-day branch and keeps the established
+    baseline — so the figure corrects itself and the anomalous state is gone before
+    anyone can inspect it. Asserted here so the self-heal is a guarantee rather than
+    an accident, since it is the reason the reported symptom vanished."""
+    ct, ledger = load_ct(tmp_path, today="2026-09-08")
+    sid = "3065c2cf-0000-0000-0000-000000000002"
+
+    # the anomalous render: baseline over-states the carry-in, day looks near-free
+    (ledger / sid).write_text("2026-09-08 20.60 20.48")
+    assert ct.collect("today")["cloud_usd"] == pytest.approx(0.12, abs=1e-2)
+
+    # the healed render: same day, true carry-in restored, full day visible again
+    (ledger / sid).write_text("2026-09-08 33.007983750000015 0.679908")
+    assert ct.collect("today")["cloud_usd"] == pytest.approx(32.328, abs=1e-3)

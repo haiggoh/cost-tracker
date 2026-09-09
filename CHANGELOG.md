@@ -2,6 +2,45 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.4.1] — 2026-09-10
+
+### Fixed — test isolation: the learned cap leaked in from the real machine
+
+`tests/conftest.py` redirected the ledger, history, today and savings paths at a
+throwaway dir but not `COST_TRACKER_CONFIG_DIR`, so every test read the REAL
+`~/.claude/cost-tracker/cap.json`. `test_statusline_labels_its_axis_and_respects_an_unset_cap`
+asserts that no denominator is invented when there is no cap — and inherited this
+machine's learned $40, failing on a pristine checkout (`today: cloud $12.40/$40` vs the
+expected `today: cloud $12.40`) while passing anywhere the cap had never been learned.
+Clearing the two cap OVERRIDE env vars was not sufficient, because the cap also resolves
+from the config file. `COST_TRACKER_PROJECTS_DIR` is now redirected for the same reason,
+so no test can scan the real transcripts.
+
+### Added — the midnight-crossing day/lifetime distinction, locked in as behaviour
+
+A waypoint reported a day-boundary bug: `report` printed `$0.1164` for 2026-09-08 while
+the session's ledger record held `$20.596`, and the conclusion recorded was that a
+session spanning midnight UTC "has its spend attributed to the wrong day, so BOTH days
+are wrong". Investigated against the real ledger and history: **that is not what
+happens.** The `$0.1164` is the spend accrued after the baseline carried into day N+1,
+the remaining `$20.48` is day N's and is counted there, and the two figures answer
+different questions on separately labelled axes. A conservation audit over all 238
+ledger sessions found **no unexplained cases** — the apparent $501 of "lost" spend
+decomposes into 14 sessions predating the history log (added 2026-08-18, so their
+earlier days were never recorded), one correct local→cloud phantom baseline, and one
+session dated the cutover day itself.
+
+Two regression tests now pin the correct behaviour rather than a fix for a non-bug:
+
+- a small day figure beside a large lifetime is correct, asserted via **conservation**
+  (the per-day deltas must sum to the lifetime) — the assertion that would actually fail
+  for a lossy implementation, where checking the day figure alone would not;
+- the transient mid-crossing baseline **self-heals** at the next render, which is why the
+  reported symptom could not be reproduced afterwards.
+
+Mutation-tested 3/3: returning the lifetime instead of the delta, clamping a small delta
+to zero, and dropping the non-today day from the period filter are each caught.
+
 ## [0.4.0] — 2026-09-04
 
 ### Added — calibration against the gateway's own figure
