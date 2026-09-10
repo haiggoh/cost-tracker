@@ -37,7 +37,8 @@ per-session table is printed so a reader can audit the label instead of trusting
 | `cost-tracker statusline` | `today: cloud $30.12/$40 · local saved $4.80` |
 | `cost-tracker doctor` | quarantined records grouped by (reason, session) + resolved config |
 | `cost-tracker cap [--learn] [--set USD]` | the daily cap and the refusal it was read from |
-| `cost-tracker calibrate [--json] [--tolerance USD] [--since-days N]` | our daily total vs the gateway's own figure; **exits 1 on a measured undercount** |
+| `cost-tracker calibrate [--json] [--tolerance USD] [--since-days N] [--learn-markup]` | our daily total vs the gateway's own figure; **exits 1 on a measured undercount** |
+| `cost-tracker markup [--set F] [--clear] [--json]` | the gateway markup, its provenance, and why a normal account has none |
 
 Periods longer than today read the append-only history log, grouped by
 `(session_id, utc_date)` with the last row per group winning — the per-session
@@ -133,7 +134,62 @@ savings, ignored period window). Calibration: ten more (summing refusals instead
 the day's max, min for max, dropping either half of the post-midnight staleness rule,
 dropping the `Key=`-scope filter so the 1400 team cap leaks in, treating an overshoot as an
 undercount, ignoring the coverage window, charging a session's lifetime to one day,
-counting local spend as cloud, and exiting 0 on a measured undercount). All caught.
+counting local spend as cloud, and exiting 0 on a measured undercount). Markup: seven more
+(a non-identity default, dropping the CV scatter gate, dropping the minimum-days gate,
+scaling our total instead of the denominator, a corrupt factor falling back to something
+other than identity, and — in `budget-tally` — reading the raw cap instead of the effective
+one or ignoring a recorded markup). All caught.
+
+## If your spend reads low: the gateway markup
+
+**On a normal Anthropic account this section does not apply, and nothing here is active.**
+The markup defaults to exactly `1.0`, no output changes, and it cannot be acquired by
+accident — the only evidence it can be learned from is a gateway refusal message, which a
+first-party account never produces.
+
+If you go through a **reselling gateway** (LiteLLM and similar), read on, because this cost
+one long investigation already and the point of writing it down is that you don't repeat it.
+
+The symptom: `calibrate` reports a steady ~20% undercount that never resolves. The
+temptation is to hunt for lost spend in the ledger. **It isn't there.** What we measured:
+
+- Claude Code's own `total_cost_usd` is **correct**. Reconstructing a session from its own
+  usage records reproduces it — one session at 0.9996 of the reported figure, median 1.0207
+  across 14 single-day sessions, several exactly 1.0000. cost-tracker reads that number and
+  does not recompute it, so it inherits that accuracy.
+- Rates for the record (Opus 5): **$5/MTok input, $25/MTok output**, cache write 1.25× input
+  = $6.25, cache read 0.10× = $0.50. There is **no long-context premium** — 1M context is
+  priced the same.
+- The gap was **entirely gateway-side**: that gateway billed a median **×1.23** of list
+  price, steady across 19 calibrated days (×1.205–×1.289, CV 0.053). A multiplicative model
+  fit roughly **4× tighter** than an additive one (CV 0.018 vs 0.075), which is what rules
+  out a fixed per-day fee — the flat-looking ~$8 shortfall was an artifact of the cap
+  truncating every day near $40.
+- Ruled out along the way, so you needn't: day-boundary misattribution, missing sessions, a
+  long-context premium, tokenizer inflation, and a second consumer of the same key.
+
+The practical consequence, and the reason this is worth a feature rather than a footnote:
+with a $40 cap, the refusal arrives at about **$32** of list-price spend. A tally showing
+"$32.43 of $40" looks like 19% of headroom left when there is none. That is not a rounding
+concern; it is the difference between planning the next hour of work and having it stop.
+
+So: our figure is **never rewritten**. It is what the tokens cost, and it's right. What the
+markup changes is the **denominator** — the cap re-expressed in the units you can actually
+measure:
+
+```
+$ cost-tracker calibrate --learn-markup
+cost-tracker: recorded a gateway markup of ×1.2271 from 19 day(s).
+
+$ cost-tracker statusline
+today: cloud $32.43/$33 eff (×1.23 gw)
+```
+
+Your gateway's factor is its own, so it is measured locally rather than shipped as a
+constant. `--learn-markup` **refuses** to record one the evidence doesn't support: it needs
+at least 5 calibrated days and per-day ratios tight enough (CV ≤ 0.25) to be a single rate.
+Learning nothing is a result, not a failure — identity stays in force. `cost-tracker markup`
+prints the factor and its provenance; `--clear` reverts to list price only.
 
 ## Environment
 
@@ -142,7 +198,8 @@ counting local spend as cloud, and exiting 0 on a measured undercount). All caug
 | `COST_TRACKER_LEDGER_DIR` | `~/.claude/cost-ledger` |
 | `COST_TRACKER_HISTORY` | `~/.claude/cost-ledger-history.log` |
 | `COST_TRACKER_CAP_USD` | unset (falls back to `BUDGET_TALLY_CAP_USD`, then the learned cap) |
-| `COST_TRACKER_CONFIG_DIR` | `~/.claude/cost-tracker` — where the learned cap is cached |
+| `COST_TRACKER_CONFIG_DIR` | `~/.claude/cost-tracker` — where the learned cap and markup are cached |
+| `COST_TRACKER_MARKUP` | unset — a gateway markup override; `1` disables the adjustment entirely |
 | `COST_TRACKER_PROJECTS_DIR` | `~/.claude/projects` — transcripts the learner reads |
 | `COST_TRACKER_TODAY` | today, UTC — override for tests |
 | `COST_TRACKER_SAVINGS_CMD` | auto-discovered `local-agents` savings ledger |

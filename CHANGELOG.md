@@ -2,6 +2,49 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.5.0] — 2026-09-10
+
+### Added — the gateway markup: why a reselling gateway makes an accurate total misleading
+
+`calibrate` had been reporting a steady ~20% undercount for weeks, and the assumption was a
+bug in our own arithmetic. It is not. Measured, then closed:
+
+- Claude Code's `total_cost_usd` is **correct** — reconstructing a session from its own usage
+  records reproduces it (one session at 0.9996, median 1.0207 across 14 single-day sessions).
+  We read that figure and never recompute it, so nothing on our side was losing spend.
+- The entire gap is **gateway-side**: this gateway bills a median **×1.23** of Anthropic list
+  price, steady over 19 calibrated days (×1.205–×1.289, CV 0.053). A multiplicative model fit
+  ~4× tighter than an additive one (CV 0.018 vs 0.075), ruling out a fixed per-day fee — the
+  flat-looking ~$8 shortfall was the cap truncating every day near $40.
+- Ruled out: day-boundary misattribution, missing sessions, a long-context premium (1M
+  context carries none), tokenizer inflation, and a second consumer of the key.
+
+The consequence is operational, not cosmetic: with a $40 cap the refusal lands at about **$32**
+of list-price spend, so "$32.43 of $40" advertised 19% of headroom that did not exist.
+
+So the markup is a **second labelled axis, never a correction**. `cloud_usd` keeps its exact
+prior meaning; what moves is the **denominator** — the cap re-expressed in units we can
+measure (`effective_cap_usd`), plus additive `markup`, `billed_usd` and `billed_pct_of_cap`
+keys. `budget-tally`'s warning percentage now uses the effective cap, which is the surface
+that actually misled a live session.
+
+- `cost-tracker calibrate --learn-markup` records the factor so it never has to be re-derived.
+  It **refuses** unless the evidence supports one rate: ≥5 calibrated days and per-day ratios
+  with CV ≤ 0.25. Learning nothing is a result, not a failure.
+- `cost-tracker markup [--set F] [--clear] [--json]` shows the factor and its provenance — and
+  when there is none, explains why that is the correct state and carries the measured finding
+  so the next reader inherits it instead of re-investigating.
+
+**Normal Claude Code is unaffected, structurally rather than by a flag.** The default is
+exactly `1.0`, and a markup can only be learned from a gateway refusal message, which a
+first-party account never emits. All 93 pre-existing tests pass untouched, and the statusline
+and table strings are asserted byte-identical at the default.
+
+### Fixed — test isolation, one axis further
+
+`tests/conftest.py` now also clears `COST_TRACKER_MARKUP`; an inherited value would have
+rescaled every denominator in the suite. Same class of leak as the learned cap in 0.4.1.
+
 ## [0.4.1] — 2026-09-10
 
 ### Fixed — test isolation: the learned cap leaked in from the real machine

@@ -37,6 +37,9 @@ def load_ct(tmp_path, today="2026-09-03", cap=None, savings_cmd="/bin/false",
     # pristine tree). Clearing the two override env vars is not sufficient on its own.
     os.environ["COST_TRACKER_CONFIG_DIR"] = str(tmp_path / "config")
     os.environ["COST_TRACKER_PROJECTS_DIR"] = str(tmp_path / "projects")
+    # Same trap as the cap, one axis over: an inherited markup would rescale every
+    # denominator in the suite. Tests that WANT one set it after loading.
+    os.environ.pop("COST_TRACKER_MARKUP", None)
     if cap is None:
         os.environ.pop("COST_TRACKER_CAP_USD", None)
         os.environ.pop("BUDGET_TALLY_CAP_USD", None)

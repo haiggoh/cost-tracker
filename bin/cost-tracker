@@ -232,6 +232,112 @@ def learned_cap(auto_learn=False):
     return float(key["cap_usd"]), cfg
 
 
+# --- the gateway markup -------------------------------------------------------
+# Claude Code's own `total_cost_usd` prices tokens at Anthropic LIST rates, and it is
+# RIGHT: reconstructing a session from its own usage records reproduces that figure (one
+# session measured 0.9996 of it, median 1.0207 across 14). We report that number
+# faithfully. A RESELLING GATEWAY (LiteLLM and friends) may nonetheless bill a different
+# amount for the same tokens, and then the ledger is accurate about cost while being
+# useless as a predictor of the refusal — the only number that actually stops the work.
+#
+# So the markup is deliberately NOT a correction to our figure. It is a second,
+# separately-labelled axis, learned from external evidence, and its DEFAULT IS EXACTLY
+# 1.0 — meaning ordinary first-party Claude Code (no gateway, no cap, no refusals ever)
+# resolves identity, renders byte-identical output, and cannot acquire a markup, because
+# the only thing it can be learned from is a gateway refusal message that will never
+# exist. Compatibility here is structural, not a flag someone has to remember to unset.
+
+MARKUP_MIN_DAYS = 5          # below this, one odd day sets the factor
+MARKUP_MAX_CV = 0.25         # above this the ratio is noise, not a rate
+MARKUP_IDENTITY = 1.0
+
+
+def _median(xs):
+    s = sorted(xs)
+    if not s:
+        return None
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def measure_markup(cal):
+    """What this gateway bills per dollar of list price, from `calibrate` rows.
+
+    MEDIAN of the per-day gateway/ours ratios, not a ratio of the sums: a single
+    partially-covered day would otherwise drag the rate, and the whole point is a figure
+    steady enough to trust.
+
+    The CV gate is what makes this honest. A markup is a claim that ONE multiplicative
+    constant explains the gap; if the per-day ratios scatter, that claim is false and the
+    right answer is to learn nothing rather than to publish an average of unlike things.
+    Measured on the machine this was built on: 19 days, ratios 1.205-1.289, CV 0.0525 —
+    well inside the gate, and 4x tighter as a multiplicative model (CV 0.0178) than as an
+    additive one (0.0752), which is the evidence that it IS a rate and not a fixed fee.
+    """
+    ratios = [r["gateway_usd"] / r["ours_usd"]
+              for r in cal.get("days", [])
+              if r.get("verdict") != "no-data" and r.get("ours_usd")
+              and r.get("gateway_usd")]
+    n = len(ratios)
+    if not n:
+        return {"factor": None, "n_days": 0, "cv": None,
+                "reason": "no calibrated day has both a gateway figure and one of ours"}
+    med = _median(ratios)
+    mean = sum(ratios) / n
+    var = sum((x - mean) ** 2 for x in ratios) / n
+    cv = (var ** 0.5 / mean) if mean else None
+    out = {"factor": round(med, 4), "n_days": n,
+           "cv": (round(cv, 4) if cv is not None else None),
+           "ratio_min": round(min(ratios), 4), "ratio_max": round(max(ratios), 4),
+           "reason": None}
+    if n < MARKUP_MIN_DAYS:
+        out["reason"] = (f"only {n} calibrated day(s); needs {MARKUP_MIN_DAYS} before one "
+                         "day stops being able to set the rate")
+    elif cv is not None and cv > MARKUP_MAX_CV:
+        out["reason"] = (f"the per-day ratios scatter too much (CV {cv:.3f} > "
+                         f"{MARKUP_MAX_CV}) to be a single rate")
+    elif med is not None and med < 1.0:
+        # Ours ABOVE the gateway is not a markup. A refusal is a lower bound on the day,
+        # so this is the expected shape of a well-behaved account, not a discount.
+        out["reason"] = ("we already report at or above the gateway — nothing to mark up")
+    return out
+
+
+def learned_markup():
+    """(factor, provenance) from the config file, or (None, None). Never scans."""
+    cfg = read_config()
+    if not cfg:
+        return None, None
+    m = cfg.get("markup")
+    if not isinstance(m, dict) or not m.get("factor"):
+        return None, cfg
+    try:
+        f = float(m["factor"])
+    except (TypeError, ValueError):
+        return None, cfg
+    return (f, cfg) if f > 0 else (None, cfg)
+
+
+def markup_factor():
+    """What the gateway bills per dollar we report. 1.0 unless PROVEN otherwise.
+
+    Resolution order, most explicit first:
+      1. COST_TRACKER_MARKUP — a deliberate override always wins (and `1` disables).
+      2. the factor learned by `calibrate --learn-markup` from refusal evidence.
+      3. 1.0 — identity. No gateway, no evidence, no adjustment, unchanged output.
+    """
+    raw = os.environ.get("COST_TRACKER_MARKUP")
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    f, _cfg = learned_markup()
+    return f if f else MARKUP_IDENTITY
+
+
 def cap_usd(auto_learn=False):
     """The daily cap, or None. None is a real answer, not zero.
 
@@ -664,6 +770,13 @@ def collect(period="today", since=None, fast=False, days=None):
             cap_source = "env override"
         else:
             cap_source = "learned from a budget-kill message"
+    markup = markup_factor()
+    if os.environ.get("COST_TRACKER_MARKUP"):
+        markup_source = "env override"
+    elif markup != MARKUP_IDENTITY:
+        markup_source = "measured against the gateway's own figures"
+    else:
+        markup_source = "none (list price — no gateway markup measured)"
     return {
         "contract": CONTRACT,
         "period": label,
@@ -675,6 +788,17 @@ def collect(period="today", since=None, fast=False, days=None):
         "cap_usd": cap,
         "cap_source": cap_source,
         "pct_of_cap": (round(cloud_total / cap, 4) if cap else None),
+        # The gateway axis. ADDITIVE keys: `cloud_usd` and `pct_of_cap` keep their exact
+        # prior meaning (what Claude Code says the tokens cost, at list price), so every
+        # existing consumer is unaffected. At the identity factor these say 1.0 / the same
+        # figure / the same percentage, which is why a first-party user sees no change.
+        "markup": markup,
+        "markup_source": markup_source,
+        "billed_usd": round(cloud_total * markup, 4),
+        "billed_pct_of_cap": (round(cloud_total * markup / cap, 4) if cap else None),
+        # The cap expressed in OUR units: the figure our own total may reach before the
+        # gateway refuses. With no markup this is just the cap.
+        "effective_cap_usd": (round(cap / markup, 4) if cap else None),
         "sessions": {sid: {"period_usd": round(s["period_usd"], 4),
                            "lifetime_usd": round(s["lifetime_usd"], 4),
                            "days": s["days"], "axis": s["axis"],
@@ -880,7 +1004,7 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
                       else round((ratios[mid - 1] + ratios[mid]) / 2, 2))
     else:
         median_pct = None
-    return {
+    out = {
         "contract": CONTRACT,
         "reference": "the gateway's own `Current cost` at a budget refusal (a LOWER bound)",
         "tolerance_usd": tolerance,
@@ -897,6 +1021,8 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
         "files_scanned": found["files_scanned"],
         "days": rows,
     }
+    out["measured_markup"] = measure_markup(out)
+    return out
 
 
 # --- rendering ----------------------------------------------------------------
@@ -933,6 +1059,25 @@ def render_table(data, short_ids=True):
     if cap:
         lines.append(f"{'cap':<{idw}}  {'':<6}  {cap:>14.2f}  "
                      f"{'(' + format(data['pct_of_cap'] * 100, '.0f') + '% used)':>18}")
+    markup = data.get("markup") or MARKUP_IDENTITY
+    if markup != MARKUP_IDENTITY:
+        # Only printed when a markup was actually MEASURED. At identity these rows would
+        # restate the total under a second name, which is noise dressed as rigour.
+        lines.append(f"{'billed (gw)':<{idw}}  {'':<6}  {data['billed_usd']:>14.2f}  "
+                     f"{'(×' + format(markup, '.3f') + ')':>18}")
+        if cap:
+            lines.append(f"{'eff. cap':<{idw}}  {'':<6}  "
+                         f"{data['effective_cap_usd']:>14.2f}  "
+                         f"{'(' + format(data['billed_pct_of_cap'] * 100, '.0f') + '% used)':>18}")
+        lines.append("")
+        lines.append(f"  The TOTAL above is list price — what Claude Code says the tokens "
+                     f"cost, and it is right.")
+        lines.append(f"  This gateway bills ×{markup:.3f} of that ({data['markup_source']}), "
+                     f"so the total to")
+        lines.append(f"  watch against the cap is the effective one: the refusal arrives at "
+                     f"about "
+                     + (f"${data['effective_cap_usd']:.0f}" if cap else "an earlier figure")
+                     + " here.")
     if data["local_saved_usd"] is not None:
         lines.append(f"{'local saved':<{idw}}  {'local':<6}  "
                      f"{data['local_saved_usd']:>14.2f}  "
@@ -973,8 +1118,18 @@ def render_statusline(data):
     """
     cap = data["cap_usd"]
     label = "today" if len(data["period_days_utc"]) == 1 else data["period"]
+    markup = data.get("markup") or MARKUP_IDENTITY
     if cap:
-        seg = f"{label}: cloud ${data['cloud_usd']:.2f}/${cap:.0f}"
+        # With a markup, the DENOMINATOR moves, not the numerator. Our figure is what it
+        # always was; what changes is how much of it the cap actually buys. Scaling the
+        # numerator instead would silently restate a measured quantity — the exact
+        # mislabel this tool exists to avoid — and would also make the segment disagree
+        # with the report table beside it.
+        if markup != MARKUP_IDENTITY and data.get("effective_cap_usd"):
+            seg = (f"{label}: cloud ${data['cloud_usd']:.2f}"
+                   f"/${data['effective_cap_usd']:.0f} eff (×{markup:.2f} gw)")
+        else:
+            seg = f"{label}: cloud ${data['cloud_usd']:.2f}/${cap:.0f}"
     else:
         seg = f"{label}: cloud ${data['cloud_usd']:.2f}"
     if data["local_saved_usd"] is not None:
@@ -1080,13 +1235,109 @@ def render_calibrate(data):
             lines.append("  this steady across different session mixes means a systematic "
                          "missing component,")
             lines.append("  not a few sessions that got away.")
-        lines.append("  Do NOT close the gap by scaling or clamping: every previous "
-                     "version of this")
-        lines.append("  bug agreed with itself, and only this external reference "
+        lines.append("  Do NOT close the gap by scaling or clamping OUR figure: every "
+                     "previous version of")
+        lines.append("  this bug agreed with itself, and only this external reference "
                      "catches it.")
     else:
         lines.append(f"  every calibrated day agrees with the gateway "
                      f"(tolerance ${data['tolerance_usd']:.2f}).")
+
+    # The resolution of the long-running "20% undercount": it was never OUR arithmetic.
+    m = data.get("measured_markup") or {}
+    if m.get("n_days"):
+        lines.append("")
+        lines.append(f"  gateway markup: this account's gateway billed a median "
+                     f"×{m['factor']:.4f} of list")
+        lines.append(f"    price over {m['n_days']} calibrated day(s) "
+                     f"(range ×{m['ratio_min']:.3f}-×{m['ratio_max']:.3f}"
+                     + (f", CV {m['cv']:.3f}" if m.get("cv") is not None else "") + ").")
+        if m.get("reason"):
+            lines.append(f"    NOT learned: {m['reason']}.")
+        else:
+            lines.append("    Steady enough to be a RATE rather than a scatter, so it can "
+                         "be recorded as a")
+            lines.append("    second axis: `cost-tracker calibrate --learn-markup`. Our own "
+                         "total is left")
+            lines.append("    exactly as measured; what the markup changes is the "
+                         "DENOMINATOR — how much")
+            lines.append("    of the cap a dollar of list price actually consumes.")
+    return "\n".join(lines)
+
+
+def render_markup(cfg, resolved):
+    """Show the markup, its provenance, and — when there is none — WHY that is correct.
+
+    The empty state carries the finding. Someone on a plain Anthropic account should read
+    this and stop, rather than go looking for the missing 20% that isn't theirs to find.
+    """
+    lines = []
+    env = os.environ.get("COST_TRACKER_MARKUP")
+    if resolved == MARKUP_IDENTITY:
+        lines.append("gateway markup: NONE (×1.0) — spend is reported at Anthropic list "
+                     "price.")
+    else:
+        lines.append(f"gateway markup: ×{resolved:.4f} — this account's gateway bills that "
+                     f"much per")
+        lines.append("  dollar of list price.")
+    if env:
+        lines.append(f"  source: ×{env} from $COST_TRACKER_MARKUP (an explicit override "
+                     "always wins)")
+    m = (cfg or {}).get("markup")
+    if m:
+        lines.append(f"  basis:       {m.get('basis', 'unknown')}")
+        if m.get("n_days"):
+            lines.append(f"  measured on: {m['n_days']} calibrated UTC day(s)"
+                         + (f", CV {m['cv']:.3f}" if m.get("cv") is not None else ""))
+        if m.get("ratio_min") and m.get("ratio_max"):
+            lines.append(f"  per-day range: ×{m['ratio_min']:.3f} … ×{m['ratio_max']:.3f}")
+        lines.append(f"  recorded:    {m.get('measured_at', 'unknown')}")
+    elif not env:
+        lines.append("  Nothing has been measured, and on a normal Claude Code account "
+                     "nothing ever will")
+        lines.append("  be: a markup can only be learned from a GATEWAY refusal message, "
+                     "which a")
+        lines.append("  first-party account never produces. This is the correct and "
+                     "expected state.")
+    lines.append("")
+    lines.append("what this is for")
+    lines.append("  Claude Code's own `total_cost_usd` prices tokens at Anthropic LIST "
+                 "rates, and it")
+    lines.append("  is accurate: reconstructing a session from its own usage records "
+                 "reproduces that")
+    lines.append("  figure to within a rounding error. cost-tracker reports it faithfully "
+                 "and does")
+    lines.append("  not recompute it.")
+    lines.append("")
+    lines.append("  A RESELLING gateway (LiteLLM and similar) can still bill a different "
+                 "amount for")
+    lines.append("  the same tokens. Then our total is right about cost and wrong as a "
+                 "predictor of")
+    lines.append("  the refusal — which is the only number that actually stops the work. "
+                 "The markup")
+    lines.append("  is that second axis. It never edits our figure; it moves the "
+                 "DENOMINATOR, so the")
+    lines.append("  cap is expressed in the units we can actually measure.")
+    lines.append("")
+    lines.append("  Measured once, so nobody repeats the investigation: on the gateway "
+                 "this was")
+    lines.append("  built against, the factor was ~×1.23 and steady (19 days, "
+                 "×1.205-×1.289, CV")
+    lines.append("  0.053) — a multiplicative model fit ~4x tighter than an additive one, "
+                 "which is")
+    lines.append("  what rules out a fixed per-day fee. With a $40 cap that puts the real "
+                 "ceiling")
+    lines.append("  near $32 of list-price spend, matching every observed kill day. Ruled "
+                 "out along")
+    lines.append("  the way: day-boundary misattribution, missing sessions, a long-context "
+                 "premium")
+    lines.append("  (there is none), tokenizer inflation, and a second consumer of the key.")
+    lines.append("")
+    lines.append("  Your gateway's factor is its own. Run `cost-tracker calibrate "
+                 "--learn-markup`")
+    lines.append("  once you have a few refusals on record; it refuses to learn a factor "
+                 "the")
+    lines.append("  evidence does not support.")
     return "\n".join(lines)
 
 
@@ -1189,6 +1440,16 @@ def main(argv=None):
                      help="how far back to look for refusals (default 365)")
     cal.add_argument("--tolerance", type=float, default=0.01, metavar="USD",
                      help="ignore gaps smaller than this (default 0.01)")
+    cal.add_argument("--learn-markup", action="store_true", dest="learn_markup",
+                     help="record the measured gateway markup so it does not have to be "
+                          "re-derived (refused unless the per-day ratios are steady)")
+
+    mk = sub.add_parser("markup", help="show the gateway markup and where it came from")
+    mk.add_argument("--set", metavar="FACTOR", dest="set_markup",
+                    help="record a factor by hand (1 = none)")
+    mk.add_argument("--clear", action="store_true",
+                    help="forget the learned markup and go back to list price only")
+    mk.add_argument("--json", action="store_true")
 
     cp = sub.add_parser("cap", help="show the daily cap and where it came from")
     cp.add_argument("--learn", action="store_true",
@@ -1212,6 +1473,28 @@ def main(argv=None):
 
     if cmd == "calibrate":
         data = calibrate(since_days=args.since_days, tolerance=args.tolerance)
+        if getattr(args, "learn_markup", False):
+            m = data.get("measured_markup") or {}
+            if m.get("factor") and not m.get("reason"):
+                cfg = read_config() or {"contract": CONTRACT}
+                cfg["markup"] = {
+                    "factor": m["factor"],
+                    "n_days": m["n_days"], "cv": m.get("cv"),
+                    "ratio_min": m.get("ratio_min"), "ratio_max": m.get("ratio_max"),
+                    "measured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "basis": ("median per-day gateway/ours ratio over calibrated days, "
+                              "from the gateway's own `Current cost` at refusals"),
+                }
+                if write_config(cfg):
+                    print(f"cost-tracker: recorded a gateway markup of "
+                          f"×{m['factor']:.4f} from {m['n_days']} day(s).")
+                else:
+                    print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+            else:
+                # Refusing to learn is a RESULT, not a failure: identity stays in force.
+                print("cost-tracker: no markup recorded — "
+                      + (m.get("reason") or "no evidence to measure one from")
+                      + ".", file=sys.stderr)
         if args.json:
             print(json.dumps(data, indent=2, sort_keys=True))
         else:
@@ -1219,6 +1502,41 @@ def main(argv=None):
         # Nonzero on a measured undercount so this can GATE a release rather than being
         # a report nobody reads. No refusal on record is INCONCLUSIVE, and exits 0.
         return 1 if data["undercount_days"] else 0
+
+    if cmd == "markup":
+        if args.set_markup:
+            try:
+                v = float(args.set_markup)
+            except ValueError:
+                ap.error("--set needs a number")
+            if v <= 0:
+                ap.error("--set needs a positive number")
+            cfg = read_config() or {"contract": CONTRACT}
+            if v == MARKUP_IDENTITY:
+                cfg.pop("markup", None)
+            else:
+                cfg["markup"] = {
+                    "factor": v, "n_days": 0, "cv": None,
+                    "measured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "basis": "set by hand with `cost-tracker markup --set`",
+                }
+            if not write_config(cfg):
+                print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+        elif args.clear:
+            cfg = read_config() or {}
+            if cfg.pop("markup", None) is not None and not write_config(cfg):
+                print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+        cfg = read_config()
+        resolved = markup_factor()
+        if args.json:
+            print(json.dumps({"contract": CONTRACT, "markup": resolved,
+                              "is_identity": resolved == MARKUP_IDENTITY,
+                              "config_path": CONFIG_PATH,
+                              "config": (cfg or {}).get("markup")},
+                             indent=2, sort_keys=True))
+            return 0
+        print(render_markup(cfg, resolved))
+        return 0
 
     if cmd == "cap":
         if args.set_cap:

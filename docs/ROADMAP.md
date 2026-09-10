@@ -2,7 +2,7 @@
 
 ## Current released version
 
-`0.4.1`
+`0.5.0`
 
 If this disagrees with `.claude-plugin/plugin.json`, treat everything below as
 suspect — the manifest is authoritative. `tests/test_version_consistency.sh`
@@ -14,6 +14,11 @@ asserts the two agree, along with the top numbered CHANGELOG heading.
   vs the cumulative the gateway stated when it refused, per UTC day, with the sign and the
   ratio. Exits 1 on a measured undercount. Three verdicts: `ok`, `undercount`, and
   `no-data` for days that have a reference but no basis on our side.
+- **The gateway markup (`markup`, `calibrate --learn-markup`, 0.5.0).** What a reselling
+  gateway bills per dollar of list price, measured locally from refusal evidence and gated on
+  the per-day ratios actually being one rate. Defaults to identity, so first-party Claude Code
+  is untouched; carries the measured finding in its own empty state so the next account does
+  not repeat the investigation.
 - The daily cap, learned from the gateway's own refusal message (`cap --learn`).
 - Reset-anchored attribution for resumed sessions (see 0.2.0).
 - Three labelled axes (session / today / local) and the per-session table.
@@ -23,24 +28,25 @@ asserts the two agree, along with the top numbered CHANGELOG heading.
 
 ## Open
 
-- **THE DAILY TOTAL UNDERCOUNTS BY ~20%, AND IT IS MEASURED.** `calibrate` reports 16 of
-  17 calibrated days short by $6.84-$9.16 — a median **80.8%** of what the gateway
-  charged. Because a refusal blocks the key for the rest of the window, the gateway's
-  figure is very nearly the day's final total, so on every one of those days the ledger
-  should have read close to the $40 cap and instead read ~$32. The steadiness of the ratio
-  across very different session mixes is the evidence that this is a systematic missing
-  component rather than absent sessions.
-  - **ELIMINATED as the main cause: sessions that never render a statusline.** They exist
-    and were the leading suspicion, but they are 1-3 billable turns each, worth 1-3% of a
-    day — real, and ~10x too small. (Token reconstruction cannot arbitrate the absolute
-    figure: it prices cache tokens ~4x high and returns $77-$242 for these days.)
-  - **Remaining candidates**, in order: per-iteration accounting (sub-agent / sidechain
-    turns and server-side compaction iterations that may never reach
-    `.cost.total_cost_usd`); and gateway-side metering of traffic no session attributes to
-    itself. The next decisive step needs a per-request view the key currently cannot read.
-  - **Do NOT close this by scaling or clamping.** Every previous version of this bug was
-    self-consistent; a fudge factor restores that comfort and destroys the only external
-    check we have.
+- ~~**THE DAILY TOTAL UNDERCOUNTS BY ~20%.**~~ **RESOLVED in 0.5.0 — it was never our
+  arithmetic.** Both remaining candidates named here (per-iteration accounting, and gateway
+  metering of unattributed traffic) were WRONG. What the evidence actually showed:
+  - Claude Code's `total_cost_usd` is correct — a session reconstructed from its own usage
+    records reproduces it (0.9996 on one session; median 1.0207 across 14). We read that
+    number and never recompute it, so no spend was being lost on our side.
+  - The gap is **entirely gateway-side**: a median **×1.23** of Anthropic list price, steady
+    over 19 days (×1.205–×1.289, CV 0.053). The multiplicative model fit ~4× tighter than an
+    additive one, ruling out a fixed fee; the flat-looking ~$8 was the cap truncating days
+    near $40.
+  - Rates for the record (Opus 5): $5/MTok in, $25/MTok out, cache write $6.25, cache read
+    $0.50. **No long-context premium.** Also ruled out: day-boundary misattribution, missing
+    sessions, tokenizer inflation, a second consumer of the key.
+  - **The "do NOT close this by scaling" warning was right, and is preserved.** Our figure is
+    still never rewritten. 0.5.0 adds the markup as a separate labelled axis that moves the
+    DENOMINATOR only, defaults to identity, and refuses to learn a factor the evidence does
+    not support. That is the opposite of a fudge factor: it is a measured, provenance-carrying
+    second quantity, and the external check it was protecting remains intact.
+
 - **Coverage before 2026-08-18.** The history log starts there; refusals reach back to
   2026-07-26. Those 19 days are reported `no-data` rather than as maximal undercounts,
   which is honest but also unrecoverable — the records were never written.

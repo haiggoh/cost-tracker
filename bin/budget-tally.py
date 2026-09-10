@@ -77,6 +77,35 @@ PROJECTS_DIR = os.environ.get(
     "BUDGET_TALLY_PROJECTS_DIR", os.path.expanduser("~/.claude/projects")
 )
 CAP_USD = float(os.environ.get("BUDGET_TALLY_CAP_USD", "40"))
+# A resold gateway can bill more than list price for the same tokens, in which case the
+# cap is reached at a LOWER figure than the one we can measure — so a percentage against
+# the raw cap under-warns exactly when the warning matters. `cost-tracker markup` owns
+# this factor; here we only READ it, and 1.0 (no gateway, or nothing measured) leaves
+# every number and the whole message byte-identical to before.
+def _markup_factor():
+    raw = os.environ.get("COST_TRACKER_MARKUP")
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    path = os.path.join(
+        os.environ.get("COST_TRACKER_CONFIG_DIR",
+                       os.path.expanduser("~/.claude/cost-tracker")), "cap.json")
+    try:
+        with open(path) as f:
+            m = (json.load(f) or {}).get("markup") or {}
+        v = float(m.get("factor") or 0)
+        return v if v > 0 else 1.0
+    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
+        return 1.0
+
+
+MARKUP = _markup_factor()
+# The cap in the units this script actually measures.
+EFFECTIVE_CAP_USD = (CAP_USD / MARKUP) if CAP_USD else CAP_USD
 WARN_PCT = float(os.environ.get("BUDGET_TALLY_WARN_PCT", "0.75"))
 STAMP_PATH = os.environ.get("BUDGET_TALLY_STAMP", os.path.expanduser("~/.claude/.budget-tally-warned"))
 # Authoritative per-session cost ledger written by the statusLine wrapper
@@ -384,8 +413,8 @@ def compute():
 
     total = ledger_total + recon_total
     priced_any = recon_priced or bool(ledger)
-    pct = total / CAP_USD if CAP_USD else 0.0
-    remaining = CAP_USD - total
+    pct = total / EFFECTIVE_CAP_USD if EFFECTIVE_CAP_USD else 0.0
+    remaining = EFFECTIVE_CAP_USD - total
 
     current_session_total = 0.0
     cur = current_session_path()
@@ -446,9 +475,17 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
     else:
         basis = "reconstructed from token usage"
     prefix = f"⚠️ WARNING — {pct * 100:.0f}% of daily cap used: " if pct >= WARN_PCT else "budget-tally: "
+    # With no markup this renders exactly as it always has. With one, the denominator is
+    # the cap in OUR units and says so, because "$32 of $40" looks like headroom that
+    # isn't there — the refusal arrives at $32.
+    if MARKUP != 1.0:
+        cap_str = (f"${EFFECTIVE_CAP_USD:.0f} effective cap "
+                   f"(${CAP_USD:.0f} at gateway ×{MARKUP:.2f})")
+    else:
+        cap_str = f"${CAP_USD:.0f} cap"
     return (
-        f"{prefix}today's spend ({session_scope}) ≈ ${total:.2f} of ${CAP_USD:.0f} "
-        f"cap (~${remaining:.2f} left, {basis}){note}"
+        f"{prefix}today's spend ({session_scope}) ≈ ${total:.2f} of {cap_str} "
+        f"(~${remaining:.2f} left, {basis}){note}"
     )
 
 

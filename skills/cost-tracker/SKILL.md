@@ -1,6 +1,6 @@
 ---
 name: cost-tracker
-description: "Use when reporting, reconciling, or reasoning about Claude Code API spend — today's cost, a session's cost, whether a budget cap is close, what local offload saved, or why two spend figures disagree. Also use before writing any dollar figure about token spend into a message, a note, or a status line, and when the cost ledger looks wrong (a total that exceeds the cap, a session counted twice, a figure that dropped). ALSO use whenever the daily budget cap has changed, was raised or lowered, or the user says the cap is wrong / out of date — that is a `cost-tracker cap --learn`, which re-reads the cap from the gateway's own refusal message. Do NOT use for non-spend statusline work or for gateway auth problems."
+description: "Use when reporting, reconciling, or reasoning about Claude Code API spend — today's cost, a session's cost, whether a budget cap is close, what local offload saved, or why two spend figures disagree. Also use before writing any dollar figure about token spend into a message, a note, or a status line, and when the cost ledger looks wrong (a total that exceeds the cap, a session counted twice, a figure that dropped). ALSO use whenever the daily budget cap has changed, was raised or lowered, or the user says the cap is wrong / out of date — that is a `cost-tracker cap --learn`, which re-reads the cap from the gateway's own refusal message. ALSO use when spend looks systematically LOW against a budget, when a gateway or LiteLLM account bills more than the reported figure, or the user asks why the cap is hit earlier than the total suggests — that is `cost-tracker markup`. Do NOT use for non-spend statusline work or for gateway auth problems."
 ---
 
 # cost-tracker
@@ -33,6 +33,7 @@ cost-tracker report --week   --json      # 7 days; --month, --since YYYY-MM-DD
 cost-tracker statusline                  # today: cloud $30.12/$40 · local saved $4.80
 cost-tracker doctor                      # quarantined records + resolved config
 cost-tracker calibrate                   # our daily totals vs the gateway's own figure
+cost-tracker markup                      # gateway markup + provenance (1.0 on a normal account)
 ```
 
 The table **is** the audit of the label — a reader can total the period column
@@ -72,20 +73,35 @@ themselves. Quote it rather than retyping numbers out of it.
   exists. The day is anchored at the reset, which means spend earlier that same day,
   before the reset, is not in the ledger at all. Say "at least $X" for those.
 
-## ⚠️ The daily total is KNOWN to undercount by ~20%
+## ⚠️ On a reselling gateway, an ACCURATE total still under-predicts the cap
 
-Do not present `today` as exact. `cost-tracker calibrate` measures it against the gateway's
-own stated cumulative and finds 16 of 17 calibrated days short by $6.84-$9.16 — a median
-**80.8%** of what was actually charged. Because a refusal blocks the key for the rest of
-the window, on every day the cap was hit the ledger should have read close to $40 and read
-~$32 instead.
+The long-standing "~20% undercount" is **resolved, and it was not our arithmetic.** Claude
+Code's `total_cost_usd` is correct (a session reconstructed from its own usage records
+reproduces it), and cost-tracker reads that figure rather than recomputing it. The gap was
+**entirely gateway-side**: this gateway bills a median **×1.23** of Anthropic list price,
+steady over 19 calibrated days (CV 0.053).
 
-**What that means when you quote the figure:** treat `today` as a FLOOR, and say so when
-the number is being used to decide whether there is headroom — the error runs in the
-direction that walks a session into a hard stop while the display still promises room.
-Sessions that never render a statusline were the leading suspicion and are now measured
-out: 1-3 turns each, 1-3% of a day, ~10x too small. Never close the gap by scaling or
-clamping; every self-consistent version of this bug was wrong.
+**What that means when you quote the figure.** Our number is what the tokens cost, and it
+is right. It is *not* what the cap counts. With a $40 cap the refusal lands near **$32** of
+list-price spend, so `today` is a **FLOOR against the cap** — say so whenever the number is
+being used to decide whether there is headroom, because the error runs in the direction that
+walks a session into a hard stop while the display still promises room. "$32.43 of $40" is
+the shape of that trap.
+
+- Run `cost-tracker markup` to see whether a factor is recorded on this machine. If one is,
+  `statusline` and `budget-tally` already report against the **effective** cap and you can
+  quote the percentage as-is.
+- If `calibrate` shows a steady ratio and no markup is recorded yet, run
+  `cost-tracker calibrate --learn-markup`. It refuses unless ≥5 calibrated days agree
+  closely enough to be one rate — a refusal is a result, not a failure.
+- **On a normal Anthropic account none of this applies**, the factor is `1.0`, and no markup
+  can ever be learned (it takes a gateway refusal message, which never occurs). Do not go
+  hunting for a missing 20% there.
+- **Still never close a gap by scaling or clamping OUR figure.** The markup is a separate,
+  provenance-carrying axis that moves the denominator; that is the opposite of a fudge
+  factor, and the external check stays intact. Ruled out, so don't re-investigate:
+  day-boundary misattribution, missing sessions, a long-context premium (there is none),
+  tokenizer inflation, a second consumer of the key.
 
 ## When a figure looks wrong
 

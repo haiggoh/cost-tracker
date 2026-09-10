@@ -189,6 +189,8 @@ PYSNIP
 )"
 is "a local path-style model id is not reported as unpriced" "$localnoise" "claude-imaginary-7"
 
+. "$(cd "$(dirname "$0")" && pwd)/helpers/markup_section.inc"
+
 echo
 printf 'passed %s, failed %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

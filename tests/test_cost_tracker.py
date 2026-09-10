@@ -367,3 +367,105 @@ def test_a_transient_mid_crossing_baseline_self_heals_at_the_next_render(tmp_pat
     # the healed render: same day, true carry-in restored, full day visible again
     (ledger / sid).write_text("2026-09-08 33.007983750000015 0.679908")
     assert ct.collect("today")["cloud_usd"] == pytest.approx(32.328, abs=1e-3)
+
+
+# --- the gateway markup -------------------------------------------------------
+# The compatibility requirement is the load-bearing one: a normal Claude Code user has no
+# gateway, no refusals, and must see EXACTLY what they saw before. So these tests assert
+# byte-identical output at the default as carefully as they assert the adjustment works.
+
+def test_no_markup_is_the_default_and_output_is_unchanged(tmp_path):
+    """The first-party case. No config, no env, no evidence — identity."""
+    ct, ledger = load_ct(tmp_path, cap=40)
+    (ledger / "ffffffff-0000-0000-0000-000000000001").write_text("2026-09-03 30.12 0")
+    assert ct.markup_factor() == 1.0
+    data = ct.collect("today")
+    assert data["markup"] == 1.0
+    # The pre-markup strings, character for character.
+    assert ct.render_statusline(data) == "today: cloud $30.12/$40"
+    table = ct.render_table(data)
+    assert "billed" not in table and "eff. cap" not in table and "×" not in table
+    # The additive keys exist but say nothing new, so a consumer reading either is right.
+    assert data["billed_usd"] == pytest.approx(data["cloud_usd"])
+    assert data["effective_cap_usd"] == pytest.approx(40.0)
+
+
+def test_a_markup_moves_the_denominator_and_never_our_measured_total(tmp_path):
+    """The whole design in one assertion: our figure is untouched, the cap shrinks."""
+    ct, ledger = load_ct(tmp_path, cap=40)
+    (ledger / "ffffffff-0000-0000-0000-000000000001").write_text("2026-09-03 30.12 0")
+    import os
+    os.environ["COST_TRACKER_MARKUP"] = "1.25"
+    ct, ledger = load_ct(tmp_path, cap=40)
+    os.environ["COST_TRACKER_MARKUP"] = "1.25"
+    (ledger / "ffffffff-0000-0000-0000-000000000001").write_text("2026-09-03 30.12 0")
+    data = ct.collect("today")
+    assert data["cloud_usd"] == pytest.approx(30.12)      # UNCHANGED — the point
+    assert data["markup"] == pytest.approx(1.25)
+    assert data["billed_usd"] == pytest.approx(37.65)
+    assert data["effective_cap_usd"] == pytest.approx(32.0)
+    line = ct.render_statusline(data)
+    assert "$30.12" in line and "$32 eff" in line and "×1.25" in line
+    # 94% of the effective cap, not the reassuring 75% of the raw one.
+    assert data["billed_pct_of_cap"] == pytest.approx(37.65 / 40, abs=1e-4)
+    os.environ.pop("COST_TRACKER_MARKUP", None)
+
+
+def test_a_markup_is_refused_when_the_per_day_ratios_are_not_a_single_rate(tmp_path):
+    """A scattered ratio is not a rate. Learning nothing is the correct outcome."""
+    ct, _ = load_ct(tmp_path)
+    steady = {"days": [{"verdict": "ok", "ours_usd": 10.0, "gateway_usd": 12.3}
+                       for _ in range(8)]}
+    m = ct.measure_markup(steady)
+    assert m["reason"] is None and m["factor"] == pytest.approx(1.23)
+    # Same mean, wild spread.
+    scattered = {"days": [{"verdict": "ok", "ours_usd": 10.0, "gateway_usd": g}
+                          for g in (5.0, 25.0, 6.0, 22.0, 8.0, 19.0, 30.0, 4.0)]}
+    s = ct.measure_markup(scattered)
+    assert s["reason"] and "scatter" in s["reason"]
+    # Too few days, however steady.
+    few = {"days": [{"verdict": "ok", "ours_usd": 10.0, "gateway_usd": 12.3}
+                    for _ in range(2)]}
+    assert "calibrated day" in ct.measure_markup(few)["reason"]
+    # Ours already at or above the gateway is not a discount to apply.
+    over = {"days": [{"verdict": "ok", "ours_usd": 12.0, "gateway_usd": 10.0}
+                     for _ in range(8)]}
+    assert "nothing to mark up" in ct.measure_markup(over)["reason"]
+    # A no-data day contributes no ratio.
+    assert ct.measure_markup({"days": [{"verdict": "no-data", "ours_usd": 0,
+                                        "gateway_usd": 40.0}]})["n_days"] == 0
+
+
+def test_the_markup_command_explains_the_absence_on_a_first_party_account(tmp_path):
+    """The empty state must carry the finding, or the next user re-derives it."""
+    ct, _ = load_ct(tmp_path)
+    out = ct.render_markup(None, 1.0)
+    assert "NONE (×1.0)" in out
+    assert "list price" in out
+    assert "correct and expected state" in out
+    # The measured evidence travels with the tool.
+    assert "1.23" in out and "$32" in out
+    # And it says what was ruled out, so the dead ends aren't re-explored.
+    assert "day-boundary" in out and "tokenizer" in out
+
+
+def test_learn_markup_persists_the_factor_and_survives_a_reload(tmp_path):
+    ct, _ = load_ct(tmp_path)
+    cfg = {"contract": 1, "markup": {"factor": 1.2271, "n_days": 19, "cv": 0.0525,
+                                     "basis": "median per-day ratio"}}
+    ct.write_config(cfg)
+    ct2, _ = load_ct(tmp_path)
+    assert ct2.markup_factor() == pytest.approx(1.2271)
+    # `markup --clear` goes back to list price only.
+    assert ct2.main(["markup", "--clear"]) == 0
+    ct3, _ = load_ct(tmp_path)
+    assert ct3.markup_factor() == 1.0
+
+
+def test_a_corrupt_or_absurd_markup_falls_back_to_identity_never_to_zero(tmp_path):
+    """A bad factor must not silently zero or explode every reported figure."""
+    ct, _ = load_ct(tmp_path)
+    for bad in ({"factor": "abc"}, {"factor": 0}, {"factor": -2}, {"factor": None}, "nope"):
+        ct.write_config({"contract": 1, "markup": bad})
+        ct2, _ = load_ct(tmp_path)
+        assert ct2.markup_factor() == 1.0
