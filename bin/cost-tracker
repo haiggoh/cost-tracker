@@ -1056,28 +1056,46 @@ def render_table(data, short_ids=True):
     lines.append(f"{'TOTAL cloud':<{idw}}  {'':<6}  {data['cloud_usd']:>14.2f}  "
                  f"{'—':>18}")
     cap = data["cap_usd"]
-    if cap:
-        lines.append(f"{'cap':<{idw}}  {'':<6}  {cap:>14.2f}  "
-                     f"{'(' + format(data['pct_of_cap'] * 100, '.0f') + '% used)':>18}")
     markup = data.get("markup") or MARKUP_IDENTITY
     if markup != MARKUP_IDENTITY:
-        # Only printed when a markup was actually MEASURED. At identity these rows would
-        # restate the total under a second name, which is noise dressed as rigour.
+        # A MEASURED markup means the two axes differ, so the percentage that matters is
+        # the gateway's: the cap is enforced on what the gateway bills, not on list price.
+        # Reporting "75% used" off list price while the refusal is 6% away is the reassuring
+        # wrong number. So the billed row leads and carries the percentage, and the cap is
+        # printed as the gateway's own figure — the same one its refusal message quotes.
+        # The list-price TOTAL above is NOT removed: it is the canonical recorded value and
+        # the only one Claude Code itself asserts, so it stays visible and labelled.
         lines.append(f"{'billed (gw)':<{idw}}  {'':<6}  {data['billed_usd']:>14.2f}  "
-                     f"{'(×' + format(markup, '.3f') + ')':>18}")
+                     + (f"{'(' + format(data['billed_pct_of_cap'] * 100, '.0f') + '% of cap)':>18}"
+                        if cap else f"{'(×' + format(markup, '.3f') + ')':>18}"))
         if cap:
+            lines.append(f"{'cap (gw)':<{idw}}  {'':<6}  {cap:>14.2f}  "
+                         f"{'(×' + format(markup, '.3f') + ' applied)':>18}")
             lines.append(f"{'eff. cap':<{idw}}  {'':<6}  "
                          f"{data['effective_cap_usd']:>14.2f}  "
-                         f"{'(' + format(data['billed_pct_of_cap'] * 100, '.0f') + '% used)':>18}")
+                         f"{'(= cap in list-price $)':>18}")
+    elif cap:
+        # No markup: one axis, so no qualifier is needed or honest.
+        lines.append(f"{'cap':<{idw}}  {'':<6}  {cap:>14.2f}  "
+                     f"{'(' + format(data['pct_of_cap'] * 100, '.0f') + '% used)':>18}")
+    if markup != MARKUP_IDENTITY:
         lines.append("")
-        lines.append(f"  The TOTAL above is list price — what Claude Code says the tokens "
-                     f"cost, and it is right.")
-        lines.append(f"  This gateway bills ×{markup:.3f} of that ({data['markup_source']}), "
-                     f"so the total to")
-        lines.append(f"  watch against the cap is the effective one: the refusal arrives at "
-                     f"about "
-                     + (f"${data['effective_cap_usd']:.0f}" if cap else "an earlier figure")
-                     + " here.")
+        lines.append(f"  TOTAL cloud is list price — what Claude Code says the tokens cost, "
+                     f"and it is right.")
+        lines.append(f"  It is the canonical recorded figure; the ×{markup:.3f} markup "
+                     f"({data['markup_source']}) is stored")
+        lines.append(f"  separately and applied on top, never baked into what is recorded.")
+        if cap:
+            lines.append(f"  Read the pair you are actually measured on: billed "
+                         f"${data['billed_usd']:.2f} against the cap's ${cap:.0f} — the "
+                         f"figure the")
+            lines.append(f"  gateway's own refusal message quotes. `eff. cap` is that same "
+                         f"cap expressed back in")
+            lines.append(f"  list-price dollars (${data['effective_cap_usd']:.0f}), which is "
+                         f"where TOTAL cloud runs out.")
+        else:
+            lines.append(f"  With no cap known, the billed figure is what the gateway "
+                         f"charges; there is no denominator to print.")
     if data["local_saved_usd"] is not None:
         lines.append(f"{'local saved':<{idw}}  {'local':<6}  "
                      f"{data['local_saved_usd']:>14.2f}  "
@@ -1109,12 +1127,22 @@ def render_table(data, short_ids=True):
 def render_statusline(data):
     """The frozen one-line statusline segment.
 
-      with a cap:    today: cloud $30.12/$40 · local saved $4.80
+      with a cap:    today: cloud $37.35/$40 gw · local saved $4.80
       without a cap: today: cloud $12.40 · local saved $4.80
 
     The axis word is part of the string, not decoration: this segment coexists
     with the renderer's own session-lifetime "$<cost>", and two unlabelled
     dollar figures on one line is the mislabel trap all over again.
+
+    BOTH figures are shown on the SAME axis, and when a markup is known that axis is
+    the GATEWAY's — because the cap the user is measured against is the gateway's $40,
+    and that is the number its refusal message quotes. The earlier form moved the
+    denominator instead ("$30.12/$32 eff (×1.24 gw)"), which was arithmetically
+    equivalent but read as a different, unexplained cap: the user sees $40 in the
+    refusal and $32 here. Showing a deflated cap to keep the numerator at list price
+    optimised for the wrong reader. The full four-figure breakdown (list price, billed,
+    cap, effective cap) stays in `cost-tracker report`, which has room to label axes;
+    this segment has one line and must therefore pick ONE axis and name it.
     """
     cap = data["cap_usd"]
     label = "today" if len(data["period_days_utc"]) == 1 else data["period"]
@@ -1125,10 +1153,14 @@ def render_statusline(data):
         # numerator instead would silently restate a measured quantity — the exact
         # mislabel this tool exists to avoid — and would also make the segment disagree
         # with the report table beside it.
-        if markup != MARKUP_IDENTITY and data.get("effective_cap_usd"):
-            seg = (f"{label}: cloud ${data['cloud_usd']:.2f}"
-                   f"/${data['effective_cap_usd']:.0f} eff (×{markup:.2f} gw)")
+        if markup != MARKUP_IDENTITY:
+            # Gateway axis: the numerator is what the gateway bills, against the cap the
+            # gateway actually enforces. "gw" marks the axis so the figure is never read
+            # as Claude Code's own list-price total, which is the smaller number.
+            seg = (f"{label}: cloud ${data['billed_usd']:.2f}"
+                   f"/${cap:.0f} gw")
         else:
+            # No markup: the two axes are identical, so there is nothing to name.
             seg = f"{label}: cloud ${data['cloud_usd']:.2f}/${cap:.0f}"
     else:
         seg = f"{label}: cloud ${data['cloud_usd']:.2f}"

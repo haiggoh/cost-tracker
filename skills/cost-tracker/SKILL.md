@@ -25,6 +25,59 @@ Two dollar figures on one line with only one label is the same bug wearing a hat
 The status line already shows a session-lifetime `$cost`; the segment this plugin
 adds says `today: cloud …` out loud for exactly that reason.
 
+## NEVER quote a raw spend number from the ledger or a JSON field
+
+**Read this even if you read nothing else on this page.**
+
+The numbers stored on disk are **list price** — what the tokens would cost with no
+gateway in front of them. This gateway bills **more** than list price. So a stored
+number is **smaller than what the user is actually charged**, and repeating it
+under-reports their spend.
+
+**So: do not read spend out of `~/.claude/cost-ledger/*`, out of a transcript's
+`total_cost_usd`, or out of a `cloud_usd` JSON field, and put it in front of the
+user. Run the command instead:**
+
+```bash
+cost-tracker statusline    # one line, correct
+cost-tracker report        # the full table, correct
+cost-tracker today         # today's spend, correct
+```
+
+Every one of these applies the markup for you. **Whatever they print is the number
+to say. Nothing else is.**
+
+Why this warning exists: the raw figure and the real figure look equally plausible —
+neither is malformed, and there is no error to notice. Reading the file "just to
+check" is exactly how a wrong number reaches the user with total confidence behind
+it. There is no case where hand-reading the ledger is the right move; the commands
+are not a slower path to the same answer, they are the only path to the right one.
+
+| If you want | Run this | Do NOT |
+|---|---|---|
+| today's spend | `cost-tracker statusline` | `cat` a ledger file and add it up |
+| a session's cost | `cost-tracker report` | read `total_cost_usd` from the transcript |
+| is the cap close? | `cost-tracker statusline` | compare a raw total to `$40` yourself |
+
+### Which axis a figure is on
+
+The recording stays at list price on purpose — it is the canonical measurement and
+the only figure Claude Code itself asserts. The markup is stored **separately** and
+applied on top, at every surface the user sees. Both figures in a user-facing pair
+are therefore on the **gateway axis**, matching the cap the gateway's own refusal
+message quotes:
+
+| Surface | Shows | Axis |
+|---|---|---|
+| status line segment | `today: cloud $37.35/$40 gw` | gateway — both figures |
+| `budget-tally` warning | `$37.35 of $40 cap (gateway ×1.24 applied)` | gateway — both figures |
+| `cost-tracker report` | `TOTAL cloud` **and** `billed (gw)`, each labelled | both, named |
+| the ledger on disk | `2026-09-11 30.12 0` | list price — never shown raw |
+
+An earlier version deflated the **denominator** instead (`$30.12/$32 eff`). It was
+arithmetically identical, but the user reads `$40` in the refusal message and `$32`
+here, and concludes the tool is wrong. Same ratio, worse answer.
+
 ## Commands
 
 ```

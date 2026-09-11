@@ -191,6 +191,33 @@ is "a local path-style model id is not reported as unpriced" "$localnoise" "clau
 
 . "$(cd "$(dirname "$0")" && pwd)/helpers/markup_section.inc"
 
+# --- 0.5.1: --help is answered, never silently RUN -----------------------------------
+# Before this, --help fell through to the SessionStart path and printed a LIVE spend line,
+# so probing the script both triggered the work and produced output that read as help.
+TALLY="$(cd "$(dirname "$0")" && pwd)/../bin/budget-tally.py"
+H="$(python3 "$TALLY" --help 2>&1 </dev/null)"
+case "$H" in
+  *"tally today's Claude Code API spend"*) ok "--help explains what the script does" ;;
+  *) bad "--help explains what the script does" "a purpose line" "$H" ;;
+esac
+case "$H" in
+  *"--check"*) ok "--help documents the --check mode" ;;
+  *) bad "--help documents the --check mode" "--check" "$H" ;;
+esac
+case "$H" in
+  *"COST_TRACKER_CAP_USD"*) ok "--help documents the env vars" ;;
+  *) bad "--help documents the env vars" "COST_TRACKER_CAP_USD" "$H" ;;
+esac
+# The tell that it did not RUN: a real run always prints "today's spend ... $<digit>".
+if printf '%s' "$H" | grep -q "today's spend"; then
+  bad "--help does not print a live tally" "no live tally" "printed one"
+else
+  ok "--help does not print a live tally"
+fi
+python3 "$TALLY" --nope >/dev/null 2>&1
+if [ "$?" -eq 2 ]; then ok "an unrecognised flag exits 2"; else bad "an unrecognised flag exits 2" "exit 2" "exit $?"; fi
+
+
 echo
 printf 'passed %s, failed %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

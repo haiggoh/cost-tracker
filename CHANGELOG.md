@@ -2,6 +2,44 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.5.1] — 2026-09-11
+
+### Changed
+- **Every user-facing figure now sits on the GATEWAY axis, matching the cap the gateway's own
+  refusal message quotes.** Previously the surfaces kept the numerator at list price and deflated
+  the denominator instead (`today: cloud $30.12/$32 eff (×1.24 gw)`). That was arithmetically
+  identical, but the user reads `$40` in the refusal and `$32` here and concludes the tool is
+  wrong. The status-line segment now reads `today: cloud $37.35/$40 gw`, and the `budget-tally`
+  warning reads `$37.35 of $40 cap (gateway ×1.24 applied)`. The percentage and the headroom are
+  unchanged — the ratio is the same whichever axis both sides are expressed in.
+- The **recording is untouched and stays canonical**: ledger rows remain list price, the markup is
+  stored separately in config and applied at the surface, never baked into what is written. This is
+  what keeps `TOTAL cloud` the figure Claude Code itself asserts. `cost-tracker report` now leads
+  with `billed (gw)` and the gateway cap, keeps `TOTAL cloud` visible and labelled as list price,
+  and prints `eff. cap` as that same cap expressed back in list-price dollars.
+- **The statusline is three lines instead of two.** The budget segment has its own line: together
+  with the model, effort, context and session cost it reached 108 columns and wrapped, which costs
+  more vertical space than a deliberate line break and wraps at an arbitrary point. Measured after:
+  59 / 38 / 44 columns. It is not folded into the dir/branch line, which is variable-length per
+  project and would reintroduce the overflow.
+- The model's context-window suffix is abbreviated for width: `Opus 5 (1M context)` renders as
+  `Opus 5 (1M)`. Nothing else on the line is measured in M, so the word was pure padding. A
+  display name without the suffix passes through untouched.
+
+### Added
+- The skill now carries an unmistakable, general instruction never to quote a raw spend number
+  from a ledger file, a transcript's `total_cost_usd`, or a `cloud_usd` JSON field — those are
+  list price and therefore SMALLER than what the user is charged, so repeating one under-reports.
+  Written for a reader with no other context: it names the commands to run instead, gives a
+  want/run/do-NOT table, and says why the trap is invisible (both numbers look equally plausible
+  and nothing is malformed).
+
+### Notes
+- 8 new assertions across the shell suites (40 statusline, 32 budget-ledger) plus the updated
+  markup expectations; 99 pytest assertions unchanged and passing. A test asserting the ledger row
+  on disk is still list price was added deliberately, so the canonical-recording guarantee is
+  covered by a test rather than only by a comment.
+
 ## [0.5.0] — 2026-09-10
 
 ### Added — the gateway markup: why a reselling gateway makes an accurate total misleading

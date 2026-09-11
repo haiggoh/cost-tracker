@@ -404,8 +404,14 @@ def test_a_markup_moves_the_denominator_and_never_our_measured_total(tmp_path):
     assert data["markup"] == pytest.approx(1.25)
     assert data["billed_usd"] == pytest.approx(37.65)
     assert data["effective_cap_usd"] == pytest.approx(32.0)
+    # The SEGMENT shows one axis, the GATEWAY's, because that is the cap the user is
+    # measured against and the figure its refusal message quotes. Showing $30.12/$32
+    # was arithmetically equivalent but read as an unexplained second cap: the refusal
+    # says $40, so anything else on the denominator confuses. The list-price figure and
+    # the effective cap remain in the DATA (asserted above) and in `report`.
     line = ct.render_statusline(data)
-    assert "$30.12" in line and "$32 eff" in line and "×1.25" in line
+    assert line == "today: cloud $37.65/$40 gw"
+    assert "$32" not in line and "eff" not in line
     # 94% of the effective cap, not the reassuring 75% of the raw one.
     assert data["billed_pct_of_cap"] == pytest.approx(37.65 / 40, abs=1e-4)
     os.environ.pop("COST_TRACKER_MARKUP", None)

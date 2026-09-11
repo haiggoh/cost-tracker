@@ -10,9 +10,15 @@
 # Called by scripts/cost-ledger-capture.sh with the statusLine JSON on stdin.
 #
 # Line 1 (one concise line, fixed-width-ish scalars only):
-#   JoyIA · <model> <effort> · ctx <tokens> <pct>% · $<cost> · 5h <pct>% · 7d <pct>%
-# Line 2 (variable-length names, which can be long, + the previous git fields):
+#   JoyIA · <model> <effort> · ctx <tokens> <pct>% · session $<cost> · 5h <pct>% · 7d <pct>%
+# Line 2 (the budget segment, on its own line since 0.5.1 -- it is the longest single
+# segment and sharing line 1 overflowed one terminal width and wrapped):
+#   today: cloud $<spent>/$<cap> eff (×<markup> gw)
+# Line 3 (variable-length names, which can be long, + the previous git fields):
 #   <dir basename> · <branch> · <worktree> · +<added>/-<removed>
+#
+# The model's context-window suffix is abbreviated for width: "Opus 5 (1M context)"
+# renders as "Opus 5 (1M)".
 #
 # DELIBERATELY OMITTED (2026-08-26, user call): the context WINDOW SIZE (already
 # implied by the model name, e.g. "Opus 5 (1M)") and the per-request token
@@ -21,6 +27,43 @@
 #
 # Every field is optional: anything missing or null is dropped, not printed as
 # "null" or "0". No network calls; one jq pass; git is best-effort and local.
+
+# Argument handling comes BEFORE the stdin read. This script's normal input is the
+# statusLine JSON on stdin, so a user probing it with --help would otherwise block on an
+# empty terminal or render a line and have that read as help output.
+case "${1:-}" in
+  -h|--help)
+    cat <<'USAGE'
+statusline-render.sh — render the Claude Code status line.
+
+Reads the statusLine JSON payload on stdin and prints up to three lines:
+
+  JoyIA · <model> <effort> · ctx <tokens> <pct>% · session $<cost> · 5h <pct>% · 7d <pct>%
+  today: cloud $<billed>/$<cap> gw · local saved $<saved>
+  <dir basename> · <branch> · <worktree> · +<added>/-<removed>
+
+Usage:
+  <statusline JSON> | statusline-render.sh
+  statusline-render.sh --help
+
+The budget line comes from the sibling `cost-tracker` CLI and is on the GATEWAY axis: the
+markup is already applied, so both figures match the cap the gateway's refusal quotes.
+
+Every field is optional — anything missing or null is dropped rather than printed as
+"null" or "0". No network calls; git is best-effort and local. Always exits 0 so a
+rendering problem can never break the status line.
+
+Environment:
+  COST_TRACKER_STATUSLINE=0   omit the budget line entirely
+USAGE
+    exit 0
+    ;;
+  -?*)
+    printf 'statusline-render.sh: unrecognised option: %s\n' "$1" >&2
+    printf "Try 'statusline-render.sh --help'.\n" >&2
+    exit 2
+    ;;
+esac
 
 LC_ALL=C
 export LC_ALL
@@ -66,6 +109,13 @@ fi
 case "$ADD" in ''|*[!0-9]*) ADD=0 ;; esac
 case "$DEL" in ''|*[!0-9]*) DEL=0 ;; esac
 DIRBASE=$(basename "$CWD" 2>/dev/null || printf '%s' "$CWD")
+
+# Abbreviate the model's context-window suffix: "Opus 5 (1M context)" -> "Opus 5 (1M)".
+# The word "context" is pure padding here — nothing else on the line could be measured in
+# M, and the whole segment exists to say which window this session has. Cheap 8 columns on
+# the line that has the least room to spare. Substitution only, so a display name without
+# the suffix is passed through untouched.
+MODEL=$(printf '%s' "$MODEL" | sed 's/ context)/)/')
 
 # Cost -> 2dp. C locale forced above so "1.2345" parses under de_DE.
 COST_FMT=
@@ -148,7 +198,17 @@ if [ -n "$COST_FMT" ]; then
 fi
 [ -n "$FIVEH" ]  && LINE1="${LINE1}${SEP}${MAGENTA}5h ${FIVEH}%${RESET}"
 [ -n "$SEVEND" ] && LINE1="${LINE1}${SEP}${MAGENTA}7d ${SEVEND}%${RESET}"
-[ -n "$TODAY_SEG" ] && LINE1="${LINE1}${SEP}${YELLOW}${TODAY_SEG}${RESET}"
+
+# The today segment gets its OWN line rather than extending line 1. It is the longest single
+# segment (it carries two dollar figures, a cap and a markup factor) and line 1 already holds
+# the model, effort, context and session cost, so together they overflowed one terminal width
+# and wrapped — which costs more vertical space than a deliberate second line, and wraps at an
+# arbitrary point instead of a meaningful one. Kept as its own line, not folded into the
+# dir/branch line, because that one is variable-length per project and would reintroduce the
+# same overflow. The "session" prefix on line 1's figure still depends on this segment being
+# present: the two dollar figures name different axes whether or not they share a line.
+TODAY_LINE=
+[ -n "$TODAY_SEG" ] && TODAY_LINE="${YELLOW}${TODAY_SEG}${RESET}"
 
 # Line 2 carries the VARIABLE-LENGTH names (dir / branch / worktree), which can be
 # arbitrarily long per project -- keeping them off line 1 stops it from wrapping.
@@ -163,5 +223,6 @@ if [ "$ADD" != "0" ] || [ "$DEL" != "0" ]; then
 fi
 
 printf '%s\n' "$LINE1"
+[ -n "$TODAY_LINE" ] && printf '%s\n' "$TODAY_LINE"
 [ -n "$LINE2" ] && printf '%s\n' "$LINE2"
 exit 0

@@ -26,6 +26,13 @@ contains() {  # $1 = label, $2 = haystack, $3 = needle
   esac
 }
 
+lacks() {  # $1 = label, $2 = haystack, $3 = needle that must be ABSENT
+  case "$2" in
+    *"$3"*) is "$1" "$2" "NOT to contain '$3'" ;;
+    *)      is "$1" "ok" "ok" ;;
+  esac
+}
+
 mkdir -p "$TMP/mk-ledger" "$TMP/empty-projects"
 echo "2026-09-10 32.43 0" > "$TMP/mk-ledger/aaaaaaaa-0000-0000-0000-000000000001"
 
@@ -34,10 +41,19 @@ contains "no markup: the message is unchanged" "$plain" 'of $40 cap'
 contains "no markup: 81% of the raw cap" "$plain" "81% of daily cap"
 
 marked="$(tally_line '{"contract":1,"markup":{"factor":1.2271,"n_days":19}}')"
-contains "markup: names the effective cap" "$marked" 'effective cap'
-contains "markup: names the factor it used" "$marked" 'gateway'
-contains "markup: our total is untouched" "$marked" '$32.43'
-contains "markup: denominator is 40/1.2271" "$marked" 'of $33 effective cap'
+# BOTH user-facing figures sit on the GATEWAY axis: the cap the user is measured against
+# is the gateway's $40 and its refusal message quotes that number, so a deflated
+# denominator here read as a second, unexplained cap. The list-price total stays canonical
+# in the LEDGER (unchanged on disk — asserted below) and in `cost-tracker report`; it is
+# simply not the figure a one-line warning leads with.
+contains "markup: the cap shown is the gateway's own \$40" "$marked" 'of $40 cap'
+contains "markup: and says the factor was applied" "$marked" 'gateway ×1.23 applied'
+contains "markup: the total shown is the BILLED figure, 32.43 x 1.2271" "$marked" '$39.79'
+lacks "markup: no deflated second cap is invented" "$marked" 'effective cap'
+# The RECORDED value must stay at list price — the multiplier is applied at the surface,
+# never baked into the ledger. This is what keeps the recording canonical.
+contains "markup: the ledger row on disk is still list price" \
+    "$(cat "$TMP/mk-ledger/aaaaaaaa-0000-0000-0000-000000000001")" '32.43'
 # The finding, as a number a reader can act on: the same spend goes from a comfortable
 # 81% to essentially spent.
 contains "markup: the same spend is 99%, not 81%" "$marked" "99% of daily cap"

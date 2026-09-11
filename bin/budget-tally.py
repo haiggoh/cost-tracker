@@ -475,17 +475,23 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
     else:
         basis = "reconstructed from token usage"
     prefix = f"⚠️ WARNING — {pct * 100:.0f}% of daily cap used: " if pct >= WARN_PCT else "budget-tally: "
-    # With no markup this renders exactly as it always has. With one, the denominator is
-    # the cap in OUR units and says so, because "$32 of $40" looks like headroom that
-    # isn't there — the refusal arrives at $32.
+    # With no markup this renders exactly as it always has. With one, BOTH figures move to
+    # the gateway axis: the user is measured against the gateway's cap and its refusal
+    # message quotes that number, so a different denominator here reads as a second,
+    # unexplained cap. The percentage and the headroom are unchanged either way — the ratio
+    # is the same whichever axis both sides are expressed in. Only the recorded value stays
+    # at list price; every user-facing figure has the markup applied.
     if MARKUP != 1.0:
-        cap_str = (f"${EFFECTIVE_CAP_USD:.0f} effective cap "
-                   f"(${CAP_USD:.0f} at gateway ×{MARKUP:.2f})")
+        shown_total = total * MARKUP
+        shown_remaining = CAP_USD - shown_total if CAP_USD else remaining
+        cap_str = f"${CAP_USD:.0f} cap (gateway ×{MARKUP:.2f} applied)"
     else:
+        shown_total = total
+        shown_remaining = remaining
         cap_str = f"${CAP_USD:.0f} cap"
     return (
-        f"{prefix}today's spend ({session_scope}) ≈ ${total:.2f} of {cap_str} "
-        f"(~${remaining:.2f} left, {basis}){note}"
+        f"{prefix}today's spend ({session_scope}) ≈ ${shown_total:.2f} of {cap_str} "
+        f"(~${shown_remaining:.2f} left, {basis}){note}"
     )
 
 
@@ -522,9 +528,50 @@ def main_check():
     record_bands_today(reached)
 
 
+USAGE = """budget-tally.py — tally today's Claude Code API spend against the daily cap.
+
+Runs as a SessionStart and Stop hook, and is safe to run by hand.
+
+Usage:
+  budget-tally.py            SessionStart mode: print today's tally so far, across every
+                             session with a ledger entry today. Always prints.
+  budget-tally.py --check    Stop mode: recompute including the current session's turns.
+                             Silent unless a warning threshold is newly crossed today.
+  budget-tally.py --help     This text.
+
+Every figure printed is on the GATEWAY axis — the markup is applied, so the total and the
+cap are both the numbers the gateway's own refusal message quotes. The ledger on disk stays
+at list price; it is the canonical record and is never rewritten.
+
+Environment:
+  COST_TRACKER_CAP_USD / BUDGET_TALLY_CAP_USD   override the daily cap (USD)
+  COST_TRACKER_MARKUP                           override the gateway markup factor
+  COST_TRACKER_LEDGER_DIR                       ledger directory (default ~/.claude/cost-ledger)
+  COST_TRACKER_CONFIG_DIR                       config dir holding the learned cap and markup
+  COST_TRACKER_HISTORY                          history log path
+  COST_TRACKER_PROJECTS_DIR                     transcripts dir used for reconstruction
+
+Exit status is 0 even on an internal error: this must never break a hook."""
+
+
+def main_help():
+    print(USAGE)
+
+
 if __name__ == "__main__":
+    # Parse BEFORE doing any work. Reaching the tally on an unrecognised flag would mean a
+    # user probing this script with --help triggers a real run and reads the output as help.
+    args = sys.argv[1:]
+    if "--help" in args or "-h" in args:
+        main_help()
+        sys.exit(0)
+    unknown = [a for a in args if a.startswith("-") and a != "--check"]
+    if unknown:
+        print("budget-tally.py: unrecognised option: %s" % " ".join(unknown), file=sys.stderr)
+        print("Try 'budget-tally.py --help'.", file=sys.stderr)
+        sys.exit(2)
     try:
-        if "--check" in sys.argv[1:]:
+        if "--check" in args:
             main_check()
         else:
             main_session_start()

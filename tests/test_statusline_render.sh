@@ -105,16 +105,24 @@ seg_render() {
         COST_TRACKER_CAP_USD="${2:-}" \
         sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g'
 }
+# The today segment has its OWN line since 0.5.1 (line 1 plus the segment overflowed one
+# terminal width and wrapped), so an assertion about it must read the line it is ON. Grep
+# for it rather than pinning a line NUMBER: whether a git line follows depends on the cwd.
+seg_line() { printf '%s' "$1" | grep 'today:' || true; }
+
 PAY='{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":3.14159}}'
 OUT="$(seg_render "$PAY" 40)"
 L1="$(printf '%s' "$OUT" | sed -n 1p)"
-has "the today segment is appended, with its axis named" "$L1" "today: cloud \$30.12/\$40"
+has "the today segment renders, with its axis named" "$(seg_line "$OUT")" "today: cloud"
+has "the segment is on its OWN line, not appended to line 1" \
+    "$(printf '%s' "$OUT" | sed -n 2p)" "today: cloud"
+hasnt "…so line 1 no longer carries it" "$L1" "today:"
 has "the session-lifetime figure is LABELLED once a second figure is present" "$L1" 'session $3.14'
-hasnt "an absent savings ledger adds no savings claim" "$L1" "local saved"
+hasnt "an absent savings ledger adds no savings claim" "$(seg_line "$OUT")" "local saved"
 OUT="$(seg_render "$PAY")"
 has "no cap means no denominator in the segment either" \
-    "$(printf '%s' "$OUT" | sed -n 1p)" "today: cloud \$30.12"
-hasnt "and no invented /\$40" "$(printf '%s' "$OUT" | sed -n 1p)" '/$40'
+    "$(seg_line "$OUT")" "today: cloud \$30.12"
+hasnt "and no invented /\$40" "$(seg_line "$OUT")" '/$40'
 OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 hasnt "COST_TRACKER_STATUSLINE=0 suppresses the segment" "$OUT" "today: cloud"
 has   "and the lifetime figure loses its now-unneeded label" "$OUT" '$3.14'
@@ -136,7 +144,7 @@ OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=1 \
     LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
     sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 has "a LEARNED cap gives the segment a denominator with no env var set" \
-    "$(printf '%s' "$OUT" | sed -n 1p)" "today: cloud \$30.12/\$40"
+    "$(seg_line "$OUT")" "today: cloud \$30.12/\$40"
 
 # THE SYMLINK CASE, which is how the renderer is actually reached once wired: via
 # ~/.claude/scripts/statusline-render.sh pointing into the plugin. A plain
@@ -154,7 +162,52 @@ OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=1 \
     COST_TRACKER_CAP_USD=40 \
     sh "$TMPD/fake-scripts/statusline-render.sh" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 has "the segment still renders when reached THROUGH a symlink" \
-    "$(printf '%s' "$OUT" | sed -n 1p)" "today: cloud \$30.12/\$40"
+    "$(seg_line "$OUT")" "today: cloud \$30.12/\$40"
+
+# --- 0.5.1: width ------------------------------------------------------------------
+# The reported overflow was 108 columns on ONE line. Two changes cut it: the model's
+# context suffix is abbreviated, and the budget segment moved to its own line.
+OUT="$(render '{"model":{"display_name":"Opus 5 (1M context)"},"effort":{"level":"medium"},"cost":{"total_cost_usd":2.88}}')"
+L1="$(printf '%s' "$OUT" | sed -n 1p)"
+has   "the model's context suffix is abbreviated for width" "$L1" 'Opus 5 (1M)'
+hasnt "…so the padding word is gone" "$L1" '1M context'
+# A display name WITHOUT the suffix must pass through untouched — the rule is a
+# substitution, not a truncation.
+has "a model name with no context suffix is unchanged" \
+    "$(render '{"model":{"display_name":"Sonnet 5"},"cost":{"total_cost_usd":1.0}}' | sed -n 1p)" 'Sonnet 5'
+# The whole point: no single emitted line may be anywhere near the old 108 columns.
+WIDEST=$(printf '%s' "$OUT" | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }')
+[ "$WIDEST" -lt 80 ] && ok "no emitted line approaches the 108-column overflow (widest ${WIDEST})" \
+    || bad "no emitted line approaches the 108-column overflow" "widest line < 80 cols" "widest is ${WIDEST}"
+
+# --- 0.5.1: --help is answered, never silently RUN -----------------------------------
+# The defect this guards is worse than a missing flag: before this, `--help` fell through
+# to the normal path and RENDERED, so a user probing an unfamiliar script got output that
+# looked like help while the script did its real work. Verified by running it, not by
+# grepping for the string — argparse-style help never appears in the source.
+H="$(sh "$RENDER" --help 2>&1 </dev/null)"
+has  "--help explains what the script does" "$H" 'render the Claude Code status line'
+has  "--help lists the lines it prints" "$H" 'today: cloud'
+has  "--help documents the env var" "$H" 'COST_TRACKER_STATUSLINE=0'
+# It must not RENDER. The help text legitimately shows the layout, so the tell cannot be
+# the literal "JoyIA" — it is a rendered VALUE: a real run of this script always emits a
+# concrete dollar figure or the session cost, which a layout template never does.
+# The discriminator is a DIGIT after a dollar sign: help shows placeholders ($<cost>),
+# a real render always shows a number. Checking for "session $" cannot work — the layout
+# example in the help text contains it, which is the help doing its job.
+if printf '%s' "$H" | grep -q '\$[0-9]'; then
+    bad "--help emits no rendered dollar VALUE" "no \$<digit> anywhere" "found one"
+else
+    ok "--help emits no rendered dollar VALUE"
+fi
+has   "…and what it shows instead is a labelled template" "$H" '$<cost>'
+BADOUT="$(sh "$RENDER" --nope 2>&1 </dev/null)"; BADRC=$?
+has "an unrecognised flag names itself" "$BADOUT" 'unrecognised option: --nope'
+[ "$BADRC" -ne 0 ] && ok "an unrecognised flag exits non-zero" \
+    || bad "an unrecognised flag exits non-zero" "non-zero exit" "exit $BADRC"
+# ...and the normal stdin path is untouched by the new parsing.
+has "a payload on stdin still renders normally" \
+    "$(render '{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":1.0}}' | sed -n 1p)" 'JoyIA'
 
 rm -rf "$TMPD"
 
