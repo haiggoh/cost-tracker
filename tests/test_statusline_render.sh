@@ -24,6 +24,13 @@ hasnt() { case "$2" in *"$3"*) bad "$1" "NOT to contain '$3'" "$2" ;; *) ok "$1"
 # Strip ANSI so assertions test content, not colour codes.
 render() { printf '%s' "$1" | sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g'; }
 
+# Find a line by CONTENT rather than by number. The layout is three lines since 0.5.1 (chrome,
+# spend, dir) and which of them appear depends on the payload, so pinning a line NUMBER makes
+# a test fail on a layout change that did not break anything. Grepping for the line's own
+# marker keeps each assertion about the thing it names.
+spend_line() { printf '%s' "$1" | grep -E '\$[0-9]' | head -1; }
+dir_line()   { printf '%s' "$1" | grep -v -E '^JoyIA' | grep -v -E '\$[0-9]' | head -1; }
+
 # The today-segment is OFF for the baseline assertions below, which are about the
 # renderer's own fields. Leaving it on would make them depend on live spend — and on a
 # day with $0.00 of it, the "a missing cost is not rendered as $0.00" assertion would
@@ -44,11 +51,12 @@ L2="$(printf '%s' "$OUT" | sed -n 2p)"
 has "line 1 carries the model"        "$L1" "Opus 5 (1M)"
 has "line 1 carries the effort level" "$L1" "high"
 has "line 1 carries absolute ctx tokens and percent" "$L1" "ctx 48123 12%"
-has "line 1 carries the session-lifetime cost at 2dp" "$L1" '$3.14'
+has "the SPEND line carries the session-lifetime cost at 2dp" "$(spend_line "$OUT")" '$3.14'
+hasnt "…and line 1 no longer does: the dollar figures moved off the chrome line" "$L1" '$3.14'
 has "line 1 carries the 5h rate limit"  "$L1" "5h 32%"
 has "line 1 carries the 7d rate limit"  "$L1" "7d 8%"
-has "line 2 carries the dir basename"   "$L2" "some-project-dir"
-has "line 2 carries the diff counts"    "$L2" "+7"
+has "the DIR line carries the dir basename"   "$(dir_line "$OUT")" "some-project-dir"
+has "the DIR line carries the diff counts"    "$(dir_line "$OUT")" "+7"
 # Variable-length names stay OFF line 1 so a long project name cannot wrap it.
 hasnt "line 1 does not carry the directory" "$L1" "some-project-dir"
 
@@ -63,9 +71,9 @@ OUT="$(render "$NOEFFORT")"
 L1="$(printf '%s' "$OUT" | sed -n 1p)"
 L2="$(printf '%s' "$OUT" | sed -n 2p)"
 hasnt "a MISSING effort level does not shift the dir onto line 1" "$L1" "leaky-dir-name"
-has   "the dir is still on line 2 where it belongs"               "$L2" "leaky-dir-name"
+has   "the dir is still on the DIR line where it belongs"         "$(dir_line "$OUT")" "leaky-dir-name"
 has   "ctx did not shift either"                                  "$L1" "ctx 100 1%"
-has   "cost did not shift either"                                 "$L1" '$1.00'
+has   "cost did not shift either"                                 "$(spend_line "$OUT")" '$1.00'
 
 # --- absent fields are DROPPED, never printed as null or 0 -------------------
 MINIMAL='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp/x"}}'
@@ -113,15 +121,21 @@ seg_line() { printf '%s' "$1" | grep 'today:' || true; }
 PAY='{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":3.14159}}'
 OUT="$(seg_render "$PAY" 40)"
 L1="$(printf '%s' "$OUT" | sed -n 1p)"
-has "the today segment renders, with its axis named" "$(seg_line "$OUT")" "today: cloud"
-has "the segment is on its OWN line, not appended to line 1" \
-    "$(printf '%s' "$OUT" | sed -n 2p)" "today: cloud"
+has "the today segment renders, with its axis named" "$(seg_line "$OUT")" "today: \$30.12/\$40"
+# "cloud" is a CONTRAST word: it separates cloud spend from local savings. With no savings
+# figure there is nothing to contrast with, so it is dropped rather than padding the line.
+hasnt "…and drops the 'cloud' word when no savings figure sits beside it" \
+    "$(seg_line "$OUT")" "cloud"
+has "the segment shares the SPEND line, not line 1" \
+    "$(printf '%s' "$OUT" | sed -n 2p)" "today:"
 hasnt "…so line 1 no longer carries it" "$L1" "today:"
-has "the session-lifetime figure is LABELLED once a second figure is present" "$L1" 'session $3.14'
+has "the session-lifetime figure is LABELLED once a second figure is present" \
+    "$(seg_line "$OUT")" 'session $3.14'
+has "…and BOTH dollar figures share one line" "$(spend_line "$OUT")" 'today:'
 hasnt "an absent savings ledger adds no savings claim" "$(seg_line "$OUT")" "local saved"
 OUT="$(seg_render "$PAY")"
 has "no cap means no denominator in the segment either" \
-    "$(seg_line "$OUT")" "today: cloud \$30.12"
+    "$(seg_line "$OUT")" "today: \$30.12"
 hasnt "and no invented /\$40" "$(seg_line "$OUT")" '/$40'
 OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 hasnt "COST_TRACKER_STATUSLINE=0 suppresses the segment" "$OUT" "today: cloud"
@@ -144,7 +158,7 @@ OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=1 \
     LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
     sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 has "a LEARNED cap gives the segment a denominator with no env var set" \
-    "$(seg_line "$OUT")" "today: cloud \$30.12/\$40"
+    "$(seg_line "$OUT")" "today: \$30.12/\$40"
 
 # THE SYMLINK CASE, which is how the renderer is actually reached once wired: via
 # ~/.claude/scripts/statusline-render.sh pointing into the plugin. A plain
@@ -162,7 +176,7 @@ OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=1 \
     COST_TRACKER_CAP_USD=40 \
     sh "$TMPD/fake-scripts/statusline-render.sh" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 has "the segment still renders when reached THROUGH a symlink" \
-    "$(seg_line "$OUT")" "today: cloud \$30.12/\$40"
+    "$(seg_line "$OUT")" "today: \$30.12/\$40"
 
 # --- 0.5.1: width ------------------------------------------------------------------
 # The reported overflow was 108 columns on ONE line. Two changes cut it: the model's
@@ -187,7 +201,7 @@ WIDEST=$(printf '%s' "$OUT" | awk '{ if (length($0) > m) m = length($0) } END { 
 # grepping for the string — argparse-style help never appears in the source.
 H="$(sh "$RENDER" --help 2>&1 </dev/null)"
 has  "--help explains what the script does" "$H" 'render the Claude Code status line'
-has  "--help lists the lines it prints" "$H" 'today: cloud'
+has  "--help lists the lines it prints" "$H" 'today: $<billed>'
 has  "--help documents the env var" "$H" 'COST_TRACKER_STATUSLINE=0'
 # It must not RENDER. The help text legitimately shows the layout, so the tell cannot be
 # the literal "JoyIA" — it is a rendered VALUE: a real run of this script always emits a
@@ -208,6 +222,38 @@ has "an unrecognised flag names itself" "$BADOUT" 'unrecognised option: --nope'
 # ...and the normal stdin path is untouched by the new parsing.
 has "a payload on stdin still renders normally" \
     "$(render '{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":1.0}}' | sed -n 1p)" 'JoyIA'
+
+# --- 0.5.1: WEIGHT makes today the primary figure, and both share one line -----------
+# Order is NOT the emphasis mechanism here (today already led and still read as equal).
+# Weight is: today is BOLD and the session lifetime is DIMMED beside it. Asserted on the
+# raw escape codes, since that is the only place the distinction exists — a colour-stripped
+# line cannot show it, which is why the other assertions here strip and this one must not.
+RAW="$(printf '%s' '{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":9.33}}' \
+    | env COST_TRACKER_STATUSLINE=1 \
+      COST_TRACKER_LEDGER_DIR="$TMPD/ledger" \
+      COST_TRACKER_HISTORY="$TMPD/nonexistent-history.log" \
+      COST_TRACKER_CONFIG_DIR="$TMPD/no-config" \
+      COST_TRACKER_PROJECTS_DIR="$TMPD/no-transcripts" \
+      LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
+      COST_TRACKER_CAP_USD=40 sh "$RENDER" 2>/dev/null | sed -n 2p)"
+case "$RAW" in
+  *$'\033[1m'*'today:'*) ok "today is emitted BOLD" ;;
+  *) bad "today is emitted BOLD" "an ESC[1m before today:" "$RAW" ;;
+esac
+case "$RAW" in
+  *$'\033[2m'*'session $9.33'*) ok "the session figure is emitted DIM" ;;
+  *) bad "the session figure is emitted DIM" "an ESC[2m before session" "$RAW" ;;
+esac
+# A session figure standing ALONE is not secondary to anything, so it is not dimmed.
+SOLO="$(printf '%s' '{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":9.33}}' \
+    | env COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/null | sed -n 2p)"
+case "$SOLO" in
+  *$'\033[2m'*'$9.33'*) bad "a lone session figure is NOT dimmed" "no ESC[2m" "$SOLO" ;;
+  *) ok "a lone session figure is NOT dimmed" ;;
+esac
+# The 'cloud' word returns the moment a savings figure gives it something to contrast with.
+mkdir -p "$TMPD/savings"
+printf '%s\n' '{"saved_usd": 4.80, "at": "2026-09-11T10:00:00Z"}' > "$TMPD/savings/x.jsonl"
 
 rm -rf "$TMPD"
 

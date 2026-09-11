@@ -2,6 +2,33 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.5.2] — 2026-09-11
+
+### Changed
+- **Both dollar figures now share one line, session first and today second, with the emphasis
+  carried by WEIGHT rather than position.** Today is the figure measured against the cap, so it
+  renders BOLD while the session lifetime is DIMMED beside it. Leading with today was tried first
+  and was not the lever: two figures in the same colour read as equal however they are ordered, so
+  dimming the secondary one is what actually separates them. Decoupling emphasis from order leaves
+  the order free to follow reading habit — the session you are in, then the day it sits inside — at
+  no cost in prominence. A session figure standing alone is not dimmed: it is not secondary to
+  anything.
+- **The `cloud` specifier is now conditional.** It is a contrast word — it exists to distinguish
+  cloud spend from the local-inference savings figure — so with no savings figure beside it there is
+  nothing to contrast with and it was just consuming columns. It returns automatically the moment a
+  savings figure is present, where it is load-bearing again.
+- A **zero** savings figure is omitted from the status line: "nothing was offloaded" and "no ledger
+  at all" now read identically there, because a zero costs the same columns as a real number while
+  saying nothing. `cost-tracker report` still prints the zero row with its dispatch count — a table
+  has room to say `0 dispatches` and that is meaningful in a surface whose job is to enumerate.
+
+### Notes
+- 6 new assertions (54 statusline, 37 budget-ledger, 99 pytest). The weight assertions read the raw
+  escape codes, since a colour-stripped line cannot show the distinction being tested; both weight
+  mutations are caught.
+- Statusline test assertions no longer pin a line NUMBER. They locate a line by its own content, so
+  a future layout change fails only the tests whose subject actually moved.
+
 ## [0.5.1] — 2026-09-11
 
 ### Changed

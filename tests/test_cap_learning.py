@@ -166,10 +166,10 @@ def test_the_statusline_path_never_scans_transcripts(tmp_path):
     data = ct.collect("today", fast=True)
     assert not pathlib.Path(ct.CONFIG_PATH).exists()
     assert data["cap_usd"] is None
-    assert ct.render_statusline(data) == "today: cloud $7.50"
+    assert ct.render_statusline(data) == "today: $7.50"
     # once learned, the fast path DOES use it — it just never learns it itself
     ct.write_config(ct.learn_cap())
-    assert ct.render_statusline(ct.collect("today", fast=True)) == "today: cloud $7.50/$40"
+    assert ct.render_statusline(ct.collect("today", fast=True)) == "today: $7.50/$40"
 
 
 def test_set_records_a_cap_by_hand_with_honest_provenance(tmp_path):

@@ -1127,8 +1127,9 @@ def render_table(data, short_ids=True):
 def render_statusline(data):
     """The frozen one-line statusline segment.
 
-      with a cap:    today: cloud $37.35/$40 gw · local saved $4.80
-      without a cap: today: cloud $12.40 · local saved $4.80
+      with a cap:    today: $37.35/$40 gw
+      without a cap: today: $12.40
+      with savings:  today: cloud $37.35/$40 gw · local saved $4.80
 
     The axis word is part of the string, not decoration: this segment coexists
     with the renderer's own session-lifetime "$<cost>", and two unlabelled
@@ -1147,25 +1148,34 @@ def render_statusline(data):
     cap = data["cap_usd"]
     label = "today" if len(data["period_days_utc"]) == 1 else data["period"]
     markup = data.get("markup") or MARKUP_IDENTITY
+    # "cloud" is a CONTRAST word: it exists to separate cloud spend from the local-inference
+    # savings figure. With no local figure beside it there is nothing to contrast with, so it
+    # is noise on a line that has no room for any — and a cloud session shows no savings.
+    # The moment a savings figure IS present the word is load-bearing again and comes back,
+    # which is the axis rule holding rather than an exception to it.
+    # A ZERO savings figure is not a finding — it is the absence of one, and on this line it
+    # costs the same columns as a real number while saying nothing. So the statusline treats
+    # "nothing was offloaded" and "no ledger at all" identically: both omit it. `report` still
+    # prints the zero row, because a table has room to say "0 dispatches" and that is
+    # meaningful there. Suppressing it in one surface is not hiding state: the surface that
+    # exists to enumerate is unchanged.
+    saved = data["local_saved_usd"]
+    if not saved:
+        saved = None
+    what = "cloud " if saved is not None else ""
     if cap:
-        # With a markup, the DENOMINATOR moves, not the numerator. Our figure is what it
-        # always was; what changes is how much of it the cap actually buys. Scaling the
-        # numerator instead would silently restate a measured quantity — the exact
-        # mislabel this tool exists to avoid — and would also make the segment disagree
-        # with the report table beside it.
         if markup != MARKUP_IDENTITY:
             # Gateway axis: the numerator is what the gateway bills, against the cap the
             # gateway actually enforces. "gw" marks the axis so the figure is never read
             # as Claude Code's own list-price total, which is the smaller number.
-            seg = (f"{label}: cloud ${data['billed_usd']:.2f}"
-                   f"/${cap:.0f} gw")
+            seg = f"{label}: {what}${data['billed_usd']:.2f}/${cap:.0f} gw"
         else:
             # No markup: the two axes are identical, so there is nothing to name.
-            seg = f"{label}: cloud ${data['cloud_usd']:.2f}/${cap:.0f}"
+            seg = f"{label}: {what}${data['cloud_usd']:.2f}/${cap:.0f}"
     else:
-        seg = f"{label}: cloud ${data['cloud_usd']:.2f}"
-    if data["local_saved_usd"] is not None:
-        seg += f" · local saved ${data['local_saved_usd']:.2f}"
+        seg = f"{label}: {what}${data['cloud_usd']:.2f}"
+    if saved is not None:
+        seg += f" · local saved ${saved:.2f}"
     return seg
 
 

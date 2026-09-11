@@ -10,10 +10,11 @@
 # Called by scripts/cost-ledger-capture.sh with the statusLine JSON on stdin.
 #
 # Line 1 (one concise line, fixed-width-ish scalars only):
-#   JoyIA · <model> <effort> · ctx <tokens> <pct>% · session $<cost> · 5h <pct>% · 7d <pct>%
-# Line 2 (the budget segment, on its own line since 0.5.1 -- it is the longest single
-# segment and sharing line 1 overflowed one terminal width and wrapped):
-#   today: cloud $<spent>/$<cap> eff (×<markup> gw)
+#   JoyIA · <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
+# Line 2 (the SPEND line: both dollar figures together, today first since that is the one
+# measured against the cap. Its own line since 0.5.1 -- sharing line 1 overflowed one
+# terminal width and wrapped):
+#   session $<cost> · today: $<spent>/$<cap> gw
 # Line 3 (variable-length names, which can be long, + the previous git fields):
 #   <dir basename> · <branch> · <worktree> · +<added>/-<removed>
 #
@@ -38,8 +39,8 @@ statusline-render.sh — render the Claude Code status line.
 
 Reads the statusLine JSON payload on stdin and prints up to three lines:
 
-  JoyIA · <model> <effort> · ctx <tokens> <pct>% · session $<cost> · 5h <pct>% · 7d <pct>%
-  today: cloud $<billed>/$<cap> gw · local saved $<saved>
+  JoyIA · <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
+  session $<cost> · today: $<billed>/$<cap> gw · local saved $<saved>
   <dir basename> · <branch> · <worktree> · +<added>/-<removed>
 
 Usage:
@@ -189,26 +190,43 @@ if [ "${COST_TRACKER_STATUSLINE:-1}" != "0" ]; then
     fi
 fi
 
-if [ -n "$COST_FMT" ]; then
-    if [ -n "$TODAY_SEG" ]; then
-        LINE1="${LINE1}${SEP}${YELLOW}session \$${COST_FMT}${RESET}"
-    else
-        LINE1="${LINE1}${SEP}${YELLOW}\$${COST_FMT}${RESET}"
-    fi
-fi
 [ -n "$FIVEH" ]  && LINE1="${LINE1}${SEP}${MAGENTA}5h ${FIVEH}%${RESET}"
 [ -n "$SEVEND" ] && LINE1="${LINE1}${SEP}${MAGENTA}7d ${SEVEND}%${RESET}"
 
-# The today segment gets its OWN line rather than extending line 1. It is the longest single
-# segment (it carries two dollar figures, a cap and a markup factor) and line 1 already holds
-# the model, effort, context and session cost, so together they overflowed one terminal width
-# and wrapped — which costs more vertical space than a deliberate second line, and wraps at an
-# arbitrary point instead of a meaningful one. Kept as its own line, not folded into the
-# dir/branch line, because that one is variable-length per project and would reintroduce the
-# same overflow. The "session" prefix on line 1's figure still depends on this segment being
-# present: the two dollar figures name different axes whether or not they share a line.
+# --- the SPEND line ----------------------------------------------------------------
+# Both dollar figures live together on their own line: SESSION first, TODAY second.
+# EMPHASIS IS WEIGHT, NOT POSITION — today is the figure that matters (it is the one measured
+# against the cap) so it is BOLD while the session lifetime is DIMMED, and it reads as primary
+# from either position. Leading with it was tried and was not the lever: two figures in the
+# same colour read as equal however they are ordered, so dimming the secondary one is what
+# separates them. That decoupling lets the order follow reading habit — the session you are
+# in, then the day it sits inside — at no cost in prominence.
+# A lone session figure is NOT dimmed: it is not secondary to anything.
+# They belong on the SAME line precisely because they are
+# comparable quantities — separating them invites reading whichever is visible as "the"
+# spend, which is the mislabel this plugin exists to prevent. Keeping them off line 1 is
+# what stops the overflow that made this a separate line in the first place (108 columns,
+# wrapped); keeping them off the dir/branch line is what stops it coming back, since that
+# line is variable-length per project.
+#
+# The "session" prefix is still conditional on the today segment being present: with one
+# figure alone there is nothing to confuse it with and the label would be noise.
+# WEIGHT, not order, carries the emphasis: today is BOLD yellow and the session lifetime is
+# DIMMED beside it. The two figures read at a glance in the right priority without reordering
+# them or padding either with extra words, and dimming the secondary one is what makes the
+# primary stand out — brightening both would leave them equal again. When the session figure
+# stands ALONE it is not secondary to anything, so it keeps normal weight.
 TODAY_LINE=
-[ -n "$TODAY_SEG" ] && TODAY_LINE="${YELLOW}${TODAY_SEG}${RESET}"
+if [ -n "$COST_FMT" ]; then
+    if [ -n "$TODAY_SEG" ]; then
+        TODAY_LINE="${DIM}${YELLOW}session \$${COST_FMT}${RESET}"
+    else
+        TODAY_LINE="${YELLOW}\$${COST_FMT}${RESET}"
+    fi
+fi
+if [ -n "$TODAY_SEG" ]; then
+    TODAY_LINE="${TODAY_LINE:+$TODAY_LINE$SEP}${BOLD}${YELLOW}${TODAY_SEG}${RESET}"
+fi
 
 # Line 2 carries the VARIABLE-LENGTH names (dir / branch / worktree), which can be
 # arbitrarily long per project -- keeping them off line 1 stops it from wrapping.

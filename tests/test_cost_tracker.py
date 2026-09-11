@@ -208,10 +208,10 @@ def test_statusline_labels_its_axis_and_respects_an_unset_cap(tmp_path):
     ct, ledger = load_ct(tmp_path)
     (ledger / "ffffffff-0000-0000-0000-000000000001").write_text("2026-09-03 12.40 0")
     line = ct.render_statusline(ct.collect("today"))
-    assert line == "today: cloud $12.40"          # no denominator invented
+    assert line == "today: $12.40"          # no denominator invented
     ct, ledger = load_ct(tmp_path, cap=40)
     (ledger / "ffffffff-0000-0000-0000-000000000001").write_text("2026-09-03 30.12 0")
-    assert ct.render_statusline(ct.collect("today")) == "today: cloud $30.12/$40"
+    assert ct.render_statusline(ct.collect("today")) == "today: $30.12/$40"
 
 
 def test_savings_absent_is_reported_as_unmeasured_not_zero(tmp_path):
@@ -229,6 +229,8 @@ def test_savings_present_is_appended_to_the_statusline(tmp_path):
     ct, ledger = load_ct(tmp_path, cap=40, savings_cmd=str(fake))
     (ledger / "ffffffff-0000-0000-0000-000000000001").write_text("2026-09-03 30.12 0")
     line = ct.render_statusline(ct.collect("today"))
+    # "cloud" is back HERE and only here: with a savings figure beside it the word is
+    # load-bearing again — it names which of the two dollar figures is the cloud one.
     assert line == "today: cloud $30.12/$40 · local saved $4.80"
 
 
@@ -286,7 +288,7 @@ def test_incompatible_savings_json_is_unmeasured_not_zero(tmp_path):
     data = ct.collect("today")
     assert data["local_saved_usd"] is None
     assert "not measured" in ct.render_table(data)
-    assert ct.render_statusline(data) == "today: cloud $5.00/$40"
+    assert ct.render_statusline(data) == "today: $5.00/$40"
 
 
 def test_non_json_savings_output_is_unmeasured(tmp_path):
@@ -382,7 +384,7 @@ def test_no_markup_is_the_default_and_output_is_unchanged(tmp_path):
     data = ct.collect("today")
     assert data["markup"] == 1.0
     # The pre-markup strings, character for character.
-    assert ct.render_statusline(data) == "today: cloud $30.12/$40"
+    assert ct.render_statusline(data) == "today: $30.12/$40"
     table = ct.render_table(data)
     assert "billed" not in table and "eff. cap" not in table and "×" not in table
     # The additive keys exist but say nothing new, so a consumer reading either is right.
@@ -410,7 +412,7 @@ def test_a_markup_moves_the_denominator_and_never_our_measured_total(tmp_path):
     # says $40, so anything else on the denominator confuses. The list-price figure and
     # the effective cap remain in the DATA (asserted above) and in `report`.
     line = ct.render_statusline(data)
-    assert line == "today: cloud $37.65/$40 gw"
+    assert line == "today: $37.65/$40 gw"
     assert "$32" not in line and "eff" not in line
     # 94% of the effective cap, not the reassuring 75% of the raw one.
     assert data["billed_pct_of_cap"] == pytest.approx(37.65 / 40, abs=1e-4)
