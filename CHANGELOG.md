@@ -2,6 +2,45 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.5.3] — 2026-09-15
+
+A live memory-pressure reading for local inference sessions — the ceiling that kills them
+was previously invisible until the session was already dead.
+
+### Added
+
+- **`ram` segment on line 1 for LOCAL sessions.** Reports WIRED memory against the Metal
+  wired cap that actually refuses work (~103.9 GB on a 128 GB M4 Max), not against
+  installed RAM — a machine with 128 GB installed OOMs at ~104, so measuring against
+  installed RAM would read "58%" while the session is minutes from dying.
+  - **`ps` RSS is deliberately NOT the source**: it understates MLX pressure by roughly 7x,
+    because model weights are Metal allocations rather than ordinary resident pages. The
+    derivation (wired pages × page size, page size read from `vm_stat`'s own header) is the
+    same one `local-agents`' `la-ram-preflight.sh` uses, reused rather than re-invented —
+    two different numbers for "wired" would be worse than none.
+  - **Colour escalates** green (<70% of cap) → yellow (70–89%) → bold red (90%+). Redundant
+    with the digits by design; the point is to see the cliff without reading.
+  - **Gated on the ENDPOINT** (`ANTHROPIC_BASE_URL` pointing at loopback), never on
+    `CLAUDE_IS_LOCAL` — that flag is exported by the local launcher and leaks into a later
+    gateway `claude` in the same shell, which would paint a PAID session with a local
+    instrument. A test asserts the segment stays absent with the leaked flag deliberately set.
+  - Absent on cloud sessions by design: no local weights, so the number would be noise on
+    the line with least room to spare.
+  - Degrades to nothing if the reader fails; the renderer still exits 0, as a status line must.
+  - `COST_TRACKER_RAM_CAP_GB` overrides the cap (it is machine-specific).
+    `COST_TRACKER_RAM_CMD` overrides the reader, so the test suite never depends on real
+    machine memory — a suite reading live `vm_stat` passes by luck and can never exercise
+    the near-cap branch.
+  - 14 new assertions in `tests/test_statusline_render.sh` (68 total, was 54). Both the
+    cap-denominator and the endpoint-gate were mutation-tested to confirm the new tests
+    genuinely fail when the logic breaks.
+
+### Why this is not cosmetic
+
+Measured 2026-09-15: with no live reading anywhere, a session dispatched work to a local
+endpoint with no memory preflight, because neither the user nor the agent could see the
+figure. Post-hoc it was 67 GB of the 103.9 GB cap — safe, but by luck rather than evidence.
+
 ## [0.5.2] — 2026-09-11
 
 ### Changed

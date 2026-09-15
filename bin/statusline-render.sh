@@ -56,6 +56,17 @@ rendering problem can never break the status line.
 
 Environment:
   COST_TRACKER_STATUSLINE=0   omit the budget line entirely
+  COST_TRACKER_RAM_CAP_GB     memory ceiling the ram segment is measured against
+                              (default 103.9, the measured Metal wired cap on a
+                              128 GB M4 Max — it is NOT installed RAM)
+  COST_TRACKER_RAM_CMD        override the memory reader; must print
+                              "<wired-gb> <total-gb>". Intended for tests, so the
+                              suite never depends on real machine memory.
+
+The ram segment appears ONLY when ANTHROPIC_BASE_URL points at loopback (a local
+inference session). It reports WIRED memory against the cap, because ps RSS
+understates MLX pressure by roughly 7x, and colours green/yellow/red as the
+ceiling approaches. It is deliberately absent on cloud sessions.
 USAGE
     exit 0
     ;;
@@ -188,6 +199,76 @@ if [ "${COST_TRACKER_STATUSLINE:-1}" != "0" ]; then
     if [ -x "$CT_BIN" ]; then
         TODAY_SEG=$(python3 "$CT_BIN" statusline --fast 2>/dev/null | head -1) || TODAY_SEG=
     fi
+fi
+
+# --- LOCAL-SESSION MEMORY PRESSURE (the D-METAL-CAP instrument) ----------------------
+# WHY THIS EXISTS, and why it is not cosmetic: on this class of machine an MLX local
+# session dies by OOM against a Metal wired-memory ceiling well below installed RAM
+# (~103.9 GB on a 128 GB M4 Max). Before this segment there was NO live reading of that
+# anywhere, so the ceiling was invisible until the session was already dead — measured
+# 2026-09-15, when a dispatch was fired at a local endpoint with no preflight because
+# neither party could see the number.
+#
+# ps RSS IS THE WRONG NUMBER — it understates MLX pressure by roughly 7x, because the
+# weights are Metal allocations, not ordinary resident pages. WIRED memory is the figure
+# that tracks the ceiling that actually refuses work, so wired-vs-cap is what renders.
+#
+# GATED ON THE ENDPOINT, NEVER ON CLAUDE_IS_LOCAL: that flag is exported by the local
+# launcher and LEAKS into a later gateway `claude` from the same shell, which would paint
+# a paid cloud session with a local instrument. ANTHROPIC_BASE_URL pointing at loopback is
+# the honest signal, and it is per-process.
+#
+# Absent on a cloud session by design: a remote session has no local weights, so the
+# number would be noise on the one line with least room to spare.
+RAM_SEG=
+case "${ANTHROPIC_BASE_URL:-}" in
+  *localhost*|*127.0.0.1*|*'[::1]'*)
+    # Injectable for tests. A suite that reads REAL machine memory passes or fails by luck
+    # and cannot exercise the near-cap branch at all, so the reader is overridable and the
+    # tests drive it with fixed values instead of whatever this laptop happens to be doing.
+    if [ -n "${COST_TRACKER_RAM_CMD:-}" ]; then
+      RAM_RAW=$($COST_TRACKER_RAM_CMD 2>/dev/null)
+    elif [ "$(uname -s 2>/dev/null)" = "Darwin" ] && command -v vm_stat >/dev/null 2>&1; then
+      # Same derivation as local-agents' la-ram-preflight.sh (wired pages x page size),
+      # deliberately not re-invented: two different numbers for "wired" would be worse
+      # than none. Page size is read from vm_stat's own header rather than assumed 16k.
+      RAM_RAW=$(vm_stat 2>/dev/null | awk -v tot="$(sysctl -n hw.memsize 2>/dev/null)" '
+        /page size of/{gsub(/[^0-9]/,"",$0); ps=$0}
+        /Pages wired down/{gsub(/[^0-9]/,"",$4); w=$4}
+        END{ if (ps>0 && w>0 && tot>0) printf "%.1f %.1f", w*ps/1073741824, tot/1073741824 }')
+    fi
+    if [ -n "${RAM_RAW:-}" ]; then
+      # shellcheck disable=SC2162
+      read RAM_WIRED RAM_TOTAL <<EOF2
+$RAM_RAW
+EOF2
+      # The cap is what refuses work, and it is NOT installed RAM. Overridable because it is
+      # machine-specific; the default is the measured D-METAL-CAP for this 128 GB M4 Max.
+      RAM_CAP="${COST_TRACKER_RAM_CAP_GB:-103.9}"
+      case "$RAM_WIRED" in ''|*[!0-9.,]*) RAM_WIRED= ;; esac
+      if [ -n "$RAM_WIRED" ]; then
+        # Render wired AGAINST the cap: "wired 96 GB" means nothing without the ceiling
+        # beside it, which is the whole point of the instrument.
+        RAM_PCT=$(LC_ALL=C awk -v w="$RAM_WIRED" -v c="$RAM_CAP" 'BEGIN{ if (c>0) printf "%.0f", (w/c)*100 }' 2>/dev/null)
+        RAM_SEG="ram ${RAM_WIRED}/${RAM_CAP}G"
+        [ -n "$RAM_PCT" ] && RAM_SEG="${RAM_SEG} ${RAM_PCT}%"
+      fi
+    fi
+    ;;
+esac
+
+# The RAM instrument sits on line 1 next to ctx, and ESCALATES IN COLOUR as it approaches the
+# ceiling: green below 70% of cap, yellow from 70%, bold red from 90% — because a number you
+# have to read and compare is a number you will miss while working, and the whole purpose is
+# to see the cliff coming. Colour is redundant with the digits, never the only signal.
+if [ -n "$RAM_SEG" ]; then
+  RAM_COLOUR="$GREEN"
+  if [ -n "${RAM_PCT:-}" ]; then
+    if   [ "$RAM_PCT" -ge 90 ] 2>/dev/null; then RAM_COLOUR="${BOLD}${RED}"
+    elif [ "$RAM_PCT" -ge 70 ] 2>/dev/null; then RAM_COLOUR="$YELLOW"
+    fi
+  fi
+  LINE1="${LINE1}${SEP}${RAM_COLOUR}${RAM_SEG}${RESET}"
 fi
 
 [ -n "$FIVEH" ]  && LINE1="${LINE1}${SEP}${MAGENTA}5h ${FIVEH}%${RESET}"

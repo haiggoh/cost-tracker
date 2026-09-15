@@ -255,6 +255,74 @@ esac
 mkdir -p "$TMPD/savings"
 printf '%s\n' '{"saved_usd": 4.80, "at": "2026-09-11T10:00:00Z"}' > "$TMPD/savings/x.jsonl"
 
+
+# --- LOCAL-SESSION RAM instrument (the D-METAL-CAP reading) -------------------------
+# EVERY assertion here drives an INJECTED reader (COST_TRACKER_RAM_CMD), never this
+# machine's real memory. A suite that reads real vm_stat passes or fails by luck, cannot
+# reach the near-cap branch on a healthy laptop, and would go green while hiding a
+# regression — so the environmental input is stubbed and the thresholds are exercised
+# on fixed numbers.
+RAMPAY='{"model":{"display_name":"Opus 5"}}'
+ram_render() { # ram_render <base-url> <ram-cmd>
+  printf '%s' "$RAMPAY" | env ANTHROPIC_BASE_URL="$1" COST_TRACKER_RAM_CMD="$2" \
+    COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/null | sed -n 1p
+}
+
+# GATE: a CLOUD session must show NO ram segment. This is the leak this gate exists for --
+# CLAUDE_IS_LOCAL is exported by the local launcher and survives into a later gateway
+# `claude` in the same shell, so gating on it would paint a PAID session as local. The
+# gate is the endpoint. Asserted with CLAUDE_IS_LOCAL deliberately set to the leaked value.
+CLOUD_OUT="$(printf '%s' "$RAMPAY" | env -u ANTHROPIC_BASE_URL CLAUDE_IS_LOCAL=true \
+  COST_TRACKER_RAM_CMD='echo 70.6 128.0' COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/null | sed -n 1p)"
+hasnt "no ram segment on a cloud session even with CLAUDE_IS_LOCAL leaked" "$CLOUD_OUT" "ram "
+
+# A gateway URL that merely CONTAINS a digit-ish host must not trip the loopback match.
+REMOTE_OUT="$(ram_render 'https://gateway.example.com' 'echo 70.6 128.0')"
+hasnt "no ram segment when the endpoint is remote" "$REMOTE_OUT" "ram "
+
+# PRESENT on localhost, and rendered AGAINST THE CAP -- wired alone is meaningless without
+# the ceiling beside it, which is the entire point of the instrument.
+LOC_OUT="$(ram_render 'http://localhost:8000' 'echo 70.6 128.0')"
+has "ram segment present on a localhost endpoint" "$(printf '%s' "$LOC_OUT" | sed $'s/\033\[[0-9;]*m//g')" "ram 70.6/103.9G"
+has "ram is shown as a percentage OF THE CAP, not of installed RAM" "$(printf '%s' "$LOC_OUT" | sed $'s/\033\[[0-9;]*m//g')" "68%"
+# 70.6 of 128 GB installed would be 55%; of the 103.9 GB cap it is 68%. Asserting 68 is
+# what proves the cap -- not hw.memsize -- is the denominator.
+hasnt "installed-RAM percentage is NOT what renders" "$(printf '%s' "$LOC_OUT" | sed $'s/\033\[[0-9;]*m//g')" "55%"
+
+# 127.0.0.1 and IPv6 loopback are the same session shape and must also match.
+has "127.0.0.1 counts as local" "$(ram_render 'http://127.0.0.1:8000' 'echo 40.0 128.0' | sed $'s/\033\[[0-9;]*m//g')" "ram 40.0"
+
+# DEGRADE, never break: a failing reader loses the segment and nothing else, and the
+# renderer must still exit 0 -- it is a status line, it can never take the prompt down.
+FAIL_OUT="$(ram_render 'http://localhost:8000' 'false')"
+hasnt "a failing ram reader drops the segment" "$FAIL_OUT" "ram "
+has   "the rest of the line survives a failing ram reader" "$FAIL_OUT" "Opus 5"
+printf '%s' "$RAMPAY" | env ANTHROPIC_BASE_URL=http://localhost:8000 COST_TRACKER_RAM_CMD='false' \
+  COST_TRACKER_STATUSLINE=0 sh "$RENDER" >/dev/null 2>&1
+is "renderer still exits 0 when the ram reader fails" 0 $?
+# Garbage from the reader must be rejected by the numeric guard, not printed raw.
+hasnt "non-numeric ram output is rejected" "$(ram_render 'http://localhost:8000' 'echo notanumber alsonot')" "notanumber"
+
+# COLOUR ESCALATION. Redundant with the digits by design, but it is what makes the cliff
+# visible without reading. Each threshold is asserted on a planted value so the test can
+# genuinely fail: below 70% green, 70-89 yellow, 90+ bold red.
+case "$(ram_render 'http://localhost:8000' 'echo 50.0 128.0')" in
+  *$'\033[32m'ram*) ok "below 70% of cap renders GREEN" ;;
+  *) bad "below 70% of cap renders GREEN" "ESC[32m before ram" "$(ram_render 'http://localhost:8000' 'echo 50.0 128.0')" ;;
+esac
+case "$(ram_render 'http://localhost:8000' 'echo 75.0 128.0')" in
+  *$'\033[33m'ram*) ok "70-89% of cap renders YELLOW" ;;
+  *) bad "70-89% of cap renders YELLOW" "ESC[33m before ram" "$(ram_render 'http://localhost:8000' 'echo 75.0 128.0')" ;;
+esac
+case "$(ram_render 'http://localhost:8000' 'echo 98.5 128.0')" in
+  *$'\033[1m'$'\033[31m'ram*) ok "90%+ of cap renders BOLD RED" ;;
+  *) bad "90%+ of cap renders BOLD RED" "ESC[1mESC[31m before ram" "$(ram_render 'http://localhost:8000' 'echo 98.5 128.0')" ;;
+esac
+# The cap is machine-specific, so it must be overridable rather than hardcoded forever.
+has "the cap is overridable" "$(printf '%s' "$RAMPAY" | env ANTHROPIC_BASE_URL=http://localhost:8000 \
+  COST_TRACKER_RAM_CMD='echo 40.0 64.0' COST_TRACKER_RAM_CAP_GB=50 COST_TRACKER_STATUSLINE=0 \
+  sh "$RENDER" 2>/dev/null | sed -n 1p | sed $'s/\033\[[0-9;]*m//g')" "ram 40.0/50G 80%"
+
 rm -rf "$TMPD"
 
 echo
