@@ -55,18 +55,22 @@ Every field is optional — anything missing or null is dropped rather than prin
 rendering problem can never break the status line.
 
 Environment:
-  COST_TRACKER_STATUSLINE=0   omit the budget line entirely
-  COST_TRACKER_RAM_CAP_GB     memory ceiling the ram segment is measured against
-                              (default 103.9, the measured Metal wired cap on a
-                              128 GB M4 Max — it is NOT installed RAM)
-  COST_TRACKER_RAM_CMD        override the memory reader; must print
-                              "<wired-gb> <total-gb>". Intended for tests, so the
-                              suite never depends on real machine memory.
+  COST_TRACKER_STATUSLINE=0        omit the budget line entirely
+  COST_TRACKER_LOCAL_SEGMENT_CMD  path to the local-session segment provider
+                                  (auto-discovered from local-agents if unset)
 
-The ram segment appears ONLY when ANTHROPIC_BASE_URL points at loopback (a local
-inference session). It reports WIRED memory against the cap, because ps RSS
-understates MLX pressure by roughly 7x, and colours green/yellow/red as the
-ceiling approaches. It is deliberately absent on cloud sessions.
+LOCAL-SESSION SEGMENT: when ANTHROPIC_BASE_URL points at loopback, this renderer
+asks a provider script — owned by the local-agents plugin, not by this one — for
+one extra segment, and places it on line 1. This file supplies the seam and the
+endpoint gate only; it does not know what the metric measures.
+
+  provider contract: no arguments, ONE line of JSON on stdout, exit 0
+    {"label":"ram","text":"74.0/103.9G 71%","level":"ok"|"warn"|"crit"}
+  `text` is opaque and rendered verbatim; `level` selects the colour, so the
+  thresholds live with the domain knowledge. Unknown levels render uncoloured.
+
+If local-agents is not installed, or its provider fails or stays silent, the
+segment is simply absent and nothing else changes.
 USAGE
     exit 0
     ;;
@@ -201,74 +205,61 @@ if [ "${COST_TRACKER_STATUSLINE:-1}" != "0" ]; then
     fi
 fi
 
-# --- LOCAL-SESSION MEMORY PRESSURE (the D-METAL-CAP instrument) ----------------------
-# WHY THIS EXISTS, and why it is not cosmetic: on this class of machine an MLX local
-# session dies by OOM against a Metal wired-memory ceiling well below installed RAM
-# (~103.9 GB on a 128 GB M4 Max). Before this segment there was NO live reading of that
-# anywhere, so the ceiling was invisible until the session was already dead — measured
-# 2026-09-15, when a dispatch was fired at a local endpoint with no preflight because
-# neither party could see the number.
+# --- LOCAL-SESSION MEMORY PRESSURE (rendered here, MEASURED ELSEWHERE) ---------------
+# LAYERING: this plugin knows how to LAY OUT a status line. It deliberately does NOT know
+# what a Metal wired cap is, what MLX does to RSS, or what this machine's ceiling happens
+# to be — that is local-agents' domain, and baking it in here was the wrong call (it put a
+# machine-specific constant and another plugin's memory model inside a cost renderer).
 #
-# ps RSS IS THE WRONG NUMBER — it understates MLX pressure by roughly 7x, because the
-# weights are Metal allocations, not ordinary resident pages. WIRED memory is the figure
-# that tracks the ceiling that actually refuses work, so wired-vs-cap is what renders.
+# So this file supplies only the SEAM and the ENDPOINT GATE. The CONTENT comes from a
+# provider script that local-agents owns, discovered the same way the savings ledger
+# already is, and consumed as JSON. If local-agents is absent, the segment is absent and
+# nothing here degrades — no hard dependency in either direction.
+#
+# Provider contract (stable, so either side can be updated independently):
+#   invoked with no arguments; prints ONE line of JSON on stdout; exits 0.
+#   {"label": "ram", "text": "74.0/103.9G 71%", "level": "ok"|"warn"|"crit"}
+#   `text` is opaque to this renderer — the provider decides units, precision and what it
+#   is measured against. `level` selects the colour, so the THRESHOLDS live with the
+#   domain knowledge too, not here. Unknown levels fall back to no colour.
 #
 # GATED ON THE ENDPOINT, NEVER ON CLAUDE_IS_LOCAL: that flag is exported by the local
 # launcher and LEAKS into a later gateway `claude` from the same shell, which would paint
-# a paid cloud session with a local instrument. ANTHROPIC_BASE_URL pointing at loopback is
-# the honest signal, and it is per-process.
-#
-# Absent on a cloud session by design: a remote session has no local weights, so the
-# number would be noise on the one line with least room to spare.
-RAM_SEG=
+# a paid cloud session with a local instrument. ANTHROPIC_BASE_URL is per-process.
+LOCAL_SEG=; LOCAL_LEVEL=
 case "${ANTHROPIC_BASE_URL:-}" in
   *localhost*|*127.0.0.1*|*'[::1]'*)
-    # Injectable for tests. A suite that reads REAL machine memory passes or fails by luck
-    # and cannot exercise the near-cap branch at all, so the reader is overridable and the
-    # tests drive it with fixed values instead of whatever this laptop happens to be doing.
-    if [ -n "${COST_TRACKER_RAM_CMD:-}" ]; then
-      RAM_RAW=$($COST_TRACKER_RAM_CMD 2>/dev/null)
-    elif [ "$(uname -s 2>/dev/null)" = "Darwin" ] && command -v vm_stat >/dev/null 2>&1; then
-      # Same derivation as local-agents' la-ram-preflight.sh (wired pages x page size),
-      # deliberately not re-invented: two different numbers for "wired" would be worse
-      # than none. Page size is read from vm_stat's own header rather than assumed 16k.
-      RAM_RAW=$(vm_stat 2>/dev/null | awk -v tot="$(sysctl -n hw.memsize 2>/dev/null)" '
-        /page size of/{gsub(/[^0-9]/,"",$0); ps=$0}
-        /Pages wired down/{gsub(/[^0-9]/,"",$4); w=$4}
-        END{ if (ps>0 && w>0 && tot>0) printf "%.1f %.1f", w*ps/1073741824, tot/1073741824 }')
+    LOCAL_PROVIDER="${COST_TRACKER_LOCAL_SEGMENT_CMD:-}"
+    if [ -z "$LOCAL_PROVIDER" ]; then
+      for _c in "$HOME/ClaudeWorkspace/local-agents/bin/la-statusline-segment.sh" \
+                "$HOME"/.claude/plugins/cache/*/local-agents/*/bin/la-statusline-segment.sh; do
+        [ -x "$_c" ] && { LOCAL_PROVIDER="$_c"; break; }
+      done
     fi
-    if [ -n "${RAM_RAW:-}" ]; then
-      # shellcheck disable=SC2162
-      read RAM_WIRED RAM_TOTAL <<EOF2
-$RAM_RAW
-EOF2
-      # The cap is what refuses work, and it is NOT installed RAM. Overridable because it is
-      # machine-specific; the default is the measured D-METAL-CAP for this 128 GB M4 Max.
-      RAM_CAP="${COST_TRACKER_RAM_CAP_GB:-103.9}"
-      case "$RAM_WIRED" in ''|*[!0-9.,]*) RAM_WIRED= ;; esac
-      if [ -n "$RAM_WIRED" ]; then
-        # Render wired AGAINST the cap: "wired 96 GB" means nothing without the ceiling
-        # beside it, which is the whole point of the instrument.
-        RAM_PCT=$(LC_ALL=C awk -v w="$RAM_WIRED" -v c="$RAM_CAP" 'BEGIN{ if (c>0) printf "%.0f", (w/c)*100 }' 2>/dev/null)
-        RAM_SEG="ram ${RAM_WIRED}/${RAM_CAP}G"
-        [ -n "$RAM_PCT" ] && RAM_SEG="${RAM_SEG} ${RAM_PCT}%"
+    if [ -n "$LOCAL_PROVIDER" ]; then
+      # Timeout-bounded and failure-swallowing: a status line must never hang a prompt.
+      LOCAL_JSON=$($LOCAL_PROVIDER 2>/dev/null | head -1)
+      if [ -n "$LOCAL_JSON" ] && command -v jq >/dev/null 2>&1; then
+        LOCAL_SEG=$(printf '%s' "$LOCAL_JSON" | jq -r '
+          if (.text // "") == "" then "" else ((.label // "") + " " + .text | ltrimstr(" ")) end' 2>/dev/null)
+        LOCAL_LEVEL=$(printf '%s' "$LOCAL_JSON" | jq -r '.level // ""' 2>/dev/null)
       fi
     fi
     ;;
 esac
 
-# The RAM instrument sits on line 1 next to ctx, and ESCALATES IN COLOUR as it approaches the
-# ceiling: green below 70% of cap, yellow from 70%, bold red from 90% — because a number you
-# have to read and compare is a number you will miss while working, and the whole purpose is
-# to see the cliff coming. Colour is redundant with the digits, never the only signal.
-if [ -n "$RAM_SEG" ]; then
-  RAM_COLOUR="$GREEN"
-  if [ -n "${RAM_PCT:-}" ]; then
-    if   [ "$RAM_PCT" -ge 90 ] 2>/dev/null; then RAM_COLOUR="${BOLD}${RED}"
-    elif [ "$RAM_PCT" -ge 70 ] 2>/dev/null; then RAM_COLOUR="$YELLOW"
-    fi
-  fi
-  LINE1="${LINE1}${SEP}${RAM_COLOUR}${RAM_SEG}${RESET}"
+# The local segment sits on line 1 next to ctx. COLOUR COMES FROM THE PROVIDER'S `level`,
+# not from a threshold computed here — the provider owns what "close to the ceiling" means
+# for its own metric, so this renderer never has to know the numbers. Colour is redundant
+# with the text by design; it is what makes a cliff visible without reading.
+if [ -n "$LOCAL_SEG" ]; then
+  case "$LOCAL_LEVEL" in
+    crit) LOCAL_COLOUR="${BOLD}${RED}" ;;
+    warn) LOCAL_COLOUR="$YELLOW" ;;
+    ok)   LOCAL_COLOUR="$GREEN" ;;
+    *)    LOCAL_COLOUR= ;;
+  esac
+  LINE1="${LINE1}${SEP}${LOCAL_COLOUR}${LOCAL_SEG}${RESET}"
 fi
 
 [ -n "$FIVEH" ]  && LINE1="${LINE1}${SEP}${MAGENTA}5h ${FIVEH}%${RESET}"

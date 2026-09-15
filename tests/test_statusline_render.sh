@@ -256,72 +256,87 @@ mkdir -p "$TMPD/savings"
 printf '%s\n' '{"saved_usd": 4.80, "at": "2026-09-11T10:00:00Z"}' > "$TMPD/savings/x.jsonl"
 
 
-# --- LOCAL-SESSION RAM instrument (the D-METAL-CAP reading) -------------------------
-# EVERY assertion here drives an INJECTED reader (COST_TRACKER_RAM_CMD), never this
-# machine's real memory. A suite that reads real vm_stat passes or fails by luck, cannot
-# reach the near-cap branch on a healthy laptop, and would go green while hiding a
-# regression — so the environmental input is stubbed and the thresholds are exercised
-# on fixed numbers.
-RAMPAY='{"model":{"display_name":"Opus 5"}}'
-ram_render() { # ram_render <base-url> <ram-cmd>
-  printf '%s' "$RAMPAY" | env ANTHROPIC_BASE_URL="$1" COST_TRACKER_RAM_CMD="$2" \
-    COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/null | sed -n 1p
+# --- LOCAL-SEGMENT SEAM (content owned by local-agents, layout owned here) -----------
+# WHAT THESE TEST, and what they deliberately do NOT: this renderer's job is the SEAM and
+# the endpoint gate. It must not know what the metric means, so there is no assertion here
+# about caps, wired memory or MLX -- those belong to local-agents' own suite. A fake
+# provider stands in for it, which is also what keeps this suite off real machine state:
+# a test reading live memory passes by luck and can never reach the near-ceiling branch.
+FAKEPROV="$TMPD/fake-provider.sh"
+mkdir -p "$TMPD"
+cat > "$FAKEPROV" <<'PROV'
+#!/bin/sh
+[ -n "$FAKE_JSON" ] && printf '%s\n' "$FAKE_JSON"
+exit 0
+PROV
+chmod +x "$FAKEPROV"
+SEGPAY='{"model":{"display_name":"Opus 5"}}'
+seg_render() { # seg_render <base-url> <provider-json>
+  printf '%s' "$SEGPAY" | env ANTHROPIC_BASE_URL="$1" FAKE_JSON="$2" \
+    COST_TRACKER_LOCAL_SEGMENT_CMD="$FAKEPROV" COST_TRACKER_STATUSLINE=0 \
+    sh "$RENDER" 2>/dev/null | sed -n 1p
 }
+plain() { printf '%s' "$1" | sed $'s/\033\[[0-9;]*m//g'; }
 
-# GATE: a CLOUD session must show NO ram segment. This is the leak this gate exists for --
-# CLAUDE_IS_LOCAL is exported by the local launcher and survives into a later gateway
-# `claude` in the same shell, so gating on it would paint a PAID session as local. The
-# gate is the endpoint. Asserted with CLAUDE_IS_LOCAL deliberately set to the leaked value.
-CLOUD_OUT="$(printf '%s' "$RAMPAY" | env -u ANTHROPIC_BASE_URL CLAUDE_IS_LOCAL=true \
-  COST_TRACKER_RAM_CMD='echo 70.6 128.0' COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/null | sed -n 1p)"
-hasnt "no ram segment on a cloud session even with CLAUDE_IS_LOCAL leaked" "$CLOUD_OUT" "ram "
+# THE GATE. A cloud session gets no local segment even with CLAUDE_IS_LOCAL set to the
+# value it leaks as -- the launcher exports it and it survives into a later gateway
+# `claude` in the same shell, so gating on it would decorate a PAID session.
+CLOUD_OUT="$(printf '%s' "$SEGPAY" | env -u ANTHROPIC_BASE_URL CLAUDE_IS_LOCAL=true \
+  FAKE_JSON='{"label":"ram","text":"70.6/103.9G 68%","level":"warn"}' \
+  COST_TRACKER_LOCAL_SEGMENT_CMD="$FAKEPROV" COST_TRACKER_STATUSLINE=0 \
+  sh "$RENDER" 2>/dev/null | sed -n 1p)"
+hasnt "no local segment on a cloud session even with CLAUDE_IS_LOCAL leaked" "$CLOUD_OUT" "ram "
+hasnt "no local segment when the endpoint is remote" \
+  "$(seg_render 'https://gateway.example.com' '{"label":"ram","text":"70.6/103.9G 68%","level":"warn"}')" "ram "
 
-# A gateway URL that merely CONTAINS a digit-ish host must not trip the loopback match.
-REMOTE_OUT="$(ram_render 'https://gateway.example.com' 'echo 70.6 128.0')"
-hasnt "no ram segment when the endpoint is remote" "$REMOTE_OUT" "ram "
+# PRESENT on loopback, and the provider's text is passed through VERBATIM: the renderer
+# must not reformat, round or reinterpret a metric it does not own.
+has "the provider's label and text render on a localhost endpoint" \
+  "$(plain "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"70.6/103.9G 68%","level":"warn"}')")" \
+  "ram 70.6/103.9G 68%"
+has "127.0.0.1 counts as local" \
+  "$(plain "$(seg_render 'http://127.0.0.1:8000' '{"label":"ram","text":"40.0/103.9G 38%","level":"ok"}')")" "ram 40.0"
+# An arbitrary label/units combination must survive untouched -- proof the renderer is
+# generic and the metric is genuinely the provider's to define.
+has "a different label and units pass through unchanged" \
+  "$(plain "$(seg_render 'http://localhost:8000' '{"label":"vram","text":"12.5 GiB of 24","level":"ok"}')")" \
+  "vram 12.5 GiB of 24"
 
-# PRESENT on localhost, and rendered AGAINST THE CAP -- wired alone is meaningless without
-# the ceiling beside it, which is the entire point of the instrument.
-LOC_OUT="$(ram_render 'http://localhost:8000' 'echo 70.6 128.0')"
-has "ram segment present on a localhost endpoint" "$(printf '%s' "$LOC_OUT" | sed $'s/\033\[[0-9;]*m//g')" "ram 70.6/103.9G"
-has "ram is shown as a percentage OF THE CAP, not of installed RAM" "$(printf '%s' "$LOC_OUT" | sed $'s/\033\[[0-9;]*m//g')" "68%"
-# 70.6 of 128 GB installed would be 55%; of the 103.9 GB cap it is 68%. Asserting 68 is
-# what proves the cap -- not hw.memsize -- is the denominator.
-hasnt "installed-RAM percentage is NOT what renders" "$(printf '%s' "$LOC_OUT" | sed $'s/\033\[[0-9;]*m//g')" "55%"
-
-# 127.0.0.1 and IPv6 loopback are the same session shape and must also match.
-has "127.0.0.1 counts as local" "$(ram_render 'http://127.0.0.1:8000' 'echo 40.0 128.0' | sed $'s/\033\[[0-9;]*m//g')" "ram 40.0"
-
-# DEGRADE, never break: a failing reader loses the segment and nothing else, and the
-# renderer must still exit 0 -- it is a status line, it can never take the prompt down.
-FAIL_OUT="$(ram_render 'http://localhost:8000' 'false')"
-hasnt "a failing ram reader drops the segment" "$FAIL_OUT" "ram "
-has   "the rest of the line survives a failing ram reader" "$FAIL_OUT" "Opus 5"
-printf '%s' "$RAMPAY" | env ANTHROPIC_BASE_URL=http://localhost:8000 COST_TRACKER_RAM_CMD='false' \
-  COST_TRACKER_STATUSLINE=0 sh "$RENDER" >/dev/null 2>&1
-is "renderer still exits 0 when the ram reader fails" 0 $?
-# Garbage from the reader must be rejected by the numeric guard, not printed raw.
-hasnt "non-numeric ram output is rejected" "$(ram_render 'http://localhost:8000' 'echo notanumber alsonot')" "notanumber"
-
-# COLOUR ESCALATION. Redundant with the digits by design, but it is what makes the cliff
-# visible without reading. Each threshold is asserted on a planted value so the test can
-# genuinely fail: below 70% green, 70-89 yellow, 90+ bold red.
-case "$(ram_render 'http://localhost:8000' 'echo 50.0 128.0')" in
-  *$'\033[32m'ram*) ok "below 70% of cap renders GREEN" ;;
-  *) bad "below 70% of cap renders GREEN" "ESC[32m before ram" "$(ram_render 'http://localhost:8000' 'echo 50.0 128.0')" ;;
+# COLOUR COMES FROM `level`, not from any threshold computed here.
+case "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"x","level":"ok"}')" in
+  *$'\033[32m'ram*) ok "level ok renders GREEN" ;;
+  *) bad "level ok renders GREEN" "ESC[32m before ram" "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"x","level":"ok"}')" ;;
 esac
-case "$(ram_render 'http://localhost:8000' 'echo 75.0 128.0')" in
-  *$'\033[33m'ram*) ok "70-89% of cap renders YELLOW" ;;
-  *) bad "70-89% of cap renders YELLOW" "ESC[33m before ram" "$(ram_render 'http://localhost:8000' 'echo 75.0 128.0')" ;;
+case "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"x","level":"warn"}')" in
+  *$'\033[33m'ram*) ok "level warn renders YELLOW" ;;
+  *) bad "level warn renders YELLOW" "ESC[33m before ram" "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"x","level":"warn"}')" ;;
 esac
-case "$(ram_render 'http://localhost:8000' 'echo 98.5 128.0')" in
-  *$'\033[1m'$'\033[31m'ram*) ok "90%+ of cap renders BOLD RED" ;;
-  *) bad "90%+ of cap renders BOLD RED" "ESC[1mESC[31m before ram" "$(ram_render 'http://localhost:8000' 'echo 98.5 128.0')" ;;
+case "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"x","level":"crit"}')" in
+  *$'\033[1m'$'\033[31m'ram*) ok "level crit renders BOLD RED" ;;
+  *) bad "level crit renders BOLD RED" "ESC[1mESC[31m before ram" "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"x","level":"crit"}')" ;;
 esac
-# The cap is machine-specific, so it must be overridable rather than hardcoded forever.
-has "the cap is overridable" "$(printf '%s' "$RAMPAY" | env ANTHROPIC_BASE_URL=http://localhost:8000 \
-  COST_TRACKER_RAM_CMD='echo 40.0 64.0' COST_TRACKER_RAM_CAP_GB=50 COST_TRACKER_STATUSLINE=0 \
-  sh "$RENDER" 2>/dev/null | sed -n 1p | sed $'s/\033\[[0-9;]*m//g')" "ram 40.0/50G 80%"
+# An unknown level must still SHOW the text -- losing a reading because a future provider
+# invented a new severity would be worse than showing it uncoloured.
+has "an unknown level still renders the text" \
+  "$(plain "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"9/10G","level":"apocalyptic"}')")" "ram 9/10G"
+
+# DEGRADE, NEVER BREAK. Each of these is a way the other plugin can be absent or broken.
+hasnt "a provider that prints nothing drops the segment" "$(seg_render 'http://localhost:8000' '')" "ram "
+has   "the rest of the line survives a silent provider" "$(seg_render 'http://localhost:8000' '')" "Opus 5"
+hasnt "malformed provider JSON drops the segment" \
+  "$(seg_render 'http://localhost:8000' 'not json at all')" "not json"
+hasnt "a provider with an empty text field drops the segment" \
+  "$(seg_render 'http://localhost:8000' '{"label":"ram","text":"","level":"ok"}')" "ram "
+# A MISSING provider is the default state on a machine without local-agents installed.
+ABSENT="$(printf '%s' "$SEGPAY" | env ANTHROPIC_BASE_URL=http://localhost:8000 \
+  COST_TRACKER_LOCAL_SEGMENT_CMD=/nonexistent/provider COST_TRACKER_STATUSLINE=0 \
+  sh "$RENDER" 2>/dev/null | sed -n 1p)"
+has "the line renders normally when local-agents is not installed" "$ABSENT" "Opus 5"
+hasnt "no segment when local-agents is not installed" "$ABSENT" "ram "
+printf '%s' "$SEGPAY" | env ANTHROPIC_BASE_URL=http://localhost:8000 \
+  COST_TRACKER_LOCAL_SEGMENT_CMD=/nonexistent/provider COST_TRACKER_STATUSLINE=0 \
+  sh "$RENDER" >/dev/null 2>&1
+is "renderer still exits 0 with a missing provider" 0 $?
 
 rm -rf "$TMPD"
 
