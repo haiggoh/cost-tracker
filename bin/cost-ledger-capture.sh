@@ -76,6 +76,13 @@ if command -v jq >/dev/null 2>&1; then
         BASE="${2:-0}"           # day rolled over mid-session: prior cumulative carries in
       fi
     fi
+    # MIDNIGHT-CROSSING LIMITATION (known, unfixed). When a session starts before 00:00 UTC
+    # and its FIRST render lands after it, there is no prior entry to carry a baseline in, so
+    # the whole incoming cumulative is attributed to the new day: an OVERCOUNT for that session
+    # on that day. Deriving the true pre-midnight split would require re-pricing the transcript
+    # per model, which this hot path (one run per statusline render) cannot afford. The bias is
+    # deliberately toward overcounting rather than undercounting, so the cap is never
+    # under-reported. Tracked as an open defect; do not "fix" it with a transcript scan here.
     # ENDPOINT-CHANGE GUARD (added 2026-08-29). A session that ran LOCAL and is then resumed
     # ON CLOUD is the one case where the incoming cumulative is not this day's spend: it is
     # the phantom local total, which the gate above has been zeroing render after render. So

@@ -2,6 +2,52 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.6.0] — 2026-09-18
+
+### Added — the free lanes get their own axis on the status line
+
+A session running on free inference — local MLX, or a free-tier API through the LiteLLM proxy —
+bills nothing, so showing it a cloud figure measured against the $40 cap misreports the axis it
+is on. Such a session now suppresses the cloud figure and the cap entirely and reports what the
+work WOULD have cost instead:
+
+- `local session saved $X · today: $Y saved with free agents` (local MLX)
+- `free api session saved $X · today: $Y saved with free agents` (free-tier API)
+
+`X` is this session's own phantom cumulative (field 4 of its ledger line); `Y` combines every
+free session's phantom with dispatch savings, exposed as the new `local_phantom_usd` key on
+`report --json` and as a `local phantom` row in the table. The JoyIA mark is dropped on these
+lanes too: it marks a paid-gateway session.
+
+The lane is decided by `ANTHROPIC_BASE_URL` (ports 8000–8010 local, 4141 free API) and
+deliberately NOT by `CLAUDE_IS_LOCAL`, which leaks into a later cloud session in the same shell
+and would mislabel it as free.
+
+### Fixed
+
+- **A free-lane model id was reported as an unpriced CLOUD model.** `is_non_billable()` keyed on
+  a `/` in the id, which catches a local model served under its on-disk path but not a bare slug
+  like `gemini-3.8-flash`. The reconstruction fallback then treated it as a pricing gap — the same
+  failure the path rule exists to prevent. Free-lane vendor prefixes are now recognised; Claude
+  ids stay billable and a genuinely unknown model is still reported.
+- **The status line priced the WRONG session's phantom.** The session id was read from
+  `CLAUDE_CODE_SESSION_ID` before the statusLine payload, and that variable is exported into every
+  child of a session — so a renderer drawing session B under session A read A's id and, with no
+  entry for it in the store being rendered, showed `$0.00`. The payload is now authoritative.
+- Removed a dead midnight-crossing branch that ran an `awk` pass over a multi-megabyte transcript
+  on **every** status-line render and discarded the result unconditionally. The limitation it
+  meant to address is now documented honestly where the baseline is computed: the bias is toward
+  overcounting, so the cap is never under-reported.
+
+### Internal
+
+- The local and free-API spend-line branches were near-identical 40-line copies; they now share
+  one branch differing only by label, so the two cannot drift apart.
+- 18 regression tests cover the free lanes, which shipped with none: both labels, cap and
+  gateway-axis suppression, the phantom arithmetic with a planted-positive control, payload
+  precedence over the environment, `CLAUDE_IS_LOCAL` leak resistance, an unrelated localhost
+  port, and survival with the CLI disabled.
+
 ## [0.5.2] — 2026-09-11
 
 ### Changed

@@ -163,6 +163,13 @@ PRICING = {
 # generates itself (123 of them on this machine, all with zero token usage).
 NON_BILLABLE_MODELS = {"<synthetic>"}
 
+# Vendor prefixes served through the FREE lanes (free-tier APIs reached via the LiteLLM proxy).
+# These are real hosted models with real list prices elsewhere, but WE are not billed for them,
+# so pricing them against the daily cap would invent spend that never happened. A bare-slug id
+# like `gemini-3.8-flash` is why the `/` discriminator below is not sufficient on its own.
+NON_BILLABLE_PREFIXES = ("gemini-", "gemma-", "nemotron-", "llama-", "qwen", "deepseek-",
+                         "mistral-", "mixtral-", "kimi-", "glm-", "grok-")
+
 
 def is_non_billable(model):
     """True for a model id that has no cloud price BY DESIGN, so it must never be
@@ -184,7 +191,13 @@ def is_non_billable(model):
         return False
     if model in NON_BILLABLE_MODELS:
         return True
-    return "/" in model or model.startswith("~")
+    if "/" in model or model.startswith("~"):
+        return True
+    # A free-lane model served under a bare slug (no vendor prefix, no path), e.g.
+    # `gemini-3.8-flash`. Added 2026-09-18: a free-API session put exactly that id into a
+    # transcript and the recurrence guard reported it as an unpriced CLOUD model, which is
+    # the same "buries a real gap in noise" failure the path rule above exists to prevent.
+    return model.lower().startswith(NON_BILLABLE_PREFIXES)
 
 
 def _canonical_model(model):

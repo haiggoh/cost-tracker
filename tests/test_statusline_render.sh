@@ -257,6 +257,82 @@ printf '%s\n' '{"saved_usd": 4.80, "at": "2026-09-11T10:00:00Z"}' > "$TMPD/savin
 
 rm -rf "$TMPD"
 
+# --- FREE sessions: local MLX and free-API lanes ------------------------------------
+# A free session bills nothing, so showing it a cloud figure and a cap is a LIE about the
+# axis. These assert the suppression, the two labels, and the phantom arithmetic. The lane
+# is chosen from ANTHROPIC_BASE_URL — never CLAUDE_IS_LOCAL, which leaks into a later cloud
+# session in the same shell and would mislabel it.
+FTMP="$(mktemp -d)"; FLED="$FTMP/ledger"; mkdir -p "$FLED"
+FTODAY="$(date -u +%F)"
+# Field 4 is the phantom cumulative: what this free work WOULD have cost on the gateway.
+printf '%s 0 0 12.5\n' "$FTODAY" > "$FLED/sess-x"
+printf '%s 0 0 7.5\n'  "$FTODAY" > "$FLED/sess-y"
+FPAY='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp"},
+ "cost":{"total_cost_usd":0.5},"session_id":"sess-x"}'
+frender() {
+  printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=1 \
+    COST_TRACKER_LEDGER_DIR="$FLED" COST_TRACKER_HISTORY="$FTMP/none.log" \
+    ANTHROPIC_BASE_URL="$1" sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g'
+}
+LOC="$(spend_line "$(frender http://localhost:8000)")"
+FRE="$(spend_line "$(frender http://localhost:4141)")"
+
+has "a LOCAL session is labelled as one"        "$LOC" "local session"
+has "a FREE-API session is labelled distinctly" "$FRE" "free api session"
+# The whole point: no cloud spend and no cap on a lane that cannot bill.
+hasnt "a LOCAL session shows no cap"            "$LOC" "/\$40"
+hasnt "a LOCAL session shows no gateway axis"   "$LOC" "gw"
+hasnt "a FREE-API session shows no cap"         "$FRE" "/\$40"
+# This session's own phantom comes from field 4 of ITS ledger line, not another session's.
+has "the session figure is THIS session's phantom" "$LOC" 'saved $12.50'
+# …and today is every free session's phantom together (12.5 + 7.5), not just this one's.
+has "today totals every free session's phantom"    "$LOC" '$20.00 saved'
+has "…and names free agents as the source"         "$LOC" "with free agents"
+
+# A planted change must MOVE the figure — otherwise the two assertions above would also pass
+# against a renderer that hardcoded them.
+printf '%s 0 0 99.0\n' "$FTODAY" > "$FLED/sess-x"
+MOVED="$(spend_line "$(frender http://localhost:8000)")"
+has "the session figure tracks the ledger (planted 99.0)" "$MOVED" 'saved $99.00'
+has "…and today tracks it too (99.0 + 7.5)"               "$MOVED" '$106.50 saved'
+
+# A session with no ledger entry must read $0.00 rather than inheriting another session's.
+NOENT="$(printf '%s' '{"model":{"display_name":"Opus 5"},"session_id":"sess-absent"}' \
+  | env COST_TRACKER_STATUSLINE=1 COST_TRACKER_LEDGER_DIR="$FLED" \
+    COST_TRACKER_HISTORY="$FTMP/none.log" ANTHROPIC_BASE_URL=http://localhost:8000 \
+    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+has "an unknown session claims no phantom" "$(spend_line "$NOENT")" 'saved $0.00'
+
+# The PAYLOAD outranks the environment. CLAUDE_CODE_SESSION_ID is exported into every child of
+# a session, so if the env won, a renderer drawing session B under session A would price A —
+# which measured as $0.00 when A had no entry in the store being rendered.
+ENVW="$(printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=1 COST_TRACKER_LEDGER_DIR="$FLED" \
+    COST_TRACKER_HISTORY="$FTMP/none.log" ANTHROPIC_BASE_URL=http://localhost:8000 \
+    CLAUDE_CODE_SESSION_ID=sess-absent sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+has "the payload session_id beats CLAUDE_CODE_SESSION_ID" "$(spend_line "$ENVW")" 'saved $99.00'
+
+# The lane is the ENDPOINT's business. A leaked CLAUDE_IS_LOCAL must not relabel a cloud session.
+LEAK="$(printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=0 CLAUDE_IS_LOCAL=1 \
+    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+hasnt "a leaked CLAUDE_IS_LOCAL does not relabel a cloud session" "$LEAK" "local session"
+# An unrelated localhost port is not a free lane either.
+OTHER="$(printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=0 \
+    ANTHROPIC_BASE_URL=http://localhost:9999 sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+hasnt "an unrelated localhost port is not treated as free" "$OTHER" "local session"
+
+# The free line must survive the cost-tracker CLI being switched off: no unbound variable, no
+# stray output, still exit 0. (CT_BIN is only defined inside that block.)
+OFFOUT="$(printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=0 \
+    ANTHROPIC_BASE_URL=http://localhost:8000 sh "$RENDER" 2>&1)"
+OFFRC=$?
+is "a free session exits 0 with the CLI disabled" "$OFFRC" "0"
+hasnt "…and emits no shell error" "$OFFOUT" "unbound"
+hasnt "…and emits no not-found error" "$OFFOUT" "not found"
+has "…and still reports a zero saving rather than nothing" \
+    "$(spend_line "$OFFOUT")" 'saved $0.00'
+
+rm -rf "$FTMP"
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

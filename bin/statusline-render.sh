@@ -39,16 +39,33 @@ statusline-render.sh — render the Claude Code status line.
 
 Reads the statusLine JSON payload on stdin and prints up to three lines:
 
-  JoyIA · <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
-  session $<cost> · today: $<billed>/$<cap> gw · local saved $<saved>
+  CLOUD SESSION:
+    JoyIA · <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
+    session $<cost> · today: $<billed>/$<cap> gw · local saved $<saved>
+  LOCAL SESSION (ANTHROPIC_BASE_URL=localhost:8000-8010):
+    <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
+    local session saved $<session_phantom> · today: $<daily_saved> saved with free agents
+    (no JoyIA mark, no cloud spend, no cap)
+  FREE_API SESSION (ANTHROPIC_BASE_URL=localhost:4141):
+    <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
+    free api session saved $<session_phantom> · today: $<daily_saved> saved with free agents
+    (no JoyIA mark, no cloud spend, no cap)
+
   <dir basename> · <branch> · <worktree> · +<added>/-<removed>
 
 Usage:
   <statusline JSON> | statusline-render.sh
   statusline-render.sh --help
 
-The budget line comes from the sibling `cost-tracker` CLI and is on the GATEWAY axis: the
-markup is already applied, so both figures match the cap the gateway's refusal quotes.
+The budget line comes from the sibling `cost-tracker` CLI. On CLOUD sessions it is on the
+GATEWAY axis (markup applied, figures match the cap the gateway's refusal quotes).
+On LOCAL and FREE_API sessions the cloud figure and cap are SUPPRESSED entirely; instead it
+shows "local session saved $X · today: $Y saved with free agents" (LOCAL) or
+"free api session saved $X · today: $Y saved with free agents" (FREE_API) where X is this
+session's phantom (what local/free work would have cost at Opus rates) and Y is the combined
+daily savings across all local sessions + free API sessions + dispatch savings from the
+savings-ledger. Detection is via ANTHROPIC_BASE_URL (ports 8000-8010 = LOCAL, 4141 = FREE_API),
+never CLAUDE_IS_LOCAL (which leaks into later cloud sessions).
 
 Every field is optional — anything missing or null is dropped rather than printed as
 "null" or "0". No network calls; git is best-effort and local. Always exits 0 so a
@@ -56,6 +73,8 @@ rendering problem can never break the status line.
 
 Environment:
   COST_TRACKER_STATUSLINE=0   omit the budget line entirely
+  COST_TRACKER_LEDGER_DIR     per-session ledger dir (default ~/.claude/cost-ledger); the
+                              free-lane phantom is read from this session's entry there
 USAGE
     exit 0
     ;;
@@ -132,6 +151,35 @@ if command -v git >/dev/null 2>&1; then
   [ -n "$TOPLEVEL" ] && WORKTREE=$(basename "$TOPLEVEL")
 fi
 
+# --- detect session type -----------------------------------------------------------
+# Three categories:
+#   LOCAL (IS_LOCAL=1):     Rapid-MLX/vllm-mlx on ports 8000-8010 → $0 inference
+#   FREE_API (IS_FREE=1):   LiteLLM proxy on :4141 (or configurable) → free API, metered differently
+#   CLOUD (default):        api.anthropic.com or paid gateway → bills against $40 cap
+#
+# Detection via endpoint, NOT CLAUDE_IS_LOCAL (leaks into later cloud sessions
+# in same shell — memory [[local-session-self-identification]]).
+IS_LOCAL=0
+IS_FREE=0
+case "${ANTHROPIC_BASE_URL:-}" in
+    http://localhost:800[0-9]|http://localhost:8010|http://127.0.0.1:800[0-9]|http://127.0.0.1:8010)
+        IS_LOCAL=1 ;;
+    http://localhost:4141|http://127.0.0.1:4141)
+        IS_FREE=1 ;;
+esac
+
+# Session id + ledger dir for the free-session phantom lookup. The ledger dir honours the SAME
+# override the cost-tracker CLI reads, so a test pointing at a temp store moves both halves.
+# The PAYLOAD wins over the environment. CLAUDE_CODE_SESSION_ID is exported into every child
+# process of a session, so a renderer invoked to draw session B while running under session A
+# would read A's id from the env and silently price the WRONG session's phantom (measured: the
+# figure came out $0.00 because the env id had no entry in the store being rendered). The
+# statusLine JSON describes the session actually being drawn, so it is the authority; the env
+# var stays only as a fallback for a caller that pipes no session_id.
+SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+[ -n "$SID" ] || SID="${CLAUDE_CODE_SESSION_ID:-}"
+LEDGER_DIR="${COST_TRACKER_LEDGER_DIR:-$HOME/.claude/cost-ledger}"
+
 # --- render -------------------------------------------------------------------
 DIM=$(printf '\033[2m');    BOLD=$(printf '\033[1m')
 RESET=$(printf '\033[0m');  CYAN=$(printf '\033[36m')
@@ -140,7 +188,13 @@ RED=$(printf '\033[31m');   MAGENTA=$(printf '\033[35m')
 BLUE=$(printf '\033[34m')
 SEP="${DIM} · ${RESET}"
 
-LINE1="${BOLD}${BLUE}JoyIA${RESET}${SEP}${BOLD}${MODEL}${RESET}"
+if [ "$IS_LOCAL" = "1" ] || [ "$IS_FREE" = "1" ]; then
+    # Local or Free API session: no JoyIA mark (not a paid gateway session)
+    LINE1="${BOLD}${MODEL}${RESET}"
+else
+    # Cloud session: show JoyIA mark
+    LINE1="${BOLD}${BLUE}JoyIA${RESET}${SEP}${BOLD}${MODEL}${RESET}"
+fi
 [ -n "$EFFORT" ] && LINE1="${LINE1} ${DIM}${EFFORT}${RESET}"
 
 # ctx: absolute input tokens + percentage. The window SIZE is intentionally not
@@ -167,6 +221,7 @@ fi
 # reads savings from the derived rollup, so it adds ~50ms rather than ~190ms. Wrapped
 # so that a failure loses the segment and nothing else: this file must always exit 0.
 TODAY_SEG=
+DAILY_SAVED=
 if [ "${COST_TRACKER_STATUSLINE:-1}" != "0" ]; then
     # RESOLVE $0 THROUGH SYMLINKS FIRST. In the wired setup this file is reached as
     # ~/.claude/scripts/statusline-render.sh, a symlink into the plugin — so a plain
@@ -186,7 +241,25 @@ if [ "${COST_TRACKER_STATUSLINE:-1}" != "0" ]; then
     done
     CT_BIN="$(dirname "$CT_SELF")/cost-tracker"
     if [ -x "$CT_BIN" ]; then
-        TODAY_SEG=$(python3 "$CT_BIN" statusline --fast 2>/dev/null | head -1) || TODAY_SEG=
+        if [ "$IS_LOCAL" = "1" ] || [ "$IS_FREE" = "1" ]; then
+            # FREE session (local MLX or free API): there is no cloud spend to report, so the
+            # cap segment is suppressed entirely and replaced by what the free work WOULD have
+            # cost. DAILY_SAVED combines every free session's phantom with dispatch savings.
+            JSON_OUT=$(python3 "$CT_BIN" statusline --fast --json 2>/dev/null) || JSON_OUT=
+            if [ -n "$JSON_OUT" ]; then
+                DAILY_SAVED=$(printf '%s' "$JSON_OUT" | python3 -c 'import sys,json
+try:
+    d = json.load(sys.stdin)
+    t = (d.get("local_saved_usd") or 0) + (d.get("local_phantom_usd") or 0)
+    if t > 0:
+        print("{:.2f}".format(t))
+except Exception:
+    pass' 2>/dev/null) || DAILY_SAVED=
+            fi
+            TODAY_SEG=
+        else
+            TODAY_SEG=$(python3 "$CT_BIN" statusline --fast 2>/dev/null | head -1) || TODAY_SEG=
+        fi
     fi
 fi
 
@@ -194,38 +267,52 @@ fi
 [ -n "$SEVEND" ] && LINE1="${LINE1}${SEP}${MAGENTA}7d ${SEVEND}%${RESET}"
 
 # --- the SPEND line ----------------------------------------------------------------
-# Both dollar figures live together on their own line: SESSION first, TODAY second.
-# EMPHASIS IS WEIGHT, NOT POSITION — today is the figure that matters (it is the one measured
-# against the cap) so it is BOLD while the session lifetime is DIMMED, and it reads as primary
-# from either position. Leading with it was tried and was not the lever: two figures in the
-# same colour read as equal however they are ordered, so dimming the secondary one is what
-# separates them. That decoupling lets the order follow reading habit — the session you are
-# in, then the day it sits inside — at no cost in prominence.
-# A lone session figure is NOT dimmed: it is not secondary to anything.
-# They belong on the SAME line precisely because they are
-# comparable quantities — separating them invites reading whichever is visible as "the"
-# spend, which is the mislabel this plugin exists to prevent. Keeping them off line 1 is
-# what stops the overflow that made this a separate line in the first place (108 columns,
-# wrapped); keeping them off the dir/branch line is what stops it coming back, since that
-# line is variable-length per project.
-#
-# The "session" prefix is still conditional on the today segment being present: with one
-# figure alone there is nothing to confuse it with and the label would be noise.
-# WEIGHT, not order, carries the emphasis: today is BOLD yellow and the session lifetime is
-# DIMMED beside it. The two figures read at a glance in the right priority without reordering
-# them or padding either with extra words, and dimming the secondary one is what makes the
-# primary stand out — brightening both would leave them equal again. When the session figure
-# stands ALONE it is not secondary to anything, so it keeps normal weight.
+# Three session types, each with their own SPEND line format:
+#   LOCAL (ports 8000-8010):      "local session saved $X · today: $Y saved with free agents"
+#                                 X = this session's phantom, Y = combined daily savings
+#   FREE_API (port 4141):         "free api session saved $X · today: $Y saved with free agents"
+#                                 X = this session's phantom, Y = combined daily savings
+#   CLOUD (default):              "session $X · today: $Z/$cap gw · local saved $W"
 TODAY_LINE=
-if [ -n "$COST_FMT" ]; then
-    if [ -n "$TODAY_SEG" ]; then
-        TODAY_LINE="${DIM}${YELLOW}session \$${COST_FMT}${RESET}"
-    else
-        TODAY_LINE="${YELLOW}\$${COST_FMT}${RESET}"
+if [ "$IS_LOCAL" = "1" ] || [ "$IS_FREE" = "1" ]; then
+    # FREE session. Both lanes render identically apart from the label, so they share one
+    # branch: duplicating it invites the two copies drifting apart.
+    #   session figure = field 4 of THIS session's ledger line (its phantom cumulative)
+    #   today figure   = DAILY_SAVED, computed once above from the cost-tracker JSON
+    if [ "$IS_LOCAL" = "1" ]; then FREE_LABEL="local session"; else FREE_LABEL="free api session"; fi
+    SESSION_PHANTOM="0.00"
+    if [ -n "$SID" ] && [ -f "$LEDGER_DIR/$SID" ]; then
+        # split "<date> <cum> [<baseline>] [<local_phantom_cum>]"
+        # shellcheck disable=SC2046
+        set -- $(cat "$LEDGER_DIR/$SID" 2>/dev/null)
+        if [ -n "${4:-}" ]; then
+            SESSION_PHANTOM=$(printf '%.2f' "$4" 2>/dev/null || printf '%s' "$4")
+        fi
     fi
-fi
-if [ -n "$TODAY_SEG" ]; then
-    TODAY_LINE="${TODAY_LINE:+$TODAY_LINE$SEP}${BOLD}${YELLOW}${TODAY_SEG}${RESET}"
+    [ -n "$DAILY_SAVED" ] || DAILY_SAVED="0.00"
+    # WEIGHT carries the emphasis here exactly as on the cloud line: the DAY is the figure that
+    # matters, so it is bold while this session's contribution is dimmed beside it.
+    TODAY_LINE="${DIM}${GREEN}${FREE_LABEL} ${BOLD}saved \$${SESSION_PHANTOM}${RESET}${SEP}${GREEN}today: ${BOLD}\$${DAILY_SAVED} saved${RESET}${GREEN} with free agents${RESET}"
+else
+    # CLOUD session. Both dollar figures live together on their own line: SESSION first, TODAY
+    # second. EMPHASIS IS WEIGHT, NOT POSITION — today is the figure measured against the cap, so
+    # it is BOLD while the session lifetime is DIMMED, and it reads as primary from either
+    # position. Leading with it was tried and was not the lever: two figures in the same colour
+    # read as equal however they are ordered, so dimming the secondary one is what separates them.
+    # That decoupling lets the order follow reading habit — the session you are in, then the day it
+    # sits inside — at no cost in prominence. A lone session figure is NOT dimmed: it is not
+    # secondary to anything, and the "session" prefix is likewise conditional on the today segment
+    # being present, since with one figure there is nothing to confuse it with.
+    if [ -n "$COST_FMT" ]; then
+        if [ -n "$TODAY_SEG" ]; then
+            TODAY_LINE="${DIM}${YELLOW}session \$${COST_FMT}${RESET}"
+        else
+            TODAY_LINE="${YELLOW}\$${COST_FMT}${RESET}"
+        fi
+    fi
+    if [ -n "$TODAY_SEG" ]; then
+        TODAY_LINE="${TODAY_LINE:+$TODAY_LINE$SEP}${BOLD}${YELLOW}${TODAY_SEG}${RESET}"
+    fi
 fi
 
 # Line 2 carries the VARIABLE-LENGTH names (dir / branch / worktree), which can be

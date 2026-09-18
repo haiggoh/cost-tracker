@@ -757,6 +757,15 @@ def collect(period="today", since=None, fast=False, days=None):
     local_sessions = [sid for sid, s in sessions.items() if s["axis"] == "local"]
     zero_sessions = [sid for sid, s in sessions.items() if s["axis"] == "zero"]
     reset_sessions = [sid for sid, s in sessions.items() if s["reset_anchored"]]
+
+    # Sum phantoms for local sessions (field 4 from ledger) — this is what local/free API
+    # sessions would have cost at gateway rates. Used by statusline renderer for
+    # "today: $X saved with free agents" which combines local phantoms + free API phantoms
+    # + dispatch savings.
+    local_phantom_total = 0.0
+    for (sid, day), rec in per_session_day.items():
+        if rec.axis == "local" and rec.phantom is not None:
+            local_phantom_total += rec.phantom
     if fast:
         savings = read_savings_fast()
     else:
@@ -809,6 +818,7 @@ def collect(period="today", since=None, fast=False, days=None):
         "reset_anchored_sessions": sorted(reset_sessions),
         "local_saved_usd": (savings.get("saved_usd") if savings else None),
         "local_events": (savings.get("events") if savings else None),
+        "local_phantom_usd": round(local_phantom_total, 4) if local_phantom_total > 0 else None,
         "quarantined": quarantined,
     }
 
@@ -1102,6 +1112,10 @@ def render_table(data, short_ids=True):
                      f"{'(' + str(data['local_events']) + ' dispatches)':>18}")
     else:
         lines.append("local saved   local   not measured (savings ledger unavailable)")
+    if data.get("local_phantom_usd") is not None:
+        lines.append(f"{'local phantom':<{idw}}  {'local':<6}  "
+                     f"{data['local_phantom_usd']:>14.2f}  "
+                     f"{'(phantom cumulative)':>18}")
     if data["local_sessions"]:
         lines.append(f"note: {len(data['local_sessions'])} local session(s) contribute $0 "
                      "to cloud spend by design")
