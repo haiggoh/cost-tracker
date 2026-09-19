@@ -111,7 +111,7 @@ if command -v jq >/dev/null 2>&1; then
     , (.cost.total_lines_removed    // 0         | s)
     , (.rate_limits.five_hour.used_percentage // null | pct)
     , (.rate_limits.seven_day.used_percentage // null | pct)
-    ] | join("\u001f")
+    ] | join("")
   ' 2>/dev/null || true)
 fi
 
@@ -151,34 +151,69 @@ if command -v git >/dev/null 2>&1; then
   [ -n "$TOPLEVEL" ] && WORKTREE=$(basename "$TOPLEVEL")
 fi
 
-# --- detect session type -----------------------------------------------------------
-# Three categories:
-#   LOCAL (IS_LOCAL=1):     Rapid-MLX/vllm-mlx on ports 8000-8010 → $0 inference
-#   FREE_API (IS_FREE=1):   LiteLLM proxy on :4141 (or configurable) → free API, metered differently
-#   CLOUD (default):        api.anthropic.com or paid gateway → bills against $40 cap
-#
-# Detection via endpoint, NOT CLAUDE_IS_LOCAL (leaks into later cloud sessions
-# in same shell — memory [[local-session-self-identification]]).
-IS_LOCAL=0
-IS_FREE=0
-case "${ANTHROPIC_BASE_URL:-}" in
-    http://localhost:800[0-9]|http://localhost:8010|http://127.0.0.1:800[0-9]|http://127.0.0.1:8010)
-        IS_LOCAL=1 ;;
-    http://localhost:4141|http://127.0.0.1:4141)
-        IS_FREE=1 ;;
-esac
+# --- resolve session identity via la-session-identity.sh --------------------
+# This replaces the old endpoint-only detection with the canonical resolver.
+# The resolver emits JSON with schema_version=1; we parse it with jq.
+IDENTITY_JSON=
+if command -v la-session-identity.sh >/dev/null 2>&1; then
+    IDENTITY_JSON=$(la-session-identity.sh 2>/dev/null) || IDENTITY_JSON=
+fi
 
-# Session id + ledger dir for the free-session phantom lookup. The ledger dir honours the SAME
-# override the cost-tracker CLI reads, so a test pointing at a temp store moves both halves.
-# The PAYLOAD wins over the environment. CLAUDE_CODE_SESSION_ID is exported into every child
-# process of a session, so a renderer invoked to draw session B while running under session A
-# would read A's id from the env and silently price the WRONG session's phantom (measured: the
-# figure came out $0.00 because the env id had no entry in the store being rendered). The
-# statusLine JSON describes the session actually being drawn, so it is the authority; the env
-# var stays only as a fallback for a caller that pipes no session_id.
-SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
-[ -n "$SID" ] || SID="${CLAUDE_CODE_SESSION_ID:-}"
-LEDGER_DIR="${COST_TRACKER_LEDGER_DIR:-$HOME/.claude/cost-ledger}"
+# Parse resolver output (fallback to legacy detection if resolver unavailable)
+if [ -n "$IDENTITY_JSON" ] && command -v jq >/dev/null 2>&1; then
+    SESSION_KIND=$(printf '%s' "$IDENTITY_JSON" | jq -r '.session_kind // "unknown"')
+    SESSION_EMOJI=$(printf '%s' "$IDENTITY_JSON" | jq -r '.session_emoji // "❓"')
+    ACTUAL_MODEL_ID=$(printf '%s' "$IDENTITY_JSON" | jq -r '.actual_model_id // "unknown"')
+    ACTUAL_MODEL_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.actual_model_display // "unknown"')
+    PROVIDER_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.provider_display // "Unknown"')
+    BACKEND_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.backend_display // "unknown"')
+    ROLE_PROFILE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.role_profile // "untagged"')
+    EFFORT=$(printf '%s' "$IDENTITY_JSON" | jq -r '.effort // "medium"')
+    THINKING_MODE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.thinking_mode // "unknown"')
+    THEME_IDENTIFIER=$(printf '%s' "$IDENTITY_JSON" | jq -r '.theme_identifier // "unknown"')
+    SPINNER_PROFILE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.spinner_profile_id // "unknown"')
+    EVIDENCE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.evidence // "fallback"')
+    UNKNOWN_FALLBACK=$(printf '%s' "$IDENTITY_JSON" | jq -r '.unknown_fallback // false')
+else
+    # Legacy fallback: derive from ANTHROPIC_BASE_URL (matches old logic)
+    SESSION_KIND="unknown"
+    SESSION_EMOJI="❓"
+    PROVIDER_DISPLAY="Unknown"
+    THEME_IDENTIFIER="unknown"
+    SPINNER_PROFILE="unknown"
+    case "${ANTHROPIC_BASE_URL:-}" in
+        http://localhost:800[0-9]|http://localhost:8010|http://127.0.0.1:800[0-9]|http://127.0.0.1:8010)
+            SESSION_KIND="local"
+            SESSION_EMOJI="🦾"
+            PROVIDER_DISPLAY="Local (unknown backend)"
+            THEME_IDENTIFIER="local-sky"
+            SPINNER_PROFILE="local-unknown"
+            ;;
+        http://localhost:4141|http://127.0.0.1:4141)
+            SESSION_KIND="free_api"
+            SESSION_EMOJI="🌐"
+            PROVIDER_DISPLAY="Free API (NVIDIA Nemotron)"
+            THEME_IDENTIFIER="free-lime"
+            SPINNER_PROFILE="free-api"
+            ;;
+        https://api.anthropic.com*|*anthropic.com*|*llmgw*)
+            SESSION_KIND="cloud"
+            SESSION_EMOJI="☁️"
+            PROVIDER_DISPLAY="Anthropic (cloud)"
+            THEME_IDENTIFIER="cloud-default"
+            SPINNER_PROFILE="cloud"
+            ;;
+    esac
+    # Preserve MODEL from input for backward compat
+    ACTUAL_MODEL_ID="${MODEL:-unknown}"
+    ACTUAL_MODEL_DISPLAY="${MODEL:-unknown}"
+    BACKEND_DISPLAY="unknown"
+    ROLE_PROFILE="untagged"
+    EFFORT="${EFFORT:-medium}"
+    THINKING_MODE="unknown"
+    EVIDENCE="legacy-fallback"
+    UNKNOWN_FALLBACK=true
+fi
 
 # --- render -------------------------------------------------------------------
 DIM=$(printf '\033[2m');    BOLD=$(printf '\033[1m')
@@ -188,14 +223,14 @@ RED=$(printf '\033[31m');   MAGENTA=$(printf '\033[35m')
 BLUE=$(printf '\033[34m')
 SEP="${DIM} · ${RESET}"
 
-if [ "$IS_LOCAL" = "1" ] || [ "$IS_FREE" = "1" ]; then
-    # Local or Free API session: no JoyIA mark (not a paid gateway session)
-    LINE1="${BOLD}${MODEL}${RESET}"
+# Line 1: model identity (uses resolver's actual_model_id for truthful display)
+MODEL_LABEL="${ACTUAL_MODEL_ID}"
+if [ "$SESSION_KIND" = "cloud" ]; then
+    LINE1="${BOLD}${BLUE}JoyIA${RESET}${SEP}${BOLD}${MODEL_LABEL}${RESET}"
 else
-    # Cloud session: show JoyIA mark
-    LINE1="${BOLD}${BLUE}JoyIA${RESET}${SEP}${BOLD}${MODEL}${RESET}"
+    LINE1="${BOLD}${MODEL_LABEL}${RESET}"
 fi
-[ -n "$EFFORT" ] && LINE1="${LINE1} ${DIM}${EFFORT}${RESET}"
+[ -n "$EFFORT" ] && [ "$EFFORT" != "medium" ] && LINE1="${LINE1} ${DIM}${EFFORT}${RESET}"
 
 # ctx: absolute input tokens + percentage. The window SIZE is intentionally not
 # shown -- the model name already carries it. Each half is independent so a
@@ -241,7 +276,7 @@ if [ "${COST_TRACKER_STATUSLINE:-1}" != "0" ]; then
     done
     CT_BIN="$(dirname "$CT_SELF")/cost-tracker"
     if [ -x "$CT_BIN" ]; then
-        if [ "$IS_LOCAL" = "1" ] || [ "$IS_FREE" = "1" ]; then
+        if [ "$SESSION_KIND" = "local" ] || [ "$SESSION_KIND" = "free_api" ]; then
             # FREE session (local MLX or free API): there is no cloud spend to report, so the
             # cap segment is suppressed entirely and replaced by what the free work WOULD have
             # cost. DAILY_SAVED combines every free session's phantom with dispatch savings.
@@ -274,12 +309,12 @@ fi
 #                                 X = this session's phantom, Y = combined daily savings
 #   CLOUD (default):              "session $X · today: $Z/$cap gw · local saved $W"
 TODAY_LINE=
-if [ "$IS_LOCAL" = "1" ] || [ "$IS_FREE" = "1" ]; then
+if [ "$SESSION_KIND" = "local" ] || [ "$SESSION_KIND" = "free_api" ]; then
     # FREE session. Both lanes render identically apart from the label, so they share one
     # branch: duplicating it invites the two copies drifting apart.
     #   session figure = field 4 of THIS session's ledger line (its phantom cumulative)
     #   today figure   = DAILY_SAVED, computed once above from the cost-tracker JSON
-    if [ "$IS_LOCAL" = "1" ]; then FREE_LABEL="local session"; else FREE_LABEL="free api session"; fi
+    if [ "$SESSION_KIND" = "local" ]; then FREE_LABEL="local session"; else FREE_LABEL="free api session"; fi
     SESSION_PHANTOM="0.00"
     if [ -n "$SID" ] && [ -f "$LEDGER_DIR/$SID" ]; then
         # split "<date> <cum> [<baseline>] [<local_phantom_cum>]"
