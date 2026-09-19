@@ -38,6 +38,10 @@ dir_line()   { printf '%s' "$1" | grep -v -E '^JoyIA' | grep -v -E '\$[0-9]' | h
 # ledger dir the test controls.
 export COST_TRACKER_STATUSLINE=0
 
+# For cloud session tests, ensure resolver detects cloud by setting ANTHROPIC_BASE_URL
+# to an Anthropic endpoint (the resolver keys off this).
+export ANTHROPIC_BASE_URL="https://api.anthropic.com"
+
 echo "statusline-render.sh"
 
 FULL='{"model":{"display_name":"Opus 5 (1M)"},"effort":{"level":"high"},
@@ -67,7 +71,7 @@ NOEFFORT='{"model":{"display_name":"Opus 5"},
  "workspace":{"current_dir":"/tmp/leaky-dir-name"},
  "context_window":{"total_input_tokens":100,"used_percentage":1},
  "cost":{"total_cost_usd":1}}'
-OUT="$(render "$NOEFFORT")"
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render "$NOEFFORT")"
 L1="$(printf '%s' "$OUT" | sed -n 1p)"
 L2="$(printf '%s' "$OUT" | sed -n 2p)"
 hasnt "a MISSING effort level does not shift the dir onto line 1" "$L1" "leaky-dir-name"
@@ -77,7 +81,7 @@ has   "cost did not shift either"                                 "$(spend_line 
 
 # --- absent fields are DROPPED, never printed as null or 0 -------------------
 MINIMAL='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp/x"}}'
-OUT="$(render "$MINIMAL")"
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render "$MINIMAL")"
 hasnt "a missing cost is not rendered as \$0.00" "$OUT" '$0.00'
 hasnt "nothing is rendered as the string null"   "$OUT" "null"
 hasnt "absent rate limits are dropped (gateway has none)" "$OUT" "5h"
@@ -85,11 +89,11 @@ has   "the model still renders"                  "$OUT" "Opus 5"
 
 # --- ALWAYS exits 0: a renderer bug must never blank the status line ---------
 for payload in '' 'not json at all' '{' '{"model":null}' '[]' '{"cost":{"total_cost_usd":"abc"}}'; do
-    printf '%s' "$payload" | sh "$RENDER" > /dev/null 2>&1
+    printf '%s' "$payload" | ANTHROPIC_BASE_URL=https://api.anthropic.com sh "$RENDER" > /dev/null 2>&1
     rc=$?
     is "exits 0 on payload: ${payload:-（empty）}" "$rc" "0"
 done
-OUT="$(render '{}')"
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render '{}')"
 is "an empty object still renders a line" "$([ -n "$OUT" ] && echo nonempty || echo empty)" "nonempty"
 
 
@@ -181,7 +185,7 @@ has "the segment still renders when reached THROUGH a symlink" \
 # --- 0.5.1: width ------------------------------------------------------------------
 # The reported overflow was 108 columns on ONE line. Two changes cut it: the model's
 # context suffix is abbreviated, and the budget segment moved to its own line.
-OUT="$(render '{"model":{"display_name":"Opus 5 (1M context)"},"effort":{"level":"medium"},"cost":{"total_cost_usd":2.88}}')"
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render '{"model":{"display_name":"Opus 5 (1M context)"},"effort":{"level":"medium"},"cost":{"total_cost_usd":2.88}}')"
 L1="$(printf '%s' "$OUT" | sed -n 1p)"
 has   "the model's context suffix is abbreviated for width" "$L1" 'Opus 5 (1M)'
 hasnt "…so the padding word is gone" "$L1" '1M context'
@@ -199,7 +203,7 @@ WIDEST=$(printf '%s' "$OUT" | awk '{ if (length($0) > m) m = length($0) } END { 
 # to the normal path and RENDERED, so a user probing an unfamiliar script got output that
 # looked like help while the script did its real work. Verified by running it, not by
 # grepping for the string — argparse-style help never appears in the source.
-H="$(sh "$RENDER" --help 2>&1 </dev/null)"
+H="$(ANTHROPIC_BASE_URL=https://api.anthropic.com sh "$RENDER" --help 2>&1 </dev/null)"
 has  "--help explains what the script does" "$H" 'render the Claude Code status line'
 has  "--help lists the lines it prints" "$H" 'today: $<billed>'
 has  "--help documents the env var" "$H" 'COST_TRACKER_STATUSLINE=0'
@@ -221,7 +225,7 @@ has "an unrecognised flag names itself" "$BADOUT" 'unrecognised option: --nope'
     || bad "an unrecognised flag exits non-zero" "non-zero exit" "exit $BADRC"
 # ...and the normal stdin path is untouched by the new parsing.
 has "a payload on stdin still renders normally" \
-    "$(render '{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":1.0}}' | sed -n 1p)" 'JoyIA'
+    "$(ANTHROPIC_BASE_URL=https://api.anthropic.com render '{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":1.0}}' | sed -n 1p)" 'JoyIA'
 
 # --- 0.5.1: WEIGHT makes today the primary figure, and both share one line -----------
 # Order is NOT the emphasis mechanism here (today already led and still read as equal).
@@ -235,7 +239,8 @@ RAW="$(printf '%s' '{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":
       COST_TRACKER_CONFIG_DIR="$TMPD/no-config" \
       COST_TRACKER_PROJECTS_DIR="$TMPD/no-transcripts" \
       LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
-      COST_TRACKER_CAP_USD=40 sh "$RENDER" 2>/dev/null | sed -n 2p)"
+      COST_TRACKER_CAP_USD=40 \
+      ANTHROPIC_BASE_URL=https://api.anthropic.com sh "$RENDER" 2>/dev/null | sed -n 2p)"
 case "$RAW" in
   *$'\033[1m'*'today:'*) ok "today is emitted BOLD" ;;
   *) bad "today is emitted BOLD" "an ESC[1m before today:" "$RAW" ;;
@@ -246,7 +251,8 @@ case "$RAW" in
 esac
 # A session figure standing ALONE is not secondary to anything, so it is not dimmed.
 SOLO="$(printf '%s' '{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":9.33}}' \
-    | env COST_TRACKER_STATUSLINE=0 sh "$RENDER" 2>/dev/null | sed -n 2p)"
+    | env COST_TRACKER_STATUSLINE=0 \
+      ANTHROPIC_BASE_URL=https://api.anthropic.com sh "$RENDER" 2>/dev/null | sed -n 2p)"
 case "$SOLO" in
   *$'\033[2m'*'$9.33'*) bad "a lone session figure is NOT dimmed" "no ESC[2m" "$SOLO" ;;
   *) ok "a lone session figure is NOT dimmed" ;;
@@ -258,6 +264,24 @@ printf '%s\n' '{"saved_usd": 4.80, "at": "2026-09-11T10:00:00Z"}' > "$TMPD/savin
 rm -rf "$TMPD"
 
 # --- FREE sessions: local MLX and free-API lanes ------------------------------------
+# A free session bills nothing, so showing it a cloud figure and a cap is a LIE about the
+# axis. These assert the suppression, the two labels, and the phantom arithmetic. The lane
+# is chosen from ANTHROPIC_BASE_URL — never CLAUDE_IS_LOCAL, which leaks into a later cloud
+# session in the same shell and would mislabel it.
+FTMP="$(mktemp -d)"; FLED="$FTMP/ledger"; mkdir -p "$FLED"
+FTODAY="$(date -u +%F)"
+# Field 4 is the phantom cumulative: what this free work WOULD have cost on the gateway.
+printf '%s 0 0 12.5\n' "$FTODAY" > "$FLED/sess-x"
+printf '%s 0 0 7.5\n'  "$FTODAY" > "$FLED/sess-y"
+FPAY='{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp"},
+ "cost":{"total_cost_usd":0.5},"session_id":"sess-x"}'
+frender() {
+  printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=1 \
+    COST_TRACKER_LEDGER_DIR="$FLED" COST_TRACKER_HISTORY="$FTMP/none.log" \
+    ANTHROPIC_BASE_URL="$1" sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g'
+}
+LOC="$(spend_line "$(frender http://localhost:8000)")"
+FRE="$(spend_line "$(frender http://localhost:4141)")"
 # A free session bills nothing, so showing it a cloud figure and a cap is a LIE about the
 # axis. These assert the suppression, the two labels, and the phantom arithmetic. The lane
 # is chosen from ANTHROPIC_BASE_URL — never CLAUDE_IS_LOCAL, which leaks into a later cloud
@@ -300,7 +324,7 @@ has "…and today tracks it too (99.0 + 7.5)"               "$MOVED" '$106.50 sa
 NOENT="$(printf '%s' '{"model":{"display_name":"Opus 5"},"session_id":"sess-absent"}' \
   | env COST_TRACKER_STATUSLINE=1 COST_TRACKER_LEDGER_DIR="$FLED" \
     COST_TRACKER_HISTORY="$FTMP/none.log" ANTHROPIC_BASE_URL=http://localhost:8000 \
-    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+    MODEL_ALIAS=qwen38-27b-4bit sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 has "an unknown session claims no phantom" "$(spend_line "$NOENT")" 'saved $0.00'
 
 # The PAYLOAD outranks the environment. CLAUDE_CODE_SESSION_ID is exported into every child of
@@ -308,12 +332,12 @@ has "an unknown session claims no phantom" "$(spend_line "$NOENT")" 'saved $0.00
 # which measured as $0.00 when A had no entry in the store being rendered.
 ENVW="$(printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=1 COST_TRACKER_LEDGER_DIR="$FLED" \
     COST_TRACKER_HISTORY="$FTMP/none.log" ANTHROPIC_BASE_URL=http://localhost:8000 \
-    CLAUDE_CODE_SESSION_ID=sess-absent sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+    MODEL_ALIAS=qwen38-27b-4bit CLAUDE_CODE_SESSION_ID=sess-absent sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 has "the payload session_id beats CLAUDE_CODE_SESSION_ID" "$(spend_line "$ENVW")" 'saved $99.00'
 
 # The lane is the ENDPOINT's business. A leaked CLAUDE_IS_LOCAL must not relabel a cloud session.
 LEAK="$(printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=0 CLAUDE_IS_LOCAL=1 \
-    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
+    ANTHROPIC_BASE_URL=https://api.anthropic.com sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
 hasnt "a leaked CLAUDE_IS_LOCAL does not relabel a cloud session" "$LEAK" "local session"
 # An unrelated localhost port is not a free lane either.
 OTHER="$(printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=0 \
@@ -323,7 +347,7 @@ hasnt "an unrelated localhost port is not treated as free" "$OTHER" "local sessi
 # The free line must survive the cost-tracker CLI being switched off: no unbound variable, no
 # stray output, still exit 0. (CT_BIN is only defined inside that block.)
 OFFOUT="$(printf '%s' "$FPAY" | env COST_TRACKER_STATUSLINE=0 \
-    ANTHROPIC_BASE_URL=http://localhost:8000 sh "$RENDER" 2>&1)"
+    ANTHROPIC_BASE_URL=http://localhost:8000 MODEL_ALIAS=qwen38-27b-4bit sh "$RENDER" 2>&1)"
 OFFRC=$?
 is "a free session exits 0 with the CLI disabled" "$OFFRC" "0"
 hasnt "…and emits no shell error" "$OFFOUT" "unbound"

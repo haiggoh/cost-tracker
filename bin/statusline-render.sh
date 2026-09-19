@@ -111,16 +111,17 @@ if command -v jq >/dev/null 2>&1; then
     , (.cost.total_lines_removed    // 0         | s)
     , (.rate_limits.five_hour.used_percentage // null | pct)
     , (.rate_limits.seven_day.used_percentage // null | pct)
+    , (.session_id                  // ""       | s)
     ] | join("")
   ' 2>/dev/null || true)
 fi
 
 MODEL=Claude; EFFORT=; CWD=; CTX_CUR=; CTX_PCT=
-COST=; ADD=0; DEL=0; FIVEH=; SEVEND=
+COST=; ADD=0; DEL=0; FIVEH=; SEVEND=; SID=
 if [ -n "$FIELDS" ]; then
   # shellcheck disable=SC2162
   IFS="$(printf '\037')" read MODEL EFFORT CWD CTX_CUR CTX_PCT \
-                COST ADD DEL FIVEH SEVEND <<EOF
+                COST ADD DEL FIVEH SEVEND SID <<EOF
 $FIELDS
 EOF
 fi
@@ -129,6 +130,9 @@ fi
 case "$ADD" in ''|*[!0-9]*) ADD=0 ;; esac
 case "$DEL" in ''|*[!0-9]*) DEL=0 ;; esac
 DIRBASE=$(basename "$CWD" 2>/dev/null || printf '%s' "$CWD")
+
+# LEDGER_DIR for per-session phantom lookup (defaults to ~/.claude/cost-ledger)
+LEDGER_DIR="${COST_TRACKER_LEDGER_DIR:-$HOME/.claude/cost-ledger}"
 
 # Abbreviate the model's context-window suffix: "Opus 5 (1M context)" -> "Opus 5 (1M)".
 # The word "context" is pure padding here — nothing else on the line could be measured in
