@@ -2,7 +2,7 @@
 
 All notable changes to cost-tracker are documented here.
 
-## [0.7.2] — 2026-09-21
+## [0.7.3] — 2026-09-21
 
 ### Fixed
 
