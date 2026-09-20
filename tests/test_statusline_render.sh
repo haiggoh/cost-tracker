@@ -355,6 +355,43 @@ hasnt "…and emits no not-found error" "$OFFOUT" "not found"
 has "…and still reports a zero saving rather than nothing" \
     "$(spend_line "$OFFOUT")" 'saved $0.00'
 
+# --- the free-API lane spans the launcher's WHOLE port scan range ---------------------
+# remote-session.sh scans LA_REMOTE_PROXY_PORT_MIN..MAX (default 4141-4151) and takes the
+# first FREE port, so a session launched while an earlier proxy is alive lands on 4142+.
+# Matching only 4141 rendered those as CLOUD sessions -- a cap and a gateway figure on a
+# session that bills nothing, the exact lie this lane exists to remove. A 4141-only
+# fixture cannot catch that, so these probe NON-FIRST ports deliberately.
+for port in 4142 4145 4151; do
+    RANGED="$(spend_line "$(frender "http://127.0.0.1:$port")")"
+    has "port $port renders as a free session, not a gateway one" "$RANGED" "free api session"
+    hasnt "port $port shows no cap" "$RANGED" "/\$40"
+done
+FOUT="$(spend_line "$(frender http://127.0.0.1:4152)")"
+has "port 4152 (outside the range) is still a cloud session" "$FOUT" "today:"
+hasnt "…and is not claimed as free" "$FOUT" "free api session"
+
+# --- line 1 names the model even when the payload omits display_name ------------------
+# The harness does not always send model.display_name. Reading only that field rendered
+# the literal word "Claude" with no model and no effort, on cloud sessions included.
+IDONLY='{"model":{"id":"claude-opus-5[1m]"},"effort":{"level":"high"},
+ "workspace":{"current_dir":"/tmp"},"cost":{"total_cost_usd":1.0},"session_id":"sess-x"}'
+MOUT="$(printf '%s' "$IDONLY" | env COST_TRACKER_STATUSLINE=0 \
+    COST_TRACKER_LEDGER_DIR="$FLED" COST_TRACKER_HISTORY="$FTMP/none.log" \
+    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | head -1)"
+has   "model.id is used when display_name is absent" "$MOUT" "claude-opus-5"
+hasnt "…and the bare fallback word is not shown instead" "$MOUT" "Claude "
+has   "…and the effort level still renders beside it"    "$MOUT" "high"
+
+# display_name still wins when both are present.
+BOTH='{"model":{"id":"claude-opus-5[1m]","display_name":"Opus 5 (1M context)"},
+ "effort":{"level":"high"},"workspace":{"current_dir":"/tmp"},
+ "cost":{"total_cost_usd":1.0},"session_id":"sess-x"}'
+BOUT="$(printf '%s' "$BOTH" | env COST_TRACKER_STATUSLINE=0 \
+    COST_TRACKER_LEDGER_DIR="$FLED" COST_TRACKER_HISTORY="$FTMP/none.log" \
+    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | head -1)"
+has   "display_name still takes precedence over id" "$BOUT" "Opus 5 (1M)"
+hasnt "…and the raw id is not shown when a display name exists" "$BOUT" "claude-opus-5["
+
 rm -rf "$FTMP"
 
 echo

@@ -2,6 +2,19 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.7.1] — 2026-09-20
+
+### Fixed
+
+- **Line 1 showed the literal word "Claude" instead of the model, with no effort level.** The payload parse read only `.model.display_name`, with no fallback to `.model.id` — so whenever the harness sent the id without a display name, every cloud session lost its model name *and* its effort. Now falls back to `.model.id`, with `display_name` still taking precedence when both are present.
+- **Free-API sessions rendered as gateway sessions on any port but 4141.** Detection matched a single port while `remote-session.sh` scans `LA_REMOTE_PROXY_PORT_MIN..MAX` (default **4141-4151**) and takes the first FREE one — so a session launched while an earlier proxy was still alive showed `today: $X/$40 gw`, putting a cap and a gateway figure on a session that bills nothing. That is precisely the misleading budget reasoning this lane exists to remove. Now matches the whole range; the prose references were corrected with it.
+
+### Testing
+
+- 13 new assertions in `tests/test_statusline_render.sh` (72 → 85), covering non-first ports across the range, a port just outside it, and the model-name fallback in both directions. The range cases probe **4142/4145/4151** on purpose: the previous suite only ever rendered 4141 — the range's first element — so it could not catch this class at all.
+- Inserted **before** the summary line, not appended after it: this suite ends in a `printf`/exit, so appended cases would never run while the total still looked green.
+- Mutation-tested, both caught: reverting to 4141-only fails 6 assertions; removing the `.model.id` fallback fails 2. `bin/statusline-render.sh` restored to its exact pre-mutation shasum.
+
 ## [0.7.0] — 2026-09-23
 
 ### Added — free-agents telemetry integration (RAM, token rate)
