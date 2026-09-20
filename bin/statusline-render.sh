@@ -163,22 +163,20 @@ if command -v la-session-identity.sh >/dev/null 2>&1; then
     IDENTITY_JSON=$(la-session-identity.sh 2>/dev/null) || IDENTITY_JSON=
 fi
 
-# Parse resolver output (fallback to legacy detection if resolver unavailable)
+# Parse resolver output (fallback to legacy detection if resolver unavailable or returns unknown session_kind)
+USE_LEGACY_FALLBACK=0
 if [ -n "$IDENTITY_JSON" ] && command -v jq >/dev/null 2>&1; then
     SESSION_KIND=$(printf '%s' "$IDENTITY_JSON" | jq -r '.session_kind // "unknown"')
-    SESSION_EMOJI=$(printf '%s' "$IDENTITY_JSON" | jq -r '.session_emoji // "❓"')
-    ACTUAL_MODEL_ID=$(printf '%s' "$IDENTITY_JSON" | jq -r '.actual_model_id // "unknown"')
-    ACTUAL_MODEL_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.actual_model_display // "unknown"')
-    PROVIDER_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.provider_display // "Unknown"')
-    BACKEND_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.backend_display // "unknown"')
-    ROLE_PROFILE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.role_profile // "untagged"')
-    EFFORT=$(printf '%s' "$IDENTITY_JSON" | jq -r '.effort // "medium"')
-    THINKING_MODE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.thinking_mode // "unknown"')
-    THEME_IDENTIFIER=$(printf '%s' "$IDENTITY_JSON" | jq -r '.theme_identifier // "unknown"')
-    SPINNER_PROFILE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.spinner_profile_id // "unknown"')
-    EVIDENCE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.evidence // "fallback"')
     UNKNOWN_FALLBACK=$(printf '%s' "$IDENTITY_JSON" | jq -r '.unknown_fallback // false')
-else
+    # Only use legacy fallback if resolver returns "unknown" session_kind.
+    # If resolver returns a valid kind (local/free_api/cloud) but unknown_fallback=true,
+    # we trust the session_kind but may fall back to payload for model name.
+    if [ "$SESSION_KIND" = "unknown" ]; then
+        USE_LEGACY_FALLBACK=1
+    fi
+fi
+
+if [ "$USE_LEGACY_FALLBACK" = "1" ]; then
     # Legacy fallback: derive from ANTHROPIC_BASE_URL (matches old logic)
     SESSION_KIND="unknown"
     SESSION_EMOJI="❓"
@@ -217,6 +215,46 @@ else
     THINKING_MODE="unknown"
     EVIDENCE="legacy-fallback"
     UNKNOWN_FALLBACK=true
+else
+    # Use resolver output
+    SESSION_EMOJI=$(printf '%s' "$IDENTITY_JSON" | jq -r '.session_emoji // "❓"')
+    ACTUAL_MODEL_ID=$(printf '%s' "$IDENTITY_JSON" | jq -r '.actual_model_id // "unknown"')
+    ACTUAL_MODEL_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.actual_model_display // "unknown"')
+    PROVIDER_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.provider_display // "Unknown"')
+    BACKEND_DISPLAY=$(printf '%s' "$IDENTITY_JSON" | jq -r '.backend_display // "unknown"')
+    ROLE_PROFILE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.role_profile // "untagged"')
+    # For cloud sessions, keep payload's effort level; for local/free_api, use resolver's
+    if [ "$SESSION_KIND" = "cloud" ]; then
+        EFFORT="${EFFORT:-medium}"
+    else
+        EFFORT=$(printf '%s' "$IDENTITY_JSON" | jq -r '.effort // "medium"')
+    fi
+    THINKING_MODE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.thinking_mode // "unknown"')
+    THEME_IDENTIFIER=$(printf '%s' "$IDENTITY_JSON" | jq -r '.theme_identifier // "unknown"')
+    SPINNER_PROFILE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.spinner_profile_id // "unknown"')
+    EVIDENCE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.evidence // "fallback"')
+    UNKNOWN_FALLBACK=$(printf '%s' "$IDENTITY_JSON" | jq -r '.unknown_fallback // false')
+fi
+
+# If resolver gave us a valid session_kind but unknown actual_model_id, fall back to payload MODEL
+if [ "$ACTUAL_MODEL_ID" = "unknown" ] && [ -n "$MODEL" ]; then
+    ACTUAL_MODEL_ID="$MODEL"
+    ACTUAL_MODEL_DISPLAY="$MODEL"
+fi
+
+# --- collect free-agents telemetry (RAM, token rate) ---------------------------
+# Only for local and free_api sessions; cloud sessions don't have local telemetry.
+TELEMETRY_RAM=
+TELEMETRY_TOK_RATE=
+if [ "$SESSION_KIND" = "local" ] || [ "$SESSION_KIND" = "free_api" ]; then
+    # RAM segment (la-statusline-segment.sh prints JSON: {"label":"ram","text":"...","level":"..."})
+    if command -v la-statusline-segment.sh >/dev/null 2>&1; then
+        TELEMETRY_RAM=$(la-statusline-segment.sh 2>/dev/null) || TELEMETRY_RAM=
+    fi
+    # Token rate segment (la-telemetry-token-rate.sh prints JSON: {"text":"...","rate":...,"fresh":...,"age_s":...,"level":"..."})
+    if command -v la-telemetry-token-rate.sh >/dev/null 2>&1; then
+        TELEMETRY_TOK_RATE=$(la-telemetry-token-rate.sh 2>/dev/null) || TELEMETRY_TOK_RATE=
+    fi
 fi
 
 # --- render -------------------------------------------------------------------
@@ -247,6 +285,37 @@ if [ -n "$CTX_PCT" ]; then
   if [ -n "$CTXSTR" ]; then CTXSTR="${CTXSTR} ${CTX_PCT}%"; else CTXSTR="ctx ${CTX_PCT}%"; fi
 fi
 [ -n "$CTXSTR" ] && LINE1="${LINE1}${SEP}${CYAN}${CTXSTR}${RESET}"
+
+# --- free-agents telemetry on line 1 -------------------------------------------
+# Add RAM and token rate for local/free_api sessions
+if [ "$SESSION_KIND" = "local" ] || [ "$SESSION_KIND" = "free_api" ]; then
+    # RAM telemetry
+    if [ -n "$TELEMETRY_RAM" ] && command -v jq >/dev/null 2>&1; then
+        RAM_TEXT=$(printf '%s' "$TELEMETRY_RAM" | jq -r '.text // ""' 2>/dev/null)
+        RAM_LEVEL=$(printf '%s' "$TELEMETRY_RAM" | jq -r '.level // "ok"' 2>/dev/null)
+        if [ -n "$RAM_TEXT" ]; then
+            case "$RAM_LEVEL" in
+                crit) RAM_COLOR="$RED" ;;
+                warn) RAM_COLOR="$YELLOW" ;;
+                *) RAM_COLOR="$GREEN" ;;
+            esac
+            LINE1="${LINE1}${SEP}${RAM_COLOR}${RAM_TEXT}${RESET}"
+        fi
+    fi
+    # Token rate telemetry
+    if [ -n "$TELEMETRY_TOK_RATE" ] && command -v jq >/dev/null 2>&1; then
+        TOK_TEXT=$(printf '%s' "$TELEMETRY_TOK_RATE" | jq -r '.text // ""' 2>/dev/null)
+        TOK_LEVEL=$(printf '%s' "$TELEMETRY_TOK_RATE" | jq -r '.level // "unknown"' 2>/dev/null)
+        if [ -n "$TOK_TEXT" ]; then
+            case "$TOK_LEVEL" in
+                stale) TOK_COLOR="$YELLOW" ;;
+                unknown) TOK_COLOR="$DIM" ;;
+                *) TOK_COLOR="$CYAN" ;;
+            esac
+            LINE1="${LINE1}${SEP}${TOK_COLOR}${TOK_TEXT}${RESET}"
+        fi
+    fi
+fi
 
 # --- the TODAY segment (cost-tracker) ----------------------------------------
 # Two dollar figures on one line MUST each name their axis, or this reproduces the

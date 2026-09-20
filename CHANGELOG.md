@@ -2,6 +2,27 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.7.0] — 2026-09-23
+
+### Added — free-agents telemetry integration (RAM, token rate)
+
+The statusline renderer now consumes free-agents telemetry scripts for local and free_api sessions:
+- `la-statusline-segment.sh` — RAM pressure (wired memory vs Metal ceiling) with ok/warn/crit levels
+- `la-telemetry-token-rate.sh` — live token generation rate with freshness indicator (ok/stale/unknown)
+
+Telemetry appears on line 1 of the status line, color-coded by level:
+- RAM: green (ok) / yellow (warn ≥70%) / red (crit ≥90%)
+- Token rate: cyan (ok) / yellow (stale) / dim (unknown)
+
+Both scripts follow the local-agents contract: print JSON or nothing, never block, exit 0.
+The renderer gracefully handles missing scripts or missing data — telemetry is optional.
+
+### Changed
+
+- Resolver fallback: when `la-session-identity.sh` returns `unknown_fallback=true`, the renderer
+  falls back to legacy `ANTHROPIC_BASE_URL` detection instead of displaying "unknown".
+- Cloud sessions remain unchanged (no telemetry, JoyIA mark preserved).
+
 ## [0.6.0] — 2026-09-18
 
 ### Added — the free lanes get their own axis on the status line
