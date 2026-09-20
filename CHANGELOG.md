@@ -2,6 +2,17 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.7.2] — 2026-09-21
+
+### Fixed
+
+- **Status line showed blank model name on local sessions.** The jq `pct` function used `.|round` which crashes when `used_percentage` arrives as a string (e.g. `"12"` instead of `12`), making the entire field extraction return empty and leaving MODEL at its default `"Claude"`. Also: the `unknown_fallback` model fallback was only in the legacy branch, not the resolver branch, so a resolver returning `unknown_model_id` but valid `session_kind` never restored the payload model name.
+
+### Technical detail
+
+- `pct` now uses `(.|tostring|tonumber|round|tostring)` to handle both string and numeric percentage inputs.
+- Added `unknown_fallback` check in the resolver branch to fall back to payload MODEL when the resolver cannot resolve the model name.
+
 ## [0.7.1] — 2026-09-20
 
 ### Fixed
