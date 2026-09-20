@@ -100,7 +100,7 @@ FIELDS=""
 if command -v jq >/dev/null 2>&1; then
   FIELDS=$(printf '%s' "$INPUT" | jq -r '
     def s: if . == null then "" else (.|tostring) end;
-    def pct: if . == null then "" else (.|round|tostring) end;
+    def pct: if . == null then "" else (.|tostring|tonumber|round|tostring) end;
     [ (.model.display_name // .model.id // "Claude")
     , (.effort.level                // null      | s)
     , (.workspace.current_dir       // .cwd // "" )
@@ -209,6 +209,13 @@ if [ "$USE_LEGACY_FALLBACK" = "1" ]; then
     # Preserve MODEL from input for backward compat
     ACTUAL_MODEL_ID="${MODEL:-unknown}"
     ACTUAL_MODEL_DISPLAY="${MODEL:-unknown}"
+    # If resolver returned unknown_fallback=true (e.g. MODEL_ALIAS not set) but gave
+    # us a valid session_kind, trust that kind for lane detection while using the
+    # payload model name since the resolver cannot resolve without MODEL_ALIAS.
+    if [ "$UNKNOWN_FALLBACK" = "true" ] && [ -n "$MODEL" ]; then
+        ACTUAL_MODEL_ID="$MODEL"
+        ACTUAL_MODEL_DISPLAY="$MODEL"
+    fi
     BACKEND_DISPLAY="unknown"
     ROLE_PROFILE="untagged"
     EFFORT="${EFFORT:-medium}"
