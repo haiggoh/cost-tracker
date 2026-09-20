@@ -7,11 +7,13 @@ All notable changes to cost-tracker are documented here.
 ### Fixed
 
 - **Status line showed blank model name on local sessions.** The jq `pct` function used `.|round` which crashes when `used_percentage` arrives as a string (e.g. `"12"` instead of `12`), making the entire field extraction return empty and leaving MODEL at its default `"Claude"`. Also: the `unknown_fallback` model fallback was only in the legacy branch, not the resolver branch, so a resolver returning `unknown_model_id` but valid `session_kind` never restored the payload model name.
+- **Free-API and local sessions showed cloud budget format (`today: $X/$40 gw`) instead of savings format.** The `la-session-identity.sh` resolver (from free-agents plugin) returned **empty output** when `MODEL_ALIAS` was not registered in `config.example.sh` (which only contains local models). The resolver's `set -uo pipefail` caused a silent exit on the unset array lookup. `statusline-render.sh` only fell back to legacy endpoint detection when the resolver returned `"unknown"` session_kind, **NOT when it returned empty** — so free_api and local sessions fell through to the cloud branch.
 
 ### Technical detail
 
 - `pct` now uses `(.|tostring|tonumber|round|tostring)` to handle both string and numeric percentage inputs.
 - Added `unknown_fallback` check in the resolver branch to fall back to payload MODEL when the resolver cannot resolve the model name.
+- Added `else` clause to trigger legacy endpoint detection when resolver returns empty output (not just `"unknown"`). This pairs with free-agents 0.17.10 which hardens the resolver to emit valid JSON even on lookup failure.
 
 ## [0.7.1] — 2026-09-20
 

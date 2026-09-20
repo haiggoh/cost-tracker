@@ -174,6 +174,9 @@ if [ -n "$IDENTITY_JSON" ] && command -v jq >/dev/null 2>&1; then
     if [ "$SESSION_KIND" = "unknown" ]; then
         USE_LEGACY_FALLBACK=1
     fi
+else
+    # Resolver unavailable or returned empty output — fall back to legacy endpoint detection
+    USE_LEGACY_FALLBACK=1
 fi
 
 if [ "$USE_LEGACY_FALLBACK" = "1" ]; then
