@@ -46,7 +46,7 @@ Reads the statusLine JSON payload on stdin and prints up to three lines:
     <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
     local session saved $<session_phantom> · today: $<daily_saved> saved with free agents
     (no JoyIA mark, no cloud spend, no cap)
-  FREE_API SESSION (ANTHROPIC_BASE_URL=localhost:4141):
+  FREE_API SESSION (ANTHROPIC_BASE_URL=localhost:4141-4151):
     <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
     free api session saved $<session_phantom> · today: $<daily_saved> saved with free agents
     (no JoyIA mark, no cloud spend, no cap)
@@ -64,7 +64,7 @@ shows "local session saved $X · today: $Y saved with free agents" (LOCAL) or
 "free api session saved $X · today: $Y saved with free agents" (FREE_API) where X is this
 session's phantom (what local/free work would have cost at Opus rates) and Y is the combined
 daily savings across all local sessions + free API sessions + dispatch savings from the
-savings-ledger. Detection is via ANTHROPIC_BASE_URL (ports 8000-8010 = LOCAL, 4141 = FREE_API),
+savings-ledger. Detection is via ANTHROPIC_BASE_URL (ports 8000-8010 = LOCAL, 4141-4151 = FREE_API),
 never CLAUDE_IS_LOCAL (which leaks into later cloud sessions).
 
 Every field is optional — anything missing or null is dropped rather than printed as
@@ -101,7 +101,7 @@ if command -v jq >/dev/null 2>&1; then
   FIELDS=$(printf '%s' "$INPUT" | jq -r '
     def s: if . == null then "" else (.|tostring) end;
     def pct: if . == null then "" else (.|round|tostring) end;
-    [ (.model.display_name          // "Claude")
+    [ (.model.display_name // .model.id // "Claude")
     , (.effort.level                // null      | s)
     , (.workspace.current_dir       // .cwd // "" )
     , (.context_window.total_input_tokens   // null | s)
@@ -191,7 +191,7 @@ if [ "$USE_LEGACY_FALLBACK" = "1" ]; then
             THEME_IDENTIFIER="local-sky"
             SPINNER_PROFILE="local-unknown"
             ;;
-        http://localhost:4141|http://127.0.0.1:4141)
+        http://localhost:414[1-9]|http://localhost:415[01]|http://127.0.0.1:414[1-9]|http://127.0.0.1:415[01])
             SESSION_KIND="free_api"
             SESSION_EMOJI="🌐"
             PROVIDER_DISPLAY="Free API (NVIDIA Nemotron)"
@@ -378,7 +378,7 @@ fi
 # Three session types, each with their own SPEND line format:
 #   LOCAL (ports 8000-8010):      "local session saved $X · today: $Y saved with free agents"
 #                                 X = this session's phantom, Y = combined daily savings
-#   FREE_API (port 4141):         "free api session saved $X · today: $Y saved with free agents"
+#   FREE_API (ports 4141-4151):   "free api session saved $X · today: $Y saved with free agents"
 #                                 X = this session's phantom, Y = combined daily savings
 #   CLOUD (default):              "session $X · today: $Z/$cap gw · local saved $W"
 TODAY_LINE=
