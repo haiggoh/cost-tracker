@@ -2,6 +2,26 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.7.6] — 2026-09-21
+
+### Added — free_api session token rate telemetry
+
+- Statusline now collects and displays token rate for `free_api` sessions via
+  `la-telemetry-remote-tokrate.sh` (from free-agents 0.18.2+)
+- Free API sessions show token rate but NOT RAM (remote providers have no local Metal RAM)
+- Telemetry collection gated on `SESSION_KIND=free_api` alongside existing `local` gate
+
+## [0.7.5] — 2026-09-21
+
+### Fixed — local-only telemetry incorrectly shown for free_api sessions
+
+- The 0.7.4 fix correctly discovered the free-agents helpers but the telemetry
+  collection was still gated only on `SESSION_KIND=local`
+- Free API sessions (remote providers on ports 4141-4151) were showing local
+  MLX telemetry (RAM ~0.5, tok/s ~0.5) because the local scripts returned stale data
+- Fixed by: (1) gating collection on endpoint for `la-telemetry-token-rate.sh`,
+  (2) gating display on `SESSION_KIND=local` in statusline-render.sh
+
 ## [0.7.4] — 2026-09-21
 
 ### Fixed — the real model name, RAM and tok/s never appeared in the LIVE status line
