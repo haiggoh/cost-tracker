@@ -392,6 +392,52 @@ BOUT="$(printf '%s' "$BOTH" | env COST_TRACKER_STATUSLINE=0 \
 has   "display_name still takes precedence over id" "$BOUT" "Opus 5 (1M)"
 hasnt "…and the raw id is not shown when a display name exists" "$BOUT" "claude-opus-5["
 
+# --- free-agents helpers must be found WITHOUT relying on PATH ------------------
+#
+# THE BUG THIS GUARDS, and why it hid for days: the renderer located
+# la-session-identity.sh / la-statusline-segment.sh / la-telemetry-token-rate.sh with
+# `command -v`. Those live only in the free-agents PLUGIN CACHE bin, which is on the
+# PATH of Claude Code's Bash tool but NOT on the plain PATH the CLI spawns a statusline
+# with. So every hand-run test printed the real model name, RAM and tok/s, while the
+# LIVE statusline silently omitted all three and showed the spoofed "Opus 5". A test that
+# inherits the developer's PATH cannot see this -- so run under `env -i` with a minimal
+# PATH, which is the only condition that reproduces it.
+echo
+echo "free-agents helper discovery (plain PATH)"
+
+PTMP="$(mktemp -d)"
+PLED="$PTMP/ledger"; mkdir -p "$PLED"
+
+# A local session: kind comes from the loopback endpoint, model name from the resolver.
+PPAYLOAD='{"model":{"display_name":"Opus 5","id":"claude-opus-5"},
+ "workspace":{"current_dir":"/Users/x"},
+ "context_window":{"total_input_tokens":"12345","used_percentage":"12"},
+ "cost":{"total_cost_usd":1.5},"session_id":"sess-path"}'
+
+# env -i drops PATH entirely, so give it ONLY the system dirs: jq lives in /usr/bin and
+# must still be found, while the plugin bin deliberately must not be.
+plain_render() {
+    printf '%s' "$PPAYLOAD" | env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+        COST_TRACKER_STATUSLINE=0 COST_TRACKER_LEDGER_DIR="$PLED" \
+        COST_TRACKER_HISTORY="$PTMP/none.log" \
+        MODEL_ALIAS="qwen-3.6-operator" ANTHROPIC_BASE_URL="http://localhost:8003" \
+        sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g'
+}
+
+POUT="$(plain_render | head -1)"
+has   "the REAL model name is rendered on a plain PATH" "$POUT" "qwen-3.6-operator"
+hasnt "...and the spoofed model name is not shown instead" "$POUT" "Opus 5"
+
+# Sanity: the helpers really are unreachable via PATH here, so the assertions above pass
+# because of absolute-path discovery and not because the environment leaked them in.
+if env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin sh -c 'command -v la-session-identity.sh' >/dev/null 2>&1; then
+    bad "the test environment genuinely lacks the plugin bin on PATH" "not found" "found on PATH"
+else
+    ok "the test environment genuinely lacks the plugin bin on PATH"
+fi
+
+rm -rf "$PTMP"
+
 rm -rf "$FTMP"
 
 echo

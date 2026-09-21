@@ -2,6 +2,38 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.7.4] — 2026-09-21
+
+### Fixed — the real model name, RAM and tok/s never appeared in the LIVE status line
+
+All three free-agents helpers were located with `command -v`. They live only in the
+free-agents **plugin cache** bin, which is on the PATH of Claude Code's Bash tool but **not**
+on the plain PATH the CLI spawns a status line with. So every hand-run test printed the real
+model name, RAM and token rate, while the live status line silently omitted all three and
+showed the spoofed `Opus 5` — the difference between the two environments *was* the bug.
+
+This is why the 0.7.3/free-agents 0.17.10 notes described the token rate as "works in manual
+tests but not live status line — parsing needs fix": the parser was never wrong, **it never
+ran**.
+
+- new `_fa_find` resolves each helper by ABSOLUTE path: `$FREE_AGENTS_BIN` override, then a
+  developer checkout, then the highest-versioned installed plugin cache, then PATH as a last
+  courtesy. Version selection is numeric-aware so `0.17.10` beats `0.17.9` — a lexical sort
+  picks `.9` and would silently pin an older copy
+- rewired all three call sites (`la-session-identity.sh`, `la-statusline-segment.sh`,
+  `la-telemetry-token-rate.sh`)
+
+Measured on a local session with a minimal environment — before: `Opus 5 · ctx 12345 12%`;
+after: `qwen-3.6-operator high · ctx 12345 12% · 4.5/103.9G 4% · ~17.1 tok/s`.
+
+### Testing
+
+- 3 new assertions run the renderer under `env -i` with a system-only PATH, the only
+  condition that reproduces the defect; a test inheriting the developer's PATH cannot see it
+- includes a sanity assertion that the plugin bin really is absent from PATH, so the test
+  passes because of absolute-path discovery rather than a leaked environment
+- mutation-verified: disabling absolute-path discovery fails both assertions (88 → 86)
+
 ## [0.7.3] — 2026-09-21
 
 ### Fixed

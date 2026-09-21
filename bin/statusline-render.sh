@@ -155,12 +155,44 @@ if command -v git >/dev/null 2>&1; then
   [ -n "$TOPLEVEL" ] && WORKTREE=$(basename "$TOPLEVEL")
 fi
 
+# --- locate the free-agents helper scripts ------------------------------------
+# NEVER use `command -v` for these. They live in the free-agents PLUGIN CACHE bin, which
+# is on the PATH of Claude Code's Bash tool but NOT on the plain PATH the CLI spawns a
+# statusline with. Relying on PATH meant every hand-run test showed the real model name,
+# RAM and tok/s while the LIVE statusline silently omitted all three and displayed the
+# spoofed model ("Opus 5") -- the difference between the two environments WAS the bug.
+#
+# Resolution order: an explicit override, then the developer checkout (so a local fix is
+# what gets exercised), then the highest-versioned installed plugin cache, then PATH as a
+# last courtesy. Version sort is numeric-aware so 0.17.10 beats 0.17.9 -- a plain lexical
+# sort picks 0.17.9 and would pin an older copy as soon as a .10 exists.
+_fa_find() {
+    _fa_name="$1"
+    if [ -n "${FREE_AGENTS_BIN:-}" ] && [ -x "$FREE_AGENTS_BIN/$_fa_name" ]; then
+        printf '%s' "$FREE_AGENTS_BIN/$_fa_name"; return 0
+    fi
+    for _fa_dir in "$HOME/ClaudeWorkspace/local-agents/bin" "$HOME/ClaudeWorkspace/free-agents/bin"; do
+        if [ -x "$_fa_dir/$_fa_name" ]; then printf '%s' "$_fa_dir/$_fa_name"; return 0; fi
+    done
+    _fa_cache="$HOME/.claude/plugins/cache/haiggoh/free-agents"
+    if [ -d "$_fa_cache" ]; then
+        _fa_hit=$(ls -1 "$_fa_cache" 2>/dev/null | sort -t. -k1,1n -k2,2n -k3,3n | while read -r _fa_ver; do
+            [ -x "$_fa_cache/$_fa_ver/bin/$_fa_name" ] && printf '%s\n' "$_fa_cache/$_fa_ver/bin/$_fa_name"
+        done | tail -1)
+        if [ -n "$_fa_hit" ]; then printf '%s' "$_fa_hit"; return 0; fi
+    fi
+    # Last resort: PATH. Works under the Bash tool; will not find it in a live statusline.
+    if command -v "$_fa_name" >/dev/null 2>&1; then command -v "$_fa_name"; return 0; fi
+    return 1
+}
+
 # --- resolve session identity via la-session-identity.sh --------------------
 # This replaces the old endpoint-only detection with the canonical resolver.
 # The resolver emits JSON with schema_version=1; we parse it with jq.
 IDENTITY_JSON=
-if command -v la-session-identity.sh >/dev/null 2>&1; then
-    IDENTITY_JSON=$(la-session-identity.sh 2>/dev/null) || IDENTITY_JSON=
+LA_IDENTITY_BIN=$(_fa_find la-session-identity.sh) || LA_IDENTITY_BIN=
+if [ -n "$LA_IDENTITY_BIN" ]; then
+    IDENTITY_JSON=$("$LA_IDENTITY_BIN" 2>/dev/null) || IDENTITY_JSON=
 fi
 
 # Parse resolver output (fallback to legacy detection if resolver unavailable or returns unknown session_kind)
@@ -258,12 +290,14 @@ TELEMETRY_RAM=
 TELEMETRY_TOK_RATE=
 if [ "$SESSION_KIND" = "local" ] || [ "$SESSION_KIND" = "free_api" ]; then
     # RAM segment (la-statusline-segment.sh prints JSON: {"label":"ram","text":"...","level":"..."})
-    if command -v la-statusline-segment.sh >/dev/null 2>&1; then
-        TELEMETRY_RAM=$(la-statusline-segment.sh 2>/dev/null) || TELEMETRY_RAM=
+    LA_RAM_BIN=$(_fa_find la-statusline-segment.sh) || LA_RAM_BIN=
+    if [ -n "$LA_RAM_BIN" ]; then
+        TELEMETRY_RAM=$("$LA_RAM_BIN" 2>/dev/null) || TELEMETRY_RAM=
     fi
     # Token rate segment (la-telemetry-token-rate.sh prints JSON: {"text":"...","rate":...,"fresh":...,"age_s":...,"level":"..."})
-    if command -v la-telemetry-token-rate.sh >/dev/null 2>&1; then
-        TELEMETRY_TOK_RATE=$(la-telemetry-token-rate.sh 2>/dev/null) || TELEMETRY_TOK_RATE=
+    LA_TOKRATE_BIN=$(_fa_find la-telemetry-token-rate.sh) || LA_TOKRATE_BIN=
+    if [ -n "$LA_TOKRATE_BIN" ]; then
+        TELEMETRY_TOK_RATE=$("$LA_TOKRATE_BIN" 2>/dev/null) || TELEMETRY_TOK_RATE=
     fi
 fi
 
