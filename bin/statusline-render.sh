@@ -49,7 +49,7 @@ Reads the statusLine JSON payload on stdin and prints up to three lines:
   FREE_API SESSION (ANTHROPIC_BASE_URL=localhost:4141-4151):
     <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
     free api session saved $<session_phantom> · today: $<daily_saved> saved with free agents
-    (no JoyIA mark, no cloud spend, no cap)
+    (no JoyIA mark, no cloud spend, no cap, no local RAM/tok/s telemetry)
 
   <dir basename> · <branch> · <worktree> · +<added>/-<removed>
 
@@ -66,6 +66,10 @@ session's phantom (what local/free work would have cost at Opus rates) and Y is 
 daily savings across all local sessions + free API sessions + dispatch savings from the
 savings-ledger. Detection is via ANTHROPIC_BASE_URL (ports 8000-8010 = LOCAL, 4141-4151 = FREE_API),
 never CLAUDE_IS_LOCAL (which leaks into later cloud sessions).
+
+Local telemetry (Metal RAM usage, MLX token generation rate) is ONLY shown for LOCAL sessions
+(ports 8000-8010). FREE_API sessions (ports 4141-4151) run on remote providers and have no
+local Metal RAM or local tok/s to report.
 
 Every field is optional — anything missing or null is dropped rather than printed as
 "null" or "0". No network calls; git is best-effort and local. Always exits 0 so a
@@ -285,10 +289,12 @@ if [ "$ACTUAL_MODEL_ID" = "unknown" ] && [ -n "$MODEL" ]; then
 fi
 
 # --- collect free-agents telemetry (RAM, token rate) ---------------------------
-# Only for local and free_api sessions; cloud sessions don't have local telemetry.
+# ONLY for local sessions (MLX inference on this machine). Free API sessions run
+# on remote providers (NVIDIA, Gemini, Groq) and have no local Metal RAM or
+# local token generation speed. Cloud sessions likewise have no local telemetry.
 TELEMETRY_RAM=
 TELEMETRY_TOK_RATE=
-if [ "$SESSION_KIND" = "local" ] || [ "$SESSION_KIND" = "free_api" ]; then
+if [ "$SESSION_KIND" = "local" ]; then
     # RAM segment (la-statusline-segment.sh prints JSON: {"label":"ram","text":"...","level":"..."})
     LA_RAM_BIN=$(_fa_find la-statusline-segment.sh) || LA_RAM_BIN=
     if [ -n "$LA_RAM_BIN" ]; then
@@ -331,8 +337,10 @@ fi
 [ -n "$CTXSTR" ] && LINE1="${LINE1}${SEP}${CYAN}${CTXSTR}${RESET}"
 
 # --- free-agents telemetry on line 1 -------------------------------------------
-# Add RAM and token rate for local/free_api sessions
-if [ "$SESSION_KIND" = "local" ] || [ "$SESSION_KIND" = "free_api" ]; then
+# Add RAM and token rate ONLY for local sessions (MLX inference on this machine).
+# Free API sessions run on remote providers and have no local Metal RAM or
+# local token generation speed.
+if [ "$SESSION_KIND" = "local" ]; then
     # RAM telemetry
     if [ -n "$TELEMETRY_RAM" ] && command -v jq >/dev/null 2>&1; then
         RAM_TEXT=$(printf '%s' "$TELEMETRY_RAM" | jq -r '.text // ""' 2>/dev/null)
