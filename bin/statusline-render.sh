@@ -290,8 +290,9 @@ fi
 
 # --- collect free-agents telemetry (RAM, token rate) ---------------------------
 # ONLY for local sessions (MLX inference on this machine). Free API sessions run
-# on remote providers (NVIDIA, Gemini, Groq) and have no local Metal RAM or
-# local token generation speed. Cloud sessions likewise have no local telemetry.
+# on remote providers (NVIDIA, Gemini, Groq) and have no local Metal RAM but
+# CAN have remote token generation speed measured via streaming response.
+# Cloud sessions likewise have no local telemetry.
 TELEMETRY_RAM=
 TELEMETRY_TOK_RATE=
 if [ "$SESSION_KIND" = "local" ]; then
@@ -302,6 +303,12 @@ if [ "$SESSION_KIND" = "local" ]; then
     fi
     # Token rate segment (la-telemetry-token-rate.sh prints JSON: {"text":"...","rate":...,"fresh":...,"age_s":...,"level":"..."})
     LA_TOKRATE_BIN=$(_fa_find la-telemetry-token-rate.sh) || LA_TOKRATE_BIN=
+    if [ -n "$LA_TOKRATE_BIN" ]; then
+        TELEMETRY_TOK_RATE=$("$LA_TOKRATE_BIN" 2>/dev/null) || TELEMETRY_TOK_RATE=
+    fi
+elif [ "$SESSION_KIND" = "free_api" ]; then
+    # Remote API token rate telemetry (no RAM for remote sessions)
+    LA_TOKRATE_BIN=$(_fa_find la-telemetry-remote-tokrate.sh) || LA_TOKRATE_BIN=
     if [ -n "$LA_TOKRATE_BIN" ]; then
         TELEMETRY_TOK_RATE=$("$LA_TOKRATE_BIN" 2>/dev/null) || TELEMETRY_TOK_RATE=
     fi
@@ -337,11 +344,11 @@ fi
 [ -n "$CTXSTR" ] && LINE1="${LINE1}${SEP}${CYAN}${CTXSTR}${RESET}"
 
 # --- free-agents telemetry on line 1 -------------------------------------------
-# Add RAM and token rate ONLY for local sessions (MLX inference on this machine).
-# Free API sessions run on remote providers and have no local Metal RAM or
-# local token generation speed.
+# Local sessions: show RAM and token rate.
+# Free API sessions: show token rate only (no local RAM).
+# Cloud sessions: no local telemetry.
 if [ "$SESSION_KIND" = "local" ]; then
-    # RAM telemetry
+    # RAM telemetry (local only)
     if [ -n "$TELEMETRY_RAM" ] && command -v jq >/dev/null 2>&1; then
         RAM_TEXT=$(printf '%s' "$TELEMETRY_RAM" | jq -r '.text // ""' 2>/dev/null)
         RAM_LEVEL=$(printf '%s' "$TELEMETRY_RAM" | jq -r '.level // "ok"' 2>/dev/null)
@@ -355,6 +362,20 @@ if [ "$SESSION_KIND" = "local" ]; then
         fi
     fi
     # Token rate telemetry
+    if [ -n "$TELEMETRY_TOK_RATE" ] && command -v jq >/dev/null 2>&1; then
+        TOK_TEXT=$(printf '%s' "$TELEMETRY_TOK_RATE" | jq -r '.text // ""' 2>/dev/null)
+        TOK_LEVEL=$(printf '%s' "$TELEMETRY_TOK_RATE" | jq -r '.level // "unknown"' 2>/dev/null)
+        if [ -n "$TOK_TEXT" ]; then
+            case "$TOK_LEVEL" in
+                stale) TOK_COLOR="$YELLOW" ;;
+                unknown) TOK_COLOR="$DIM" ;;
+                *) TOK_COLOR="$CYAN" ;;
+            esac
+            LINE1="${LINE1}${SEP}${TOK_COLOR}${TOK_TEXT}${RESET}"
+        fi
+    fi
+elif [ "$SESSION_KIND" = "free_api" ]; then
+    # Token rate telemetry only (no RAM for remote sessions)
     if [ -n "$TELEMETRY_TOK_RATE" ] && command -v jq >/dev/null 2>&1; then
         TOK_TEXT=$(printf '%s' "$TELEMETRY_TOK_RATE" | jq -r '.text // ""' 2>/dev/null)
         TOK_LEVEL=$(printf '%s' "$TELEMETRY_TOK_RATE" | jq -r '.level // "unknown"' 2>/dev/null)
