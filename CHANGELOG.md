@@ -2,6 +2,14 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.7.7] — 2026-09-23
+
+### Fixed — effort level now displays for all values (including medium)
+
+- Statusline now shows effort level (low/medium/high/xhigh/max) next to model name for all values
+- Previously "medium" was suppressed as default; now all effort levels render
+- Free API sessions read effort from per-session file written by launcher, fixing display that always showed "medium"
+
 ## [0.7.6] — 2026-09-21
 
 ### Added — free_api session token rate telemetry
