@@ -49,7 +49,7 @@ FULL='{"model":{"display_name":"Opus 5 (1M)"},"effort":{"level":"high"},
  "context_window":{"total_input_tokens":48123,"used_percentage":12.4},
  "cost":{"total_cost_usd":3.14159,"total_lines_added":7,"total_lines_removed":2},
  "rate_limits":{"five_hour":{"used_percentage":31.7},"seven_day":{"used_percentage":8.2}}}'
-OUT="$(render "$FULL")"
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render "$FULL")"
 L1="$(printf '%s' "$OUT" | sed -n 1p)"
 L2="$(printf '%s' "$OUT" | sed -n 2p)"
 has "line 1 carries the model"        "$L1" "Opus 5 (1M)"
@@ -192,7 +192,7 @@ hasnt "…so the padding word is gone" "$L1" '1M context'
 # A display name WITHOUT the suffix must pass through untouched — the rule is a
 # substitution, not a truncation.
 has "a model name with no context suffix is unchanged" \
-    "$(render '{"model":{"display_name":"Sonnet 5"},"cost":{"total_cost_usd":1.0}}' | sed -n 1p)" 'Sonnet 5'
+    "$(ANTHROPIC_BASE_URL=https://api.anthropic.com render '{"model":{"display_name":"Sonnet 5"},"cost":{"total_cost_usd":1.0}}' | sed -n 1p)" 'Sonnet 5'
 # The whole point: no single emitted line may be anywhere near the old 108 columns.
 WIDEST=$(printf '%s' "$OUT" | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }')
 [ "$WIDEST" -lt 80 ] && ok "no emitted line approaches the 108-column overflow (widest ${WIDEST})" \
@@ -377,7 +377,7 @@ IDONLY='{"model":{"id":"claude-opus-5[1m]"},"effort":{"level":"high"},
  "workspace":{"current_dir":"/tmp"},"cost":{"total_cost_usd":1.0},"session_id":"sess-x"}'
 MOUT="$(printf '%s' "$IDONLY" | env COST_TRACKER_STATUSLINE=0 \
     COST_TRACKER_LEDGER_DIR="$FLED" COST_TRACKER_HISTORY="$FTMP/none.log" \
-    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | head -1)"
+    ANTHROPIC_BASE_URL=https://api.anthropic.com sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | head -1)"
 has   "model.id is used when display_name is absent" "$MOUT" "claude-opus-5"
 hasnt "…and the bare fallback word is not shown instead" "$MOUT" "Claude "
 has   "…and the effort level still renders beside it"    "$MOUT" "high"
@@ -388,7 +388,7 @@ BOTH='{"model":{"id":"claude-opus-5[1m]","display_name":"Opus 5 (1M context)"},
  "cost":{"total_cost_usd":1.0},"session_id":"sess-x"}'
 BOUT="$(printf '%s' "$BOTH" | env COST_TRACKER_STATUSLINE=0 \
     COST_TRACKER_LEDGER_DIR="$FLED" COST_TRACKER_HISTORY="$FTMP/none.log" \
-    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | head -1)"
+    ANTHROPIC_BASE_URL=https://api.anthropic.com sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g' | head -1)"
 has   "display_name still takes precedence over id" "$BOUT" "Opus 5 (1M)"
 hasnt "…and the raw id is not shown when a display name exists" "$BOUT" "claude-opus-5["
 

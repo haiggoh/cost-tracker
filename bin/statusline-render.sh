@@ -193,10 +193,12 @@ _fa_find() {
 # --- resolve session identity via la-session-identity.sh --------------------
 # This replaces the old endpoint-only detection with the canonical resolver.
 # The resolver emits JSON with schema_version=1; we parse it with jq.
+# Pass SID (session_id from statusLine JSON) as LA_SESSION_ID so resolver can
+# read per-session files (effort, etc.) written by the launcher.
 IDENTITY_JSON=
 LA_IDENTITY_BIN=$(_fa_find la-session-identity.sh) || LA_IDENTITY_BIN=
 if [ -n "$LA_IDENTITY_BIN" ]; then
-    IDENTITY_JSON=$("$LA_IDENTITY_BIN" 2>/dev/null) || IDENTITY_JSON=
+    IDENTITY_JSON=$(LA_SESSION_ID="${SID:-}" "$LA_IDENTITY_BIN" 2>/dev/null) || IDENTITY_JSON=
 fi
 
 # Parse resolver output (fallback to legacy detection if resolver unavailable or returns unknown session_kind)
@@ -329,7 +331,7 @@ if [ "$SESSION_KIND" = "cloud" ]; then
 else
     LINE1="${BOLD}${MODEL_LABEL}${RESET}"
 fi
-[ -n "$EFFORT" ] && [ "$EFFORT" != "medium" ] && LINE1="${LINE1} ${DIM}${EFFORT}${RESET}"
+[ -n "$EFFORT" ] && LINE1="${LINE1} ${DIM}${EFFORT}${RESET}"
 
 # ctx: absolute input tokens + percentage. The window SIZE is intentionally not
 # shown -- the model name already carries it. Each half is independent so a
