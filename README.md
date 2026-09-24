@@ -107,10 +107,14 @@ one-way: status line → ledger → reports.
 
 ```sh
 /plugin install cost-tracker            # from the marketplace
-bash install/wire-statusline.sh --dry-run # show what is wrong and what would change
-bash install/wire-statusline.sh           # back up, wire, verify, roll back on failure
-bash install/wire-statusline.sh --help
+bash install.sh --dry-run   # show what is wrong and what would change
+bash install.sh             # wire the statusLine + put cost-tracker on PATH (backups first)
+bash install.sh --help
 ```
+
+`install.sh` is also the **repair** command: after `joyia agent --setup` or anything else
+rewrites your status line, re-run it. See [docs/RECOVERY.md](docs/RECOVERY.md).
+The statusLine step on its own is `install/wire-statusline.sh` (same flags).
 
 A session may have only one status line, so this plugin never claims it: it ships
 the wrapper pattern and the machine wires it in. Wiring points `settings.json`
@@ -127,6 +131,7 @@ pytest tests/                            # 91 tests, incl. a 33-case fixture mat
 bash tests/test_budget_ledger.sh         # 23 tests for the capture chain
 bash tests/test_statusline_render.sh     # 34 tests for the renderer contract
 bash tests/test_wire_statusline.sh       # 44 tests for wiring, backup, rollback
+bash tests/test_install.sh               # 21 tests incl. the joyia-overwrite replay
 bash tests/test_version_consistency.sh   # manifest / changelog / roadmap agree
 # pytest covers three suites: 55 reporting + 12 cap-learning + 24 calibration
 ```
