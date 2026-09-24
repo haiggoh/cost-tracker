@@ -154,6 +154,17 @@ fi
 # context tokens / window size, per-request fresh+cache-read+cache-write tokens,
 # and 5h/7d rate-limit percentages. The vendored script is NOT edited because
 # `joyia agent --setup` regenerates it; it stays on disk as the fallback below.
-RENDERER="$HOME/.claude/scripts/statusline-render.sh"
+# (0.7.8) The SIBLING renderer is preferred: settings.json now calls this file in the
+# plugin checkout directly, so the renderer next to it is the one that matches it.
+# $0 is resolved through symlinks first, so the old ~/.claude/scripts entry point
+# lands in the same place. No readlink -f: not portable to every /bin/sh.
+SELF="$0"; HOPS=0
+while [ -L "$SELF" ] && [ "$HOPS" -lt 10 ]; do
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+  HOPS=$((HOPS + 1))
+done
+RENDERER="$(dirname "$SELF")/statusline-render.sh"
+[ -f "$RENDERER" ] || RENDERER="$HOME/.claude/scripts/statusline-render.sh"
 [ -f "$RENDERER" ] || RENDERER="$HOME/.claude/joyia-statusline.sh"
 printf '%s' "$INPUT" | sh "$RENDERER"
