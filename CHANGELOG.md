@@ -2,6 +2,22 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.8.0] — 2026-09-24
+
+### Added — `install.sh`, one command to install or repair
+
+- `install.sh` at the repo root runs `install/wire-statusline.sh`, then links
+  `~/.local/bin/cost-tracker` to this checkout (a link owned by another tool is backed up and
+  replaced). Running it with no arguments does the work; `--dry-run` previews; `--help`; an
+  unknown flag exits 2.
+- It's also the recovery command after `joyia agent --setup` rewrites the status line.
+  `docs/RECOVERY.md` records the recipe and why the 2026-09-23 manual repair went wrong: the
+  wrong target, sandbox write refusals mistaken for a locked file, and `/statusline`
+  rebuilding the line from the shell prompt.
+- `tests/test_install.sh` (21 assertions) replays the post-`joyia agent --setup` state and
+  asserts that one bare run restores capture. Mutation-tested: skipping the link fails 2,
+  skipping the wiring fails 4, a dereferencing backup fails 1.
+
 ## [0.7.9] — 2026-09-24
 
 ### Fixed — `claude-opus-5-5` and `claude-fable-5-1` are priced
