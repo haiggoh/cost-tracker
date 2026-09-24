@@ -41,12 +41,15 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # A fake renderer stands in for statusline-render.sh so we can prove the passthrough is verbatim.
-# The wrapper resolves it as "$HOME/.claude/scripts/statusline-render.sh".
-mkdir -p "$TMP/.claude/scripts" "$TMP/.claude/cost-ledger"
-cat > "$TMP/.claude/scripts/statusline-render.sh" <<'EOF'
+# Since 0.7.8 the wrapper prefers the renderer NEXT TO ITSELF (settings.json calls the plugin
+# checkout directly), so the wrapper runs from a temp copy with the fake as its sibling.
+mkdir -p "$TMP/.claude/scripts" "$TMP/.claude/cost-ledger" "$TMP/bin"
+cp "$SCRIPTS_DIR/cost-ledger-capture.sh" "$TMP/bin/"
+WRAPPER="$TMP/bin/cost-ledger-capture.sh"
+cat > "$TMP/bin/statusline-render.sh" <<'EOF'
 cat > /dev/null; printf 'RENDERED_OK'
 EOF
-chmod +x "$TMP/.claude/scripts/statusline-render.sh"
+chmod +x "$TMP/bin/statusline-render.sh"
 
 SID="11111111-2222-3333-4444-555555555555"
 LEDGER="$TMP/.claude/cost-ledger/$SID"

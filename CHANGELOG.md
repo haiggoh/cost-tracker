@@ -2,6 +2,35 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.7.8] — 2026-09-24
+
+### Fixed — `wire-statusline.sh` now checks and repairs the `settings.json` statusLine target
+
+- **The bug it misses no longer:** on 2026-09-23 a JoyIA overwrite and its revert left
+  `statusLine.command` calling `statusline-render.sh` directly. The line still rendered, so
+  nothing looked broken, but capture had stopped and every today/saved figure read `$0`. The
+  script said "already wired" because it only checked the `~/.claude/scripts` symlinks.
+- It now reads `statusLine.command` first and names what is wrong (`BYPASSED` when it calls the
+  renderer, `FOREIGN` for another tool's script, `MISSING`), then points it **directly** at
+  `<plugin>/bin/cost-ledger-capture.sh`. The `~/.claude/scripts` hop is gone from the live path.
+  The symlinks stay wired for the budget-tally hooks.
+- A `statusLine` in `settings.local.json` (which outranks `settings.json`) is warned about, never edited.
+- Verification runs the command `settings.json` now holds, and requires a rendered line **and**
+  a ledger entry. A chain that renders but captures nothing now fails and rolls back, and so
+  does the `settings.json` edit.
+- `settings.json` is backed up and rewritten in place, so a `600` file stays `600`.
+- `cost-ledger-capture.sh` hands off to the renderer next to it (after resolving symlinks)
+  instead of a hard-coded `~/.claude/scripts` path.
+
+### Changed — CLI of `wire-statusline.sh`
+
+- Running it with **no arguments now does the work** (backups first). Use `--dry-run` to preview.
+  `--apply` is still accepted and means the same as no arguments.
+- `--help` prints usage, options and environment. An unknown flag exits 2 and does nothing.
+- Tests: `test_wire_statusline.sh` goes from 20 to 44 assertions. Each new check was
+  mutation-tested: ignoring settings fails 11, verifying on output alone fails 3, a
+  mode-widening rewrite fails 1, a capture that ignores its sibling renderer fails 1.
+
 ## [0.7.7] — 2026-09-23
 
 ### Fixed — effort level now displays for all values (including medium)

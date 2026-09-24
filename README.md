@@ -107,13 +107,16 @@ one-way: status line → ledger → reports.
 
 ```sh
 /plugin install cost-tracker            # from the marketplace
-bash install/wire-statusline.sh         # DRY RUN: shows what it would change
-bash install/wire-statusline.sh --apply # back up, symlink, verify, roll back on failure
+bash install/wire-statusline.sh --dry-run # show what is wrong and what would change
+bash install/wire-statusline.sh           # back up, wire, verify, roll back on failure
+bash install/wire-statusline.sh --help
 ```
 
 A session may have only one status line, so this plugin never claims it: it ships
-the wrapper pattern and the machine wires it in. `settings.json` is not touched —
-its existing `statusLine` path resolves into the plugin after wiring.
+the wrapper pattern and the machine wires it in. Wiring points `settings.json`
+`statusLine.command` straight at this checkout's `bin/cost-ledger-capture.sh`, and
+symlinks the `~/.claude/scripts` helpers the budget hooks use. Re-run it whenever
+another tool rewrites the status line: it detects a bypassed or foreign target.
 
 Set `COST_TRACKER_CAP_USD=40` (or `BUDGET_TALLY_CAP_USD`) for a cap.
 
@@ -123,7 +126,7 @@ Set `COST_TRACKER_CAP_USD=40` (or `BUDGET_TALLY_CAP_USD`) for a cap.
 pytest tests/                            # 91 tests, incl. a 33-case fixture matrix
 bash tests/test_budget_ledger.sh         # 23 tests for the capture chain
 bash tests/test_statusline_render.sh     # 34 tests for the renderer contract
-bash tests/test_wire_statusline.sh       # 20 tests for wiring, backup, rollback
+bash tests/test_wire_statusline.sh       # 44 tests for wiring, backup, rollback
 bash tests/test_version_consistency.sh   # manifest / changelog / roadmap agree
 # pytest covers three suites: 55 reporting + 12 cap-learning + 24 calibration
 ```
