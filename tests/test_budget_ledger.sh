@@ -131,6 +131,20 @@ PY
 is "claude-opus-5 is priceable (the gap that returned \$0 for 44.3M tokens)" "$(price_of claude-opus-5)" "PRICED"
 is "bracketed long-context variant normalizes" "$(price_of 'claude-opus-5[1m]')" "PRICED"
 is "claude-opus-4-8 still priceable" "$(price_of claude-opus-4-8)" "PRICED"
+is "claude-opus-5-5 is priceable (was excluded as unpriced on 2026-09-24)" "$(price_of claude-opus-5-5)" "PRICED"
+is "claude-opus-5-5[1m] normalizes" "$(price_of 'claude-opus-5-5[1m]')" "PRICED"
+is "claude-fable-5-1 is priceable" "$(price_of claude-fable-5-1)" "PRICED"
+is "a dated snapshot id prices as its alias" "$(price_of claude-haiku-4-5-20251001)" "PRICED"
+rate_of() {  # $1 = model, $2 = rate key -> $ per MTok
+  BUDGET_TALLY_LEDGER_DIR="$TMP/empty" python3 -c '
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("bt", os.environ["TALLY"])
+bt = importlib.util.module_from_spec(spec); spec.loader.exec_module(bt)
+print("%.2f" % (bt.rate_for(sys.argv[1])[sys.argv[2]] * 1e6))' "$1" "$2"
+}
+is "claude-opus-5-5 input is \$4/MTok, not Opus 5's \$5" "$(rate_of claude-opus-5-5 input)" "4.00"
+is "claude-opus-5-5 cache read is \$0.20/MTok" "$(rate_of claude-opus-5-5 cache_read)" "0.20"
+is "claude-fable-5-1 cache read is \$0.25/MTok" "$(rate_of claude-fable-5-1 cache_read)" "0.25"
 is "a genuinely unknown model is still reported" "$(price_of claude-nonexistent-9)" "UNPRICED"
 
 # --- B5: THE RECURRENCE GUARD. Every model id actually present in recent transcripts must be

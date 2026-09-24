@@ -68,6 +68,7 @@ Test overrides (all optional):
 """
 import glob
 import json
+import re
 import os
 import sys
 from collections import defaultdict
@@ -129,6 +130,12 @@ PRICING = {
         "input": 3.00e-6, "output": 15.00e-6,
         "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
     },
+    # Opus 5.5 (2026-09): $4 / $20 per MTok, cache read $0.20 (= 0.05x, NOT the usual 0.1x),
+    # per the claude-api skill's model table. Pricing it as Opus 5 would over-count ~25%.
+    "claude-opus-5-5": {
+        "input": 4.00e-6, "output": 20.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.05,
+    },
     "claude-opus-5": {
         "input": 5.00e-6, "output": 25.00e-6,
         "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
@@ -152,6 +159,11 @@ PRICING = {
     "claude-fable-5": {
         "input": 10.00e-6, "output": 50.00e-6,
         "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    # Fable 5.1: same $10 / $50 as Fable 5; its cache read is $0.25 (0.025x, not 0.1x).
+    "claude-fable-5-1": {
+        "input": 10.00e-6, "output": 50.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.025,
     },
 }
 
@@ -210,7 +222,11 @@ def _canonical_model(model):
     if not model:
         return model
     base, sep, _ = model.partition("[")
-    return base if sep else model
+    base = base if sep else model
+    # A dated snapshot id (`claude-haiku-4-5-20251001`) is the same rates as its alias; a
+    # subagent put exactly that id into a transcript on 2026-09-24 and it read as unpriced.
+    m = re.match(r"^(claude-.+?)-\d{8}$", base)
+    return m.group(1) if m else base
 
 
 def rate_for(model):
