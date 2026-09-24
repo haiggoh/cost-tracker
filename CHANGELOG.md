@@ -2,6 +2,20 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.7.9] — 2026-09-24
+
+### Fixed — `claude-opus-5-5` and `claude-fable-5-1` are priced
+
+- `claude-opus-5-5` ($4 / $20 per MTok, cache read $0.20) was missing from the rate table, so
+  every session on the current default model was left out of the token-count fallback as
+  "unpriced". Its cache-read multiplier is 0.05, not the 0.1 every earlier model uses.
+- `claude-fable-5-1` ($10 / $50, cache read $0.25 = 0.025) added alongside.
+- Dated snapshot ids (`claude-haiku-4-5-20251001`, used by subagents) now price as their alias
+  instead of being reported unpriced.
+- The ledger remains authoritative. These rates only feed the fallback for sessions with no
+  ledger entry, which over-counts about 2.4x (this session: $10.75 estimated vs $4.48 reported).
+- `test_budget_ledger.sh`: 37 to 44 assertions, and the live-transcript recurrence guard is green again.
+
 ## [0.7.8] — 2026-09-24
 
 ### Fixed — `wire-statusline.sh` now checks and repairs the `settings.json` statusLine target
