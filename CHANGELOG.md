@@ -2,6 +2,25 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.8.1] — 2026-09-24
+
+### Added — portable install path resolution
+
+- `bin/cost-tracker-resolve.sh` — a standalone helper that resolves where this
+  plugin is installed. Resolution order: `$COST_TRACKER_PLUGIN` override →
+  highest-versioned plugin cache entry (no hardcoded version) → the directory
+  containing the script (source checkout). Never hardcodes `~/ClaudeWorkspace`.
+- `install.sh` and `install/wire-statusline.sh` now use the resolver, so they
+  work from any checkout location and fall back to the plugin cache on a fresh
+  install.
+- `bin/statusline-render.sh` uses `$COST_FREE_AGENTS_BIN` (new) instead of
+  `$FREE_AGENTS_BIN` for the explicit free-agents override, keeping the
+  variable namespace aligned with the cost-tracker family.
+- `bin/cost-tracker` searches `$COST_LOCAL_AGENTS_BIN` (new) before the
+  developer-checkout conventions when locating the savings-ledger.
+- `docs/RECOVERY.md` no longer references `~/ClaudeWorkspace/cost-tracker` —
+  the recipe runs `install.sh` from wherever it is.
+
 ## [0.8.0] — 2026-09-24
 
 ### Added — `install.sh`, one command to install or repair

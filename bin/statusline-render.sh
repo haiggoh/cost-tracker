@@ -79,6 +79,8 @@ Environment:
   COST_TRACKER_STATUSLINE=0   omit the budget line entirely
   COST_TRACKER_LEDGER_DIR     per-session ledger dir (default ~/.claude/cost-ledger); the
                               free-lane phantom is read from this session's entry there
+  COST_FREE_AGENTS_BIN        absolute path to the free-agents bin dir; overrides the
+                              built-in search (developer override; default: unset)
 USAGE
     exit 0
     ;;
@@ -166,14 +168,16 @@ fi
 # RAM and tok/s while the LIVE statusline silently omitted all three and displayed the
 # spoofed model ("Opus 5") -- the difference between the two environments WAS the bug.
 #
-# Resolution order: an explicit override, then the developer checkout (so a local fix is
-# what gets exercised), then the highest-versioned installed plugin cache, then PATH as a
-# last courtesy. Version sort is numeric-aware so 0.17.10 beats 0.17.9 -- a plain lexical
-# sort picks 0.17.9 and would pin an older copy as soon as a .10 exists.
+# Resolution order: an explicit override ($COST_FREE_AGENTS_BIN), then the developer
+# checkout (so a local fix is what gets exercised), then the highest-versioned installed
+# plugin cache, then PATH as a last courtesy. Version sort is numeric-aware so 0.17.10
+# beats 0.17.9 -- a plain lexical sort picks 0.17.9 and would pin an older copy as soon
+# as a .10 exists. The checkout paths are developer-local conventions ($HOME/ClaudeWorkspace/...);
+# on a fresh install where the repo is elsewhere the cache path is the fallback.
 _fa_find() {
     _fa_name="$1"
-    if [ -n "${FREE_AGENTS_BIN:-}" ] && [ -x "$FREE_AGENTS_BIN/$_fa_name" ]; then
-        printf '%s' "$FREE_AGENTS_BIN/$_fa_name"; return 0
+    if [ -n "${COST_FREE_AGENTS_BIN:-}" ] && [ -x "$COST_FREE_AGENTS_BIN/$_fa_name" ]; then
+        printf '%s' "$COST_FREE_AGENTS_BIN/$_fa_name"; return 0
     fi
     for _fa_dir in "$HOME/ClaudeWorkspace/local-agents/bin" "$HOME/ClaudeWorkspace/free-agents/bin"; do
         if [ -x "$_fa_dir/$_fa_name" ]; then printf '%s' "$_fa_dir/$_fa_name"; return 0; fi

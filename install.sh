@@ -36,6 +36,9 @@ Options:
 
 Environment:
   HOME                      everything resolves under $HOME
+  COST_TRACKER_PLUGIN       force this directory as the plugin root (developer
+                            override; must contain .claude-plugin/plugin.json).
+                            Skips the cache search and uses this path directly.
   COST_TRACKER_BIN_DIR      where to link the CLI (default: $HOME/.local/bin)
 
 Exit status: 0 done (or nothing to do, or dry run), 1 a step failed, 2 bad usage.
@@ -53,7 +56,15 @@ for arg in "$@"; do
     esac
 done
 
+# Resolve where this plugin is installed:
+#   1. $COST_TRACKER_PLUGIN override (developer/sysadmin pin)
+#   2. the highest-versioned entry in the plugin cache (no hardcoded version)
+#   3. this checkout (when run directly from the source repo)
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOLVER="$ROOT/bin/cost-tracker-resolve.sh"
+if [ -x "$RESOLVER" ]; then
+    RESOLVED="$(bash "$RESOLVER" 2>/dev/null)" && ROOT="$RESOLVED"
+fi
 BIN_DIR="${COST_TRACKER_BIN_DIR:-$HOME/.local/bin}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 

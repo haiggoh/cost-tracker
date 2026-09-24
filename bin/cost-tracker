@@ -636,9 +636,16 @@ def read_savings(period_flag):
 
 def _find_savings_ledger():
     import glob as _glob
-    roots = [
-        os.path.expanduser("~/ClaudeWorkspace/local-agents/bin/savings-ledger.py"),
-    ]
+    roots = []
+    # Explicit override from the environment (developer/sysadmin pin).
+    _env = os.environ.get("COST_LOCAL_AGENTS_BIN")
+    if _env:
+        roots.append(os.path.join(_env, "savings-ledger.py"))
+    # Developer checkout conventions. On a fresh install the repo may live
+    # anywhere, so the cache is the reliable fallback.
+    roots.append(os.path.expanduser("~/ClaudeWorkspace/local-agents/bin/savings-ledger.py"))
+    roots.append(os.path.expanduser("~/ClaudeWorkspace/free-agents/bin/savings-ledger.py"))
+    # Highest-versioned installed plugin cache entry.
     roots += sorted(_glob.glob(os.path.expanduser(
         "~/.claude/plugins/cache/*/local-agents/*/bin/savings-ledger.py")), reverse=True)
     for p in roots:

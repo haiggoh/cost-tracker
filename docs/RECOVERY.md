@@ -3,11 +3,17 @@
 ## The recipe
 
 ```sh
-bash ~/ClaudeWorkspace/cost-tracker/install.sh --dry-run   # what is wrong
-bash ~/ClaudeWorkspace/cost-tracker/install.sh             # fix it (backups first)
+bash install.sh --dry-run   # what is wrong
+bash install.sh             # fix it (backups first)
 ```
 
 That's all. Open sessions pick it up on their next render; no restart needed.
+
+`install.sh` resolves the plugin path automatically: it prefers the plugin cache
+(highest-versioned entry, no hardcoded version), then falls back to the directory
+containing the script (the source checkout). If the cache hasn't installed anything
+yet, run it from the repo directory — any directory works, not just
+`~/ClaudeWorkspace/cost-tracker`.
 
 ## When you need it
 
@@ -38,8 +44,7 @@ It took two sessions and still ended on the wrong target:
   writes still failed. `chmod`, `sudo` and
   Privileges don't help, and `chmod 644` needlessly widens a `600` file (it did). Run
   `install.sh` from a session whose sandbox allows writes to `~/.claude`, or type
-  `! bash ~/ClaudeWorkspace/cost-tracker/install.sh` in the prompt so it runs outside the
-  tool sandbox.
+  `! bash install.sh` in the prompt so it runs outside the tool sandbox.
 - **Checking the wrong thing.** The `~/.claude/scripts` symlinks were correct the whole
   time. The old `wire-statusline.sh` checked only those and said "already wired". Since
   0.7.8 it checks `settings.json` first.

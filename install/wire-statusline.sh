@@ -50,6 +50,9 @@ Options:
 Environment:
   HOME         everything is resolved under $HOME/.claude (settings.json,
                scripts/, cost-ledger/, backups/)
+  COST_TRACKER_PLUGIN  force this directory as the plugin root (developer
+                       override; must contain .claude-plugin/plugin.json).
+                       Skips the cache search and uses this path directly.
 
 Exit status: 0 wired (or already wired, or dry run), 1 wiring or verification
 failed (changes rolled back), 2 bad usage.
@@ -69,7 +72,16 @@ for arg in "$@"; do
 done
 
 HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN="$(cd -P "$HERE/.." && pwd)"
+# Resolve where this plugin is installed:
+#   1. $COST_TRACKER_PLUGIN override (developer/sysadmin pin)
+#   2. the highest-versioned entry in the plugin cache (no hardcoded version)
+#   3. this checkout (when run directly from the source repo)
+RESOLVER="$HERE/../bin/cost-tracker-resolve.sh"
+if [ -x "$RESOLVER" ]; then
+    RESOLVED="$(bash "$RESOLVER" 2>/dev/null)" && PLUGIN="$RESOLVED"
+else
+    PLUGIN="$(cd -P "$HERE/.." && pwd)"
+fi
 SCRIPTS="$HOME/.claude/scripts"
 SETTINGS="$HOME/.claude/settings.json"
 SETTINGS_LOCAL="$HOME/.claude/settings.local.json"
