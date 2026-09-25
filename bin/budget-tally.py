@@ -306,7 +306,108 @@ def read_ledger_today():
             continue
         # today's attributable spend = cumulative minus what was carried into today.
         out[name] = max(0.0, cum - baseline)
+    # REWIND DEDUPE (added 2026-09-25). When Claude Code rewinds a session, it creates a
+    # new session_id but carries the parent's total_cost_usd forward as the child's starting
+    # point. Both sessions then render in the ledger with the same date, and budget-tally
+    # sums both in full — double-counting the parent's spend. The gateway bills per-request,
+    # not per-session, so the true cost is just the child's cumulative (which includes the
+    # inherited parent portion as its baseline).
+    #
+    # Detection: scan transcripts for 'continued-in' records where the child's first ledger
+    # cum exactly matches the parent's final ledger cum. This exact-match signature
+    # distinguishes a true rewind from overlapping sessions (which have a continued-in
+    # record but non-matching cums, e.g. 1a41aae4->06885ad1 where child started at 17.09
+    # while parent ended at 16.95).
+    #
+    # Action: zero out the parent's today_spend so only the child's delta counts.
+    if out:
+        _dedupe_rewind_pairs(out)
     return out
+
+
+def _dedupe_rewind_pairs(out):
+    """Find and neutralise same-day rewind pairs in the ledger-today dict.
+
+    A rewind is identified when a transcript contains a `continued-in` record whose
+    `continuedInSessionId` points at another session that is also present in `out`, AND
+    the child's first ledger cumulative exactly equals the parent's final ledger
+    cumulative (measured against the on-disk ledger files, not the already-computed
+    today_spend values). When both hold, the parent's entry is set to 0.0 — its spend
+    is subsumed by the child.
+
+    Guarded: best-effort only. If transcript scanning fails we leave `out` untouched;
+    the worst case is a slight over-count, not a crash or missing session.
+    """
+    try:
+        pairs = _find_continued_in_pairs()
+    except OSError:
+        return
+    for parent, child in pairs:
+        if parent not in out or child not in out:
+            continue
+        # Exact-cum match is the rewind signature. Use the on-disk ledger files (not the
+        # already-computed today_spend) so we compare raw cumulatives, not deltas.
+        parent_cum = _ledger_cum(parent)
+        child_first_cum = _ledger_first_cum(child)
+        if parent_cum is not None and child_first_cum is not None:
+            if abs(parent_cum - child_first_cum) < 1e-9:
+                out[parent] = 0.0
+
+
+def _ledger_cum(sid):
+    """Return the latest cumulative cost for `sid` from its ledger file, or None."""
+    path = os.path.join(LEDGER_DIR, sid)
+    try:
+        if not os.path.isfile(path):
+            return None
+        parts = open(path, "r", errors="ignore").read().split()
+        if len(parts) < 2:
+            return None
+        return float(parts[1])
+    except (OSError, ValueError):
+        return None
+
+
+def _ledger_first_cum(sid):
+    """Return the FIRST cumulative cost ever recorded for `sid` in the history log, or None."""
+    hist = os.environ.get(
+        "BUDGET_TALLY_LEDGER_DIR", os.path.expanduser("~/.claude/cost-ledger")
+    )
+    # The history log lives alongside the ledger dir (one level up in the same parent).
+    # Actually it's at ~/.claude/cost-ledger-history.log — find it relative to LEDGER_DIR.
+    hist_path = os.path.join(os.path.dirname(LEDGER_DIR), "cost-ledger-history.log")
+    try:
+        with open(hist_path, "r", errors="ignore") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 4 and parts[1] == sid:
+                    return float(parts[3])
+    except OSError:
+        pass
+    return None
+
+
+def _find_continued_in_pairs():
+    """Scan transcript files for `continued-in` records, returning [(parent, child), ...]."""
+    pairs = []
+    for root, _dirs, files in os.walk(PROJECTS_DIR):
+        for fname in files:
+            if not fname.endswith(".jsonl"):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, "r", errors="ignore") as f:
+                    for line in f:
+                        if "continuedInSessionId" in line:
+                            d = json.loads(line)
+                            parent = d.get("sessionId")
+                            child = d.get("continuedInSessionId")
+                            if parent and child:
+                                pairs.append((parent, child))
+                            break
+            except (OSError, json.JSONDecodeError):
+                continue
+    return pairs
 
 
 def current_session_path():
