@@ -34,6 +34,9 @@ Environment overrides (all optional):
   COST_TRACKER_CAP_USD      daily cap; falls back to BUDGET_TALLY_CAP_USD, then unset
   COST_TRACKER_TODAY        override "today" as YYYY-MM-DD (tests)
   COST_TRACKER_SAVINGS_CMD  argv (shell-split) printing savings-ledger JSON
+  COST_TRACKER_ESTIMATES    0 = ledger only; no no-ledger / classifier estimate
+  COST_TRACKER_CLASSIFIER_USD_PER_CALL  estimated $ per auto-mode classifier call (0 = off)
+  COST_TRACKER_NO_SPAWN     1 = the statusline never forks a background estimate refresh
 """
 import argparse
 import glob
@@ -728,6 +731,118 @@ def _merged_records(fast=False):
     return merged, quarantined
 
 
+# --- spend the ledger cannot see ------------------------------------------------------------
+# The ledger is written by the statusline, so it is blind to two kinds of REAL gateway spend:
+#   * sessions that never render a statusline — SDK / headless runs (`claude -p`, plugin test
+#     harnesses, dogfood sessions under /private/var/folders). 14 of them cost ~$9.60 list on
+#     2026-09-26 with no ledger entry at all;
+#   * the auto-mode safety classifier: a side request to claude-sonnet-5 on the same key for
+#     every non-read-only tool call, which is in neither the transcript nor total_cost_usd.
+# budget-tally.py owns the arithmetic (estimate_day); it is loaded, not re-implemented, so the
+# hook and this report cannot drift apart. Both figures are ESTIMATES and are labelled so.
+# COST_TRACKER_ESTIMATES=0 turns them off and restores ledger-only totals.
+
+_BT_MODULE = None
+ESTIMATE_CACHE_TTL_S = 120
+
+
+def _budget_tally():
+    global _BT_MODULE
+    if _BT_MODULE is None:
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        _BT_MODULE = SourceFileLoader(
+            "budget_tally", os.path.join(here, "budget-tally.py")).load_module()
+    # budget-tally resolves its paths from BUDGET_TALLY_* at import; THIS process may have been
+    # pointed elsewhere by COST_TRACKER_*. Bind it to our paths so the estimate reads the same
+    # ledger, history and transcripts as everything else here — otherwise a test (or a user
+    # override) silently estimates against the real ~/.claude.
+    _BT_MODULE.PROJECTS_DIR = TRANSCRIPTS_DIR
+    _BT_MODULE.LEDGER_DIR = LEDGER_DIR
+    _BT_MODULE.HISTORY_PATH = HISTORY_PATH
+    _BT_MODULE.TODAY = TODAY
+    return _BT_MODULE
+
+
+def _estimate_cache_path():
+    return os.path.join(CONFIG_DIR, "estimate-cache.json")
+
+
+def _spawn_estimate_refresh():
+    """Rebuild the estimate cache in a detached child. Best-effort; COST_TRACKER_NO_SPAWN=1
+    disables it (tests, and anyone who wants the statusline to never fork)."""
+    if os.environ.get("COST_TRACKER_NO_SPAWN") == "1":
+        return
+    lock = _estimate_cache_path() + ".lock"
+    try:
+        # One refresh at a time: a lock younger than the TTL means one is already running.
+        if (os.path.exists(lock) and datetime.now(timezone.utc).timestamp()
+                - os.path.getmtime(lock) < ESTIMATE_CACHE_TTL_S):
+            return
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        open(lock, "w").close()
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "statusline",
+                          "--refresh-estimate"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def estimate_unseen(days, covered_sids, fast=False):
+    """Sum of budget-tally's per-day estimates over `days`. Never raises.
+
+    The FAST (statusline) path never scans transcripts — it runs on every render and the scan
+    costs ~1 s. It serves the last cached result for the same days (whatever its age), and when
+    that is older than ESTIMATE_CACHE_TTL_S it spawns a detached `cost-tracker statusline
+    --refresh-estimate` to rebuild it, so the NEXT render is current. With no cache yet it
+    reports zero, labelled `pending`, rather than blocking the statusline."""
+    zero = {"uncovered_usd": 0.0, "uncovered_sessions": [], "classifier_usd": 0.0,
+            "classifier_calls": 0, "total_usd": 0.0, "source": "off"}
+    if os.environ.get("COST_TRACKER_ESTIMATES", "1") == "0":
+        return zero
+    key = ",".join(sorted(days))
+    if fast:
+        cached, age = None, None
+        try:
+            with open(_estimate_cache_path()) as f:
+                c = json.load(f)
+            if c.get("key") == key:
+                cached = c["value"]
+                age = datetime.now(timezone.utc).timestamp() - float(c.get("at", 0))
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            pass
+        if cached is None or age is None or not (0 <= age < ESTIMATE_CACHE_TTL_S):
+            _spawn_estimate_refresh()
+        return cached if cached is not None else dict(zero, source="pending")
+    try:
+        bt = _budget_tally()
+        out = dict(zero, source="estimated (budget-tally.estimate_day)")
+        sessions = set()
+        for d in sorted(days):
+            e = bt.estimate_day(d, covered_sids)
+            out["uncovered_usd"] += e["uncovered_usd"]
+            out["classifier_usd"] += e["classifier_usd"]
+            out["classifier_calls"] += e["classifier_calls"]
+            sessions.update(e["uncovered_sessions"])
+        out["uncovered_sessions"] = sorted(sessions)
+        out["uncovered_usd"] = round(out["uncovered_usd"], 4)
+        out["classifier_usd"] = round(out["classifier_usd"], 4)
+        out["total_usd"] = round(out["uncovered_usd"] + out["classifier_usd"], 4)
+    except Exception as e:  # an estimate must never break the report or the statusline
+        return dict(zero, source=f"unavailable ({type(e).__name__})")
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        tmp = _estimate_cache_path() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"key": key, "at": datetime.now(timezone.utc).timestamp(),
+                       "value": out}, f)
+        os.replace(tmp, _estimate_cache_path())
+    except OSError:
+        pass
+    return out
+
+
 def collect(period="today", since=None, fast=False, days=None):
     """Build the report data. Membership is explicit in every field name.
 
@@ -761,6 +876,7 @@ def collect(period="today", since=None, fast=False, days=None):
             s["axis"] = rec.axis
 
     cloud_total = sum(s["period_usd"] for s in sessions.values())
+    est = estimate_unseen(days, {sid for (sid, _d) in per_session_day}, fast=fast)
     local_sessions = [sid for sid, s in sessions.items() if s["axis"] == "local"]
     zero_sessions = [sid for sid, s in sessions.items() if s["axis"] == "zero"]
     reset_sessions = [sid for sid, s in sessions.items() if s["reset_anchored"]]
@@ -810,8 +926,16 @@ def collect(period="today", since=None, fast=False, days=None):
         # figure / the same percentage, which is why a first-party user sees no change.
         "markup": markup,
         "markup_source": markup_source,
-        "billed_usd": round(cloud_total * markup, 4),
-        "billed_pct_of_cap": (round(cloud_total * markup / cap, 4) if cap else None),
+        # Spend the ledger CANNOT see, estimated and kept on its own keys so `cloud_usd`
+        # keeps its exact meaning (Claude Code's own list-price figure). See estimate_unseen.
+        "estimated_uncovered_usd": est["uncovered_usd"],
+        "estimated_uncovered_sessions": est["uncovered_sessions"],
+        "estimated_classifier_usd": est["classifier_usd"],
+        "estimated_classifier_calls": est["classifier_calls"],
+        "estimate_source": est["source"],
+        "billed_usd": round((cloud_total + est["total_usd"]) * markup, 4),
+        "billed_pct_of_cap": (round((cloud_total + est["total_usd"]) * markup / cap, 4)
+                              if cap else None),
         # The cap expressed in OUR units: the figure our own total may reach before the
         # gateway refuses. With no markup this is just the cap.
         "effective_cap_usd": (round(cap / markup, 4) if cap else None),
@@ -951,20 +1075,55 @@ def daily_totals(days):
     two implementations agree.
     """
     merged, _quarantined = _merged_records()
-    out = {d: {"ours_usd": 0.0, "sessions_counted": 0, "reset_anchored_sessions": 0}
+    out = {d: {"ours_usd": 0.0, "sessions_counted": 0, "reset_anchored_sessions": 0,
+               "estimated_usd": 0.0, "uncovered_usd": 0.0, "classifier_usd": 0.0}
            for d in days}
-    for (_sid, day), rec in merged.items():
+    covered = defaultdict(set)
+    for (sid, day), rec in merged.items():
         row = out.get(day)
         if row is None:
             continue
+        covered[day].add(sid)
         row["ours_usd"] += rec.day_usd
         if rec.valid and rec.axis == "cloud":
             row["sessions_counted"] += 1
         if rec.reset_anchored:
             row["reset_anchored_sessions"] += 1
-    for row in out.values():
+    for day, row in out.items():
         row["ours_usd"] = round(row["ours_usd"], 4)
+        # Same estimate collect() adds to billed_usd, so the markup learned from these rows
+        # is the markup ON TOP of the estimate — not one that already absorbed it.
+        e = estimate_unseen([day], covered[day])
+        row["estimated_usd"] = e["total_usd"]
+        row["uncovered_usd"] = e["uncovered_usd"]
+        row["classifier_usd"] = e["classifier_usd"]
     return out
+
+
+# Stale-estimate detector. Anthropic is moving auto-mode classifier checks server-side at NO
+# charge (code.claude.com/docs/en/auto-mode-classifier-billing); a session only gets that once
+# its gateway passes `safeguards` / `safeguard_results` through. When that happens here, the
+# per-call classifier estimate starts charging for calls that are now free — and nothing in a
+# transcript says so. The gateway's own refusal figure does: ledger + estimates then runs ABOVE
+# it on day after day. Two such days beyond the fit's normal error are the signal.
+CLASSIFIER_STALE_MARGIN_USD = 3.0
+CLASSIFIER_STALE_MIN_DAYS = 2
+CLASSIFIER_STALE_WINDOW = 5
+
+
+def classifier_estimate_check(rows):
+    """Over the most recent calibrated days that carry a classifier estimate, count the ones
+    where our total exceeds the gateway by more than the margin AND the estimate alone is at
+    least that excess (so the estimate is what put us over — a ledger overcount is not this)."""
+    recent = [r for r in rows if r.get("verdict") != "no-data" and r.get("classifier_usd")]
+    recent = recent[-CLASSIFIER_STALE_WINDOW:]
+    over = [r["day"] for r in recent
+            if r["delta_usd"] > CLASSIFIER_STALE_MARGIN_USD
+            and r["classifier_usd"] >= r["delta_usd"]
+            and r.get("ledger_usd", 0.0) + r.get("uncovered_usd", 0.0) <= r["gateway_usd"]]
+    return {"days_checked": len(recent), "overestimate_days": over,
+            "margin_usd": CLASSIFIER_STALE_MARGIN_USD,
+            "stale": len(over) >= CLASSIFIER_STALE_MIN_DAYS}
 
 
 def calibrate(max_files=500, since_days=365, tolerance=0.01):
@@ -976,7 +1135,11 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
     rows = []
     for day in sorted(gw):
         g, o = gw[day], ours[day]
-        delta = round(o["ours_usd"] - g["gateway_usd"], 4)
+        # Compare the gateway against everything we attribute to the day: the ledger plus the
+        # estimated spend it cannot see (SDK sessions, classifier). `ledger_usd` keeps the
+        # ledger-only figure visible.
+        total = round(o["ours_usd"] + o["estimated_usd"], 4)
+        delta = round(total - g["gateway_usd"], 4)
         covered = cov_first is not None and day >= cov_first
         if not covered:
             verdict = "no-data"
@@ -987,7 +1150,11 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
             verdict = "ok"
         rows.append({
             "day": day,
-            "ours_usd": o["ours_usd"],
+            "ours_usd": total,
+            "ledger_usd": o["ours_usd"],
+            "estimated_usd": o["estimated_usd"],
+            "uncovered_usd": o["uncovered_usd"],
+            "classifier_usd": o["classifier_usd"],
             "gateway_usd": round(g["gateway_usd"], 4),
             "delta_usd": delta,
             "covered": covered,
@@ -998,7 +1165,7 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
             # not merely a floor. The shortfall is therefore the whole error, and a ratio
             # that holds steady across days with very different session mixes is what
             # distinguishes a systematic missing component from a few absent sessions.
-            "ours_pct_of_gateway": (round(100.0 * o["ours_usd"] / g["gateway_usd"], 2)
+            "ours_pct_of_gateway": (round(100.0 * total / g["gateway_usd"], 2)
                                     if g["gateway_usd"] else None),
             "n_refusals": g["n_refusals"],
             "stale_repeats": g["stale_repeats"],
@@ -1039,6 +1206,7 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
         "days": rows,
     }
     out["measured_markup"] = measure_markup(out)
+    out["classifier_estimate_check"] = classifier_estimate_check(rows)
     return out
 
 
@@ -1072,6 +1240,16 @@ def render_table(data, short_ids=True):
     # meaning, and exactly the kind of figure this tool refuses to print.
     lines.append(f"{'TOTAL cloud':<{idw}}  {'':<6}  {data['cloud_usd']:>14.2f}  "
                  f"{'—':>18}")
+    # Estimated gateway spend the ledger cannot see. Printed as its own rows, never folded into
+    # TOTAL cloud, because TOTAL cloud is Claude Code's own figure and these are ours.
+    if data.get("estimated_uncovered_usd"):
+        lines.append(f"{'+ no-ledger':<{idw}}  {'est':<6}  "
+                     f"{data['estimated_uncovered_usd']:>14.2f}  "
+                     f"{'(' + str(len(data['estimated_uncovered_sessions'])) + ' SDK/headless)':>18}")
+    if data.get("estimated_classifier_usd"):
+        lines.append(f"{'+ classifier':<{idw}}  {'est':<6}  "
+                     f"{data['estimated_classifier_usd']:>14.2f}  "
+                     f"{'(' + str(data['estimated_classifier_calls']) + ' auto-mode calls)':>18}")
     cap = data["cap_usd"]
     markup = data.get("markup") or MARKUP_IDENTITY
     if markup != MARKUP_IDENTITY:
@@ -1192,9 +1370,9 @@ def render_statusline(data):
             seg = f"{label}: {what}${data['billed_usd']:.2f}/${cap:.0f} gw"
         else:
             # No markup: the two axes are identical, so there is nothing to name.
-            seg = f"{label}: {what}${data['cloud_usd']:.2f}/${cap:.0f}"
+            seg = f"{label}: {what}${data['billed_usd']:.2f}/${cap:.0f}"
     else:
-        seg = f"{label}: {what}${data['cloud_usd']:.2f}"
+        seg = f"{label}: {what}${data['billed_usd']:.2f}"
     if saved is not None:
         seg += f" · local saved ${saved:.2f}"
     return seg
@@ -1306,6 +1484,16 @@ def render_calibrate(data):
         lines.append(f"  every calibrated day agrees with the gateway "
                      f"(tolerance ${data['tolerance_usd']:.2f}).")
 
+    chk = data.get("classifier_estimate_check") or {}
+    if chk.get("stale"):
+        lines.append("")
+        lines.append(f"  ⚠ CLASSIFIER ESTIMATE LOOKS STALE: on {len(chk['overestimate_days'])} of the "
+                     f"last {chk['days_checked']} calibrated day(s)")
+        lines.append(f"    ({', '.join(chk['overestimate_days'])}) our total ran more than "
+                     f"${chk['margin_usd']:.0f} ABOVE the gateway, by")
+        lines.append("    no more than the classifier estimate. Classifier calls may now be free")
+        lines.append("    (server-side review). Check `/status` → \"Auto mode server\" in a gateway")
+        lines.append("    session; if it reads Enabled, set COST_TRACKER_CLASSIFIER_USD_PER_CALL=0.")
     # The resolution of the long-running "20% undercount": it was never OUR arithmetic.
     m = data.get("measured_markup") or {}
     if m.get("n_days"):
@@ -1492,6 +1680,9 @@ def main(argv=None):
     st.add_argument("--fast", action="store_true",
                     help="skip the history log and read savings from the derived rollup; "
                          "for the per-render statusline path")
+    st.add_argument("--refresh-estimate", action="store_true", dest="refresh_estimate",
+                    help="rebuild the cached no-ledger/classifier estimate and exit "
+                         "(the statusline spawns this in the background)")
 
     doc = sub.add_parser("doctor", help="show quarantined records and resolved config")
     doc.add_argument("--json", action="store_true")
@@ -1635,6 +1826,17 @@ def main(argv=None):
             return 0
         measured = collect("today", fast=True)["cloud_usd"]
         print(render_cap(cfg, resolved, measured_today=measured))
+        return 0
+
+    if getattr(args, "refresh_estimate", False):
+        try:
+            merged, _q = _merged_records(fast=True)
+            estimate_unseen([TODAY], {sid for (sid, d) in merged if d == TODAY})
+        finally:
+            try:
+                os.remove(_estimate_cache_path() + ".lock")
+            except OSError:
+                pass
         return 0
 
     period = getattr(args, "period", "today")

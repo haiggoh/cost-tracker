@@ -40,6 +40,8 @@ def load_ct(tmp_path, today="2026-09-03", cap=None, savings_cmd="/bin/false",
     # Same trap as the cap, one axis over: an inherited markup would rescale every
     # denominator in the suite. Tests that WANT one set it after loading.
     os.environ.pop("COST_TRACKER_MARKUP", None)
+    # The fast path would otherwise fork a background estimate refresh per render.
+    os.environ["COST_TRACKER_NO_SPAWN"] = "1"
     if cap is None:
         os.environ.pop("COST_TRACKER_CAP_USD", None)
         os.environ.pop("BUDGET_TALLY_CAP_USD", None)
