@@ -2,6 +2,52 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.9.0] — 2026-09-27
+
+### Added — count gateway spend the ledger cannot see
+
+The 2026-09-26 gap (ledger $20.36, gateway refused at $40.15) had two causes, neither of
+them the rewind dedupe or an Opus-5 price pass-through (both ruled out by re-pricing):
+
+- **SDK / headless sessions** (`claude -p`, plugin test harnesses, dogfood runs) never
+  render a statusline, so they have no ledger entry. They are now reconstructed from their
+  transcripts and reported as `estimated_uncovered_usd`.
+- **The auto-mode classifier.** Without server-side review (a gateway that drops
+  `safeguards` / `safeguard_results`), Claude Code sends its own `claude-sonnet-5` request
+  per non-read-only tool call. It is in neither the transcript nor `total_cost_usd`. It is
+  now estimated at a flat `$0.0265` per call (least-squares fit over 9 capped days; override
+  `COST_TRACKER_CLASSIFIER_USD_PER_CALL`, `0` disables) as `estimated_classifier_usd`.
+- `billed_usd` now includes both estimates; `cloud_usd` keeps its exact meaning. `report`
+  prints them as separate `est` rows. `calibrate` compares the gateway against ledger +
+  estimates (new per-day `ledger_usd` / `estimated_usd`).
+- `calibrate` flags a **stale classifier estimate**: two of the last five calibrated days
+  where the estimate alone pushed us more than $3 over the gateway — the expected signature
+  once classifier checks become free server-side.
+- The statusline never scans transcripts: it serves a cached estimate and refreshes it in a
+  detached `cost-tracker statusline --refresh-estimate` (`COST_TRACKER_NO_SPAWN=1` disables).
+
+### Fixed
+
+- Token reconstruction priced each API response once per content block (2.2× on a real
+  session); it now prices each `message.id` once.
+- Local-lane messages (`chatcmpl-…`, 24-hex `msg_…`) are never priced, even under a spoofed
+  cloud model id; sessions whose history marks them local are skipped outright.
+- A subagent transcript is attributed to its parent session, so it is not reconstructed on
+  top of a covered parent's ledger figure.
+
+### Note — relearn the markup
+
+The learned `×1.2428` markup was fitted on ledger-only totals and therefore already absorbs
+most of the classifier spend. After upgrading, rerun `cost-tracker calibrate --learn-markup`
+(or `cost-tracker markup --clear`), or the gateway figure double-counts the classifier.
+
+## [0.8.2] — 2026-09-26
+
+### Fixed
+
+- budget-tally: dedupe rewound sessions (a `continued-in` child whose first cumulative
+  equals the parent's final one) so the parent is not counted twice.
+
 ## [0.8.1] — 2026-09-24
 
 ### Added — portable install path resolution

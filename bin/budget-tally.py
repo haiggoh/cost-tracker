@@ -249,6 +249,17 @@ def rate_for(model):
 
 
 def _session_id_of(path):
+    """The session a transcript's spend belongs to.
+
+    A subagent transcript (`<parent-sid>/subagents/agent-*.jsonl`) belongs to its PARENT: its
+    cost is inside the parent's total_cost_usd (5e0d99c5 on 2026-09-26: the $10.40 ledger
+    figure includes its $0.24 subagent). Keyed by its own filename it looked uncovered and was
+    reconstructed on top of the parent's ledger entry — a double count. Keyed by the parent it
+    is skipped whenever the parent is covered, and still counted when the parent is not (an SDK
+    session with no statusline), which dropping subagents outright would lose."""
+    parts = os.path.normpath(path).split(os.sep)
+    if len(parts) >= 3 and parts[-2] == "subagents":
+        return parts[-3]
     base = os.path.basename(path)
     return base[:-6] if base.endswith(".jsonl") else base
 
@@ -449,25 +460,53 @@ def files_modified_today():
     return out
 
 
-def _record_is_today(d):
+def _record_is_today(d, day=None):
     ts = d.get("timestamp")
     if not ts:
         return False
     try:
         # Transcript timestamps are ISO-8601 UTC with a "Z" suffix.
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).date().isoformat() == TODAY
+        return (datetime.fromisoformat(ts.replace("Z", "+00:00")).date().isoformat()
+                == (day or TODAY))
     except ValueError:
         return False
 
 
-def tally(paths):
+# A response served by LOCAL/free inference carries the id its server minted, not an Anthropic
+# one: `chatcmpl-…` (LiteLLM / OpenAI-compatible), a bare 24-hex `msg_<hex>` (Rapid-MLX), or a
+# UUID-shaped `msg_<8>-<4>-…`. Real gateway responses are `msg_bdrk_…` (this gateway fronts
+# Bedrock) or Anthropic's own `msg_01…`. The model id cannot tell them apart — local sessions
+# spoof `claude-opus-5` — so this is the per-MESSAGE lane test. It is needed because a local
+# session that never rendered its statusline while local has no history line to mark it:
+# 2026-09-23 had four such sessions reconstructing to $3.80 of invented spend.
+_LOCAL_ID_RE = re.compile(r"^(chatcmpl-|msg_[0-9a-f]{24}$|msg_[0-9a-f]{8}-[0-9a-f]{4}-)")
+
+
+def is_local_message_id(mid):
+    return bool(mid) and bool(_LOCAL_ID_RE.match(mid))
+
+
+def tally(paths, day=None, skip_sids=None):
+    """Token usage per model for `day`'s records in `paths`.
+
+    `skip_sids` are sessions to leave out entirely — the LOCAL lane, whose transcripts carry
+    spoofed cloud model ids (`claude-opus-5`) for free compute. Priced, they invent spend: the
+    same session is $0 in the ledger and would be $14 here."""
     usage = defaultdict(lambda: defaultdict(int))
     unknown_models = set()
     for path in set(paths):
+        if skip_sids and _session_id_of(path) in skip_sids:
+            continue
         try:
             f = open(path, "r", errors="ignore")
         except OSError:
             continue
+        # ONE API RESPONSE, MANY RECORDS. Claude Code writes an assistant record per content
+        # block (thinking, text, each tool_use) and every one repeats the response's full
+        # `usage`. Summing records therefore multiplies spend by the block count: 865ca06a on
+        # 2026-09-26 reconstructed to $22.09 against its authoritative $9.96. Price each
+        # message.id once.
+        seen_ids = set()
         with f:
             for line in f:
                 line = line.strip()
@@ -479,18 +518,30 @@ def tally(paths):
                     continue
                 if d.get("type") != "assistant":
                     continue
-                if not _record_is_today(d):
+                if not _record_is_today(d, day):
                     continue
                 msg = d.get("message") or {}
                 model = msg.get("model")
                 u = msg.get("usage") or {}
                 if not model or not u:
                     continue
+                mid = msg.get("id")
+                if is_local_message_id(mid):
+                    continue
+                if mid:
+                    if mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
                 cc = u.get("cache_creation") or {}
+                w5 =cc.get("ephemeral_5m_input_tokens", 0) or 0
+                w1 = cc.get("ephemeral_1h_input_tokens", 0) or 0
+                if not cc:
+                    # Older/SDK records give only the flat total; it is a 5-minute write.
+                    w5 = u.get("cache_creation_input_tokens", 0) or 0
                 usage[model]["input"] += u.get("input_tokens", 0) or 0
                 usage[model]["output"] += u.get("output_tokens", 0) or 0
-                usage[model]["cache_write_5m"] += cc.get("ephemeral_5m_input_tokens", 0) or 0
-                usage[model]["cache_write_1h"] += cc.get("ephemeral_1h_input_tokens", 0) or 0
+                usage[model]["cache_write_5m"] += w5
+                usage[model]["cache_write_1h"] += w1
                 usage[model]["cache_read"] += u.get("cache_read_input_tokens", 0) or 0
                 if (_canonical_model(model) not in PRICING
                         and not is_non_billable(model)):
@@ -517,6 +568,168 @@ def _price(usage):
     return total, priced_any, unknown_models
 
 
+HISTORY_PATH = os.environ.get(
+    "COST_TRACKER_HISTORY", os.path.join(os.path.dirname(LEDGER_DIR), "cost-ledger-history.log"))
+
+
+def local_lane_sessions(day=None):
+    """Sessions that rendered LOCAL on `day`: the capture wrapper zeroed the cost (field 4 = 0)
+    while Claude Code reported a phantom (field 6 > 0). One pass over the history log.
+
+    This is a LANE marker only. The phantom it keys on is what free compute would have cost at
+    cloud prices — it is never spend (the premise of the reverted 2026-09-26 change)."""
+    day = day or TODAY
+    out = set()
+    try:
+        with open(HISTORY_PATH, "r", errors="ignore") as f:
+            for line in f:
+                p = line.split()
+                if len(p) < 6 or p[2] != day:
+                    continue
+                try:
+                    if float(p[3]) == 0.0 and float(p[5]) > 0.0:
+                        out.add(p[1])
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+# --- auto-mode classifier estimate --------------------------------------------------------
+# In `auto` permission mode Claude Code asks a SECOND model — `claude-sonnet-5[1m]` on the same
+# gateway key — whether each non-read-only tool call is safe. That side request never reaches
+# the transcript as a message and is NOT in total_cost_usd, so the ledger cannot see it. Its size
+# is visible only when it fails (auto-mode-classifier-error.txt): 60-97k tokens per call on the
+# sessions measured 2026-09-20..26, i.e. a large slice of the main-loop context.
+#
+# It is therefore ESTIMATED, never reported as authoritative: a flat USD per gateway classifier
+# call (one per non-read-only tool_use in an `auto`-mode turn). Flat, not context-scaled, because
+# the classifier sends a condensed transcript that grows far slower than the main loop (0.17-0.56
+# of main-loop tokens across 20 dumps), and a context-weighted model fitted WORSE (rms $3.49 vs
+# $2.85). $0.0265/call is the least-squares fit over 9 capped days, 2026-09-15..26: the gateway's
+# `Current cost` at its first refusal minus our ledger + reconstruction. 2026-09-25 is excluded —
+# its ledger alone EXCEEDS the gateway figure (an open overcount, not a classifier question).
+# Residual rms $2.85/day. Override with COST_TRACKER_CLASSIFIER_USD_PER_CALL (0 disables).
+#
+# LOCAL / free-API lanes are excluded: every classifier failure recorded from them is the free
+# provider's error (the spoof list maps claude-sonnet-5 there), never a gateway refusal. A
+# successful call leaves no record, so that is the evidence so far, not a proof.
+READ_ONLY_TOOLS = frozenset({
+    "Read", "Grep", "Glob", "LS", "NotebookRead", "TodoWrite", "TodoRead", "Skill",
+    "AskUserQuestion", "ToolSearch", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
+    "TaskOutput", "BashOutput", "WebSearch", "ExitPlanMode", "EnterPlanMode",
+})
+
+
+def classifier_usd_per_call():
+    raw = os.environ.get("COST_TRACKER_CLASSIFIER_USD_PER_CALL")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return 0.0265
+
+
+def classifier_calls(paths, day=None, skip_sids=None):
+    """(n_calls, weighted_context_tokens) for auto-mode, non-read-only tool calls on `day`."""
+    n = 0
+    weighted = 0
+    for path in set(paths):
+        if skip_sids and _session_id_of(path) in skip_sids:
+            continue
+        try:
+            f = open(path, "r", errors="ignore")
+        except OSError:
+            continue
+        mode = None
+        seen_blocks = set()
+        with f:
+            for line in f:
+                if '"permissionMode"' not in line and '"assistant"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                pm = d.get("permissionMode")
+                if pm:
+                    mode = pm
+                if d.get("type") != "assistant" or mode != "auto":
+                    continue
+                if not _record_is_today(d, day):
+                    continue
+                msg = d.get("message") or {}
+                model = msg.get("model") or ""
+                if rate_for(model) is None or is_local_message_id(msg.get("id")):
+                    continue  # local/spoofed/synthetic — not a gateway turn
+                u = msg.get("usage") or {}
+                # A tool_use block can be repeated across records of one response; its own
+                # id is the unit, so each call is counted once.
+                tools = 0
+                for c in msg.get("content") or []:
+                    if (isinstance(c, dict) and c.get("type") == "tool_use"
+                            and c.get("name") not in READ_ONLY_TOOLS):
+                        bid = c.get("id")
+                        if bid and bid in seen_blocks:
+                            continue
+                        if bid:
+                            seen_blocks.add(bid)
+                        tools += 1
+                if not tools:
+                    continue
+                ctx = ((u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
+                       + (u.get("cache_creation_input_tokens") or 0))
+                n += tools
+                weighted += tools * ctx
+    return n, weighted
+
+
+def estimate_classifier_usd(paths, day=None, skip_sids=None):
+    """(estimated_usd, n_calls) for the gateway classifier calls on `day`."""
+    per_call = classifier_usd_per_call()
+    if not per_call:
+        return 0.0, 0
+    n, _weighted = classifier_calls(paths, day, skip_sids)
+    return n * per_call, n
+
+
+def paths_for_day(day):
+    """Transcripts that can hold records for `day` (mtime on `day` or later)."""
+    out = []
+    for path in glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True):
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc).date().isoformat()
+        except OSError:
+            continue
+        if mtime >= day:
+            out.append(path)
+    return out
+
+
+def estimate_day(day, covered_sids):
+    """The spend the ledger cannot see for UTC `day`, split by cause. For cost-tracker.
+
+    covered_sids: sessions the ledger already has an authoritative figure for on `day`.
+    Returns {"uncovered_usd", "uncovered_sessions", "classifier_usd", "classifier_calls",
+             "classifier_usd_per_call", "unknown_models"} — every figure list-price, never marked up."""
+    paths = paths_for_day(day)
+    local = local_lane_sessions(day)
+    uncovered = [p for p in paths if _session_id_of(p) not in covered_sids]
+    usage, unknown = tally(uncovered, day=day, skip_sids=local)
+    recon, _, unpriced = _price(usage)
+    cls_usd, n_calls = estimate_classifier_usd(paths, day=day, skip_sids=local)
+    return {
+        "uncovered_usd": round(recon, 4),
+        "uncovered_sessions": sorted({_session_id_of(p) for p in uncovered} - local),
+        "classifier_usd": round(cls_usd, 4),
+        "classifier_calls": n_calls,
+        "classifier_usd_per_call": classifier_usd_per_call(),
+        "unknown_models": sorted(unknown | unpriced),
+    }
+
+
 def compute():
     """Returns (total, pct, remaining, unknown_models, priced_any,
     current_session_total, ledger_total, recon_total).
@@ -537,9 +750,17 @@ def compute():
     # Reconstruct spend ONLY for sessions the ledger doesn't already cover
     # authoritatively — avoids double-counting a session both ways.
     uncovered = [p for p in paths if _session_id_of(p) not in ledger]
-    usage, unknown_models = tally(uncovered)
+    # LOCAL-lane sessions are skipped: their transcripts carry spoofed cloud ids for free
+    # compute. Before this, a local session with no ledger entry for today reconstructed at
+    # Opus rates ($20.80 of invented spend on 2026-09-26).
+    local = local_lane_sessions()
+    usage, unknown_models = tally(uncovered, skip_sids=local)
     recon_total, recon_priced, unpriced = _price(usage)
     unknown_models |= unpriced
+    # The classifier estimate joins the reconstructed bucket: both are figures WE derived,
+    # as opposed to the authoritative ledger, and format_line labels that split.
+    cls_usd, _ = estimate_classifier_usd(paths, skip_sids=local)
+    recon_total += cls_usd
 
     total = ledger_total + recon_total
     priced_any = recon_priced or bool(ledger)
