@@ -208,6 +208,31 @@ is "a local path-style model id is not reported as unpriced" "$localnoise" "clau
 
 . "$(cd "$(dirname "$0")" && pwd)/helpers/markup_section.inc"
 
+# --- 0.9.1: a FREE session (local or remote free-API, both reached via a localhost
+# ANTHROPIC_BASE_URL) must not print the cap WARNING — its own turns are $0 and the alarm
+# reads as "this session is burning budget". The CONTROL half matters most: the same
+# over-threshold ledger on the cloud endpoint must still warn, or the gate proves nothing.
+FREE_LEDGER="$TMP/free-ledger"; mkdir -p "$FREE_LEDGER"
+printf '%s\t36.00\t0\n' "$(date -u +%F)" > "$FREE_LEDGER/aaaaaaaa-0000-0000-0000-000000000001"
+tally_at() {  # $1 = ANTHROPIC_BASE_URL, $2 = mode ("" or --check)
+  HOME="$TMP" BUDGET_TALLY_LEDGER_DIR="$FREE_LEDGER" BUDGET_TALLY_PROJECTS_DIR="$TMP/none" \
+    BUDGET_TALLY_STAMP="$TMP/stamp-$RANDOM" COST_TRACKER_MARKUP=1 ANTHROPIC_BASE_URL="$1" \
+    python3 "$TALLY" ${2:+"$2"} 2>&1
+}
+case "$(tally_at '' '')" in
+  *"WARNING"*) ok "control: a cloud session over the threshold still warns" ;;
+  *) bad "control: a cloud session over the threshold still warns" "WARNING" "$(tally_at '' '')" ;;
+esac
+for url in http://localhost:8001 http://127.0.0.1:4141; do
+  for mode in '' --check; do
+    out="$(tally_at "$url" "$mode")"
+    case "$out" in
+      *"WARNING"*|*"systemMessage"*) bad "no cap warning in a free session ($url ${mode:-start})" "no warning" "$out" ;;
+      *) ok "no cap warning in a free session ($url ${mode:-start})" ;;
+    esac
+  done
+done
+
 # --- 0.5.1: --help is answered, never silently RUN -----------------------------------
 # Before this, --help fell through to the SessionStart path and printed a LIVE spend line,
 # so probing the script both triggered the work and produced output that read as help.

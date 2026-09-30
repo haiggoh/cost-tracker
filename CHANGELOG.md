@@ -2,6 +2,18 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.9.1] — 2026-09-30
+
+### Fixed — no cap warning in free sessions
+
+- `budget-tally.py` no longer prints the `⚠️ WARNING — N% of daily cap used` line in a FREE
+  session — local inference or a remote free-API proxy, both detected by a localhost
+  `ANTHROPIC_BASE_URL` (the same endpoint gate `cost-ledger-capture.sh` uses). Such a
+  session's own turns are $0, so the alarm read as "this session is burning budget". The
+  SessionStart line still prints the tally, as a plain `budget-tally:` line; the `--check`
+  Stop hook stays silent and records no band, so a cloud session later that day still warns.
+- Tests: cloud control still warns; localhost:8001 and 127.0.0.1:4141 × start/--check do not.
+
 ## [0.9.0] — 2026-09-27
 
 ### Added — count gateway spend the ledger cannot see
