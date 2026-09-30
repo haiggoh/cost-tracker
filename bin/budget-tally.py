@@ -810,8 +810,19 @@ def record_bands_today(bands_iterable):
         pass  # non-fatal — worst case a band warning repeats once more
 
 
+def is_free_session():
+    """True when THIS session runs on free compute — local inference or a remote free-API proxy,
+    both reached through a localhost ANTHROPIC_BASE_URL. Same endpoint gate as
+    cost-ledger-capture.sh (never CLAUDE_IS_LOCAL, which leaks into later gateway sessions). Its
+    own turns cost $0, so a "% of daily cap used" alarm here reads as "this session is burning
+    budget" when it isn't; the tally stays informative, only the warning is dropped."""
+    url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    return url.startswith(("http://localhost", "http://127.0.0.1",
+                           "https://localhost", "https://127.0.0.1"))
+
+
 def format_line(total, pct, remaining, unknown_models, session_scope,
-                current_session_total, ledger_total, recon_total):
+                current_session_total, ledger_total, recon_total, warn=True):
     note = ""
     if unknown_models:
         note = f" (unpriced model(s) excluded: {', '.join(sorted(unknown_models))})"
@@ -825,7 +836,7 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
         basis = "authoritative statusline cost-ledger"
     else:
         basis = "reconstructed from token usage"
-    prefix = f"⚠️ WARNING — {pct * 100:.0f}% of daily cap used: " if pct >= WARN_PCT else "budget-tally: "
+    prefix = f"⚠️ WARNING — {pct * 100:.0f}% of daily cap used: " if warn and pct >= WARN_PCT else "budget-tally: "
     # With no markup this renders exactly as it always has. With one, BOTH figures move to
     # the gateway axis: the user is measured against the gateway's cap and its refusal
     # message quotes that number, so a different denominator here reads as a second,
@@ -855,7 +866,8 @@ def main_session_start():
     # ledger entry the statusline wrapper keeps updating, so it IS in this total. Labelling it
     # "prior sessions" under-counted by ~$14 in a real long-running session (2026-08-10).
     print(format_line(total, pct, remaining, unknown_models, "all sessions with an entry today",
-                      current_session_total, ledger_total, recon_total))
+                      current_session_total, ledger_total, recon_total,
+                      warn=not is_free_session()))
 
 
 def main_check():
@@ -863,7 +875,10 @@ def main_check():
     session so far, and warn when a NEW threshold band is crossed today. Delivery: a Claude Code Stop
     hook ignores plain stdout, but surfaces a user-visible notice for `{"systemMessage": "..."}` — so
     emit that JSON, not a bare print (the old bare print fired invisibly). Per-band dedupe means a
-    missed 75% still alerts at 90%/100%."""
+    missed 75% still alerts at 90%/100%. A free session stays silent and records NO band, so a
+    cloud session later the same day still gets its warning."""
+    if is_free_session():
+        return
     total, pct, remaining, unknown_models, priced_any, current_session_total, ledger_total, recon_total = compute()
     if not priced_any:
         return
@@ -901,6 +916,9 @@ Environment:
   COST_TRACKER_CONFIG_DIR                       config dir holding the learned cap and markup
   COST_TRACKER_HISTORY                          history log path
   COST_TRACKER_PROJECTS_DIR                     transcripts dir used for reconstruction
+  ANTHROPIC_BASE_URL                            a localhost value marks a FREE session (local or
+                                                free-API): the tally prints without the ⚠️ cap
+                                                WARNING, and --check stays silent
 
 Exit status is 0 even on an internal error: this must never break a hook."""
 
