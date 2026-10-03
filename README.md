@@ -105,6 +105,13 @@ one-way: status line → ledger → reports.
 
 ## Install
 
+`get-haiggoh apply` (0.8.0 or later) also puts `cost-tracker` on your own shell `PATH`, through the
+`shortcuts` file at this plugin's root.
+
+`install.sh` is the alternative: it links `~/.local/bin/cost-tracker` to a checkout, and treats a
+get-haiggoh shim at that path as a foreign file (it backs it up, then replaces it). Pick one
+mechanism per machine.
+
 ```sh
 /plugin install cost-tracker            # from the marketplace
 bash install.sh --dry-run   # show what is wrong and what would change
