@@ -2,6 +2,14 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.10.0] — 2026-10-03
+
+### Added
+- A `shortcuts` file at the plugin root declares `cost-tracker`, so `get-haiggoh` (0.8.0 or
+  later) can put it on your own shell `PATH` through a version-independent shim. `install.sh`
+  is unchanged and still works; it treats a get-haiggoh shim at that path as a foreign file, so
+  pick one mechanism per machine.
+
 ## [0.9.1] — 2026-09-30
 
 ### Fixed — no cap warning in free sessions
