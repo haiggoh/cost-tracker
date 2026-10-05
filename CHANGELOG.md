@@ -2,6 +2,41 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.10.1] — 2026-10-05
+
+### Fixed — two ways real gateway spend read as $0
+
+On 2026-10-04 the statusline read `$35.12/$40 gw` while the gateway refused at $40.04. Two of
+the causes were ours:
+
+- **A session that moved from the gateway to a local lane lost its gateway spend.** Every local
+  render wrote cost `0`, and the reader keeps the last row of the day, so session 9bc4ee06
+  (`$4.64` on Opus 5.5, then local) reported `$0.00`. `cost-ledger-capture.sh` now holds the
+  cloud cumulative steady while local, and on the way back to cloud re-anchors on
+  `phantom − frozen cloud + baseline`, so both cloud stretches of a cloud → local → cloud day
+  count. `cost-tracker` repairs records written before this fix from the history log's last
+  cloud row, so past days are corrected on the next report.
+- **`claude-sonnet-5-5` had no price**, so a Sonnet 5.5 session reconstructed at $0. It is in
+  the table now ($2 / $10 per MTok, cache read $0.20).
+
+### Added — unknown Claude models are priced without a hand edit
+
+- `budget-tally.py --sync-prices [MODEL ...]` looks up a `claude-*` id the built-in table
+  doesn't know in LiteLLM's public price table (only `anthropic` rows, so no reseller prices)
+  and saves it to `~/.claude/cost-tracker/prices.json`. It fetches only for an id that is
+  neither built in nor already saved, so normal days use no network. The existing SessionStart
+  hook starts it in the background when it meets such an id. `COST_TRACKER_NO_PRICE_SYNC=1`
+  turns that off; `COST_TRACKER_PRICES_URL` changes the source.
+- Until a lookup lands, or if the table doesn't list the model, an unknown id is priced as the
+  **newest known version of its family** (opus / sonnet / haiku / fable) instead of $0, and
+  saved as `"source": "assumed"`. Assumptions are re-checked upstream at most once a day.
+
+### Not fixed
+
+- About 13–55% of what the gateway charges on a capped day is in no transcript at all, even
+  with the auto-mode classifier out of the picture (bypass-permissions days). Under
+  investigation; `calibrate` still shows it.
+
 ## [0.10.0] — 2026-10-03
 
 ### Added
