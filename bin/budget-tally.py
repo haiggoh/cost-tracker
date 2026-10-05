@@ -126,6 +126,12 @@ PRICING = {
         "intro_input": 2.00e-6, "intro_output": 10.00e-6, "intro_until": "2026-08-31",
         "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
     },
+    # Sonnet 5.5 (2026-09): $2 / $10 per MTok, cache read $0.20 (0.1x), per the claude-api skill
+    # and LiteLLM's table. Missing until 0.10.1, so 2026-10-03's Sonnet 5.5 session priced at $0.
+    "claude-sonnet-5-5": {
+        "input": 2.00e-6, "output": 10.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
     "claude-sonnet-4-6": {
         "input": 3.00e-6, "output": 15.00e-6,
         "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
@@ -229,10 +235,206 @@ def _canonical_model(model):
     return m.group(1) if m else base
 
 
+# --- prices for models the table above does not know (0.10.1) ------------------------------
+# A NEW Claude model used to price at $0 until someone edited PRICING by hand: claude-sonnet-5-5
+# did exactly that on 2026-10-03. Two layers now close the gap, both deterministic and free:
+#   1. prices.json in the config dir — rates pulled from LiteLLM's public price table (the same
+#      table the gateway itself runs on) by `--sync-prices`. Pulled ONLY for a claude-* id that
+#      is neither in PRICING nor already saved there, so a normal session never touches the net.
+#   2. failing that, an ASSUMPTION: the newest known version of the same family (opus, sonnet,
+#      haiku, fable). Past successors kept or lowered their family's price (Sonnet 5 -> 5.5 and
+#      Fable 5 -> 5.1 the same, Opus 5 -> 5.5 cheaper), so this is the likeliest figure and errs
+#      high rather than at $0. Assumed entries are saved with source "assumed" and re-checked
+#      upstream at most once per PRICE_RECHECK_S.
+CONFIG_DIR = os.environ.get("COST_TRACKER_CONFIG_DIR", os.path.expanduser("~/.claude/cost-tracker"))
+PRICES_PATH = os.path.join(CONFIG_DIR, "prices.json")
+PRICES_URL = os.environ.get(
+    "COST_TRACKER_PRICES_URL",
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json")
+PRICE_RECHECK_S = 24 * 3600
+_FAMILY_RE = re.compile(r"^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?$")
+# claude-* ids priced by ASSUMPTION during this run, and every model id tally() met. The
+# SessionStart path hands the latter to the background sync, which itself filters down to ids
+# that are not already known — so a day with only known models spawns nothing.
+ASSUMED_SEEN = set()
+SEEN_MODELS = set()
+
+
+def _load_saved_prices():
+    try:
+        with open(PRICES_PATH) as f:
+            d = json.load(f)
+        return d.get("models", {}) if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_SAVED_PRICES = None
+
+
+def _saved_prices():
+    global _SAVED_PRICES
+    if _SAVED_PRICES is None:
+        _SAVED_PRICES = _load_saved_prices()
+    return _SAVED_PRICES
+
+
+def _family_version(model):
+    m = _FAMILY_RE.match(model or "")
+    if not m:
+        return None
+    return m.group(1), (int(m.group(2)), int(m.group(3) or 0))
+
+
+def assumed_pricing(model):
+    """The likeliest rates for an unknown claude-* id: the newest KNOWN version of its family.
+    None for anything that is not a recognisable Claude family id."""
+    fv = _family_version(model)
+    if not fv:
+        return None
+    family, _ver = fv
+    known = [(v, k) for k in list(PRICING) + list(_saved_prices())
+             for f, v in [_family_version(k) or (None, None)]
+             if f == family and (k in PRICING or _saved_prices()[k].get("source") != "assumed")]
+    if not known:
+        return None
+    _v, best = max(known)
+    return PRICING.get(best) or _saved_prices()[best]
+
+
+def _pricing_entry(model):
+    """(entry, source) where source is "builtin", "litellm", "assumed" or None."""
+    canon = _canonical_model(model)
+    p = PRICING.get(canon)
+    if p is not None:
+        return p, "builtin"
+    saved = _saved_prices().get(canon)
+    if saved is not None:
+        return saved, saved.get("source", "litellm")
+    p = assumed_pricing(canon)
+    if p is not None:
+        return p, "assumed"
+    return None, None
+
+
+def is_priced(model):
+    return _pricing_entry(model)[0] is not None
+
+
+def _entry_from_litellm(row):
+    """LiteLLM's per-token row -> this table's shape (input/output + cache multipliers)."""
+    inp = float(row["input_cost_per_token"])
+    out = float(row["output_cost_per_token"])
+    if inp <= 0 or out <= 0:
+        raise ValueError("non-positive rate")
+    def mult(key, default):
+        v = row.get(key)
+        return float(v) / inp if v else default
+    return {"input": inp, "output": out,
+            "cache_write_5m_mult": mult("cache_creation_input_token_cost", 1.25),
+            "cache_write_1h_mult": mult("cache_creation_input_token_cost_above_1hr", 2.0),
+            "cache_read_mult": mult("cache_read_input_token_cost", 0.1)}
+
+
+def _fetch_price_table():
+    """LiteLLM's price JSON, or None. curl first: it uses the macOS keychain, so it survives a
+    TLS-intercepting corporate proxy that Python's bundled CA store rejects."""
+    import subprocess
+    try:
+        r = subprocess.run(["curl", "-fsSL", "--max-time", "15", PRICES_URL],
+                           capture_output=True, timeout=20)
+        if r.returncode == 0:
+            return json.loads(r.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        import urllib.request
+        with urllib.request.urlopen(PRICES_URL, timeout=15) as resp:
+            return json.loads(resp.read())
+    except (OSError, ValueError):
+        return None
+
+
+def models_needing_prices(models):
+    """The claude-* ids worth a lookup: not in PRICING, and either never saved or saved as an
+    assumption that has not been re-checked within PRICE_RECHECK_S."""
+    now = datetime.now(timezone.utc).timestamp()
+    saved = _saved_prices()
+    out = set()
+    for m in models:
+        canon = _canonical_model(m)
+        if not canon or not canon.startswith("claude-") or canon in PRICING:
+            continue
+        s = saved.get(canon)
+        if s is None or (s.get("source") == "assumed"
+                         and now - float(s.get("checked_at", 0)) >= PRICE_RECHECK_S):
+            out.add(canon)
+    return sorted(out)
+
+
+def sync_prices(models):
+    """Look up `models` (only those models_needing_prices() lets through) and save them to
+    prices.json. Fetches NOTHING when every id is already known. Returns {model: source}."""
+    global _SAVED_PRICES
+    todo = models_needing_prices(models)
+    if not todo:
+        return {}
+    table = _fetch_price_table() or {}
+    saved = dict(_saved_prices())
+    now = datetime.now(timezone.utc).timestamp()
+    result = {}
+    for m in todo:
+        row = table.get(m)
+        entry = None
+        if isinstance(row, dict) and row.get("litellm_provider") == "anthropic":
+            try:
+                entry = dict(_entry_from_litellm(row), source="litellm")
+            except (KeyError, ValueError, TypeError):
+                entry = None
+        if entry is None:
+            guess = assumed_pricing(m)
+            if guess is None:
+                continue
+            entry = {k: guess[k] for k in ("input", "output", "cache_write_5m_mult",
+                                           "cache_write_1h_mult", "cache_read_mult")}
+            entry["source"] = "assumed"
+        entry["checked_at"] = now
+        saved[m] = entry
+        result[m] = entry["source"]
+    if result:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        tmp = PRICES_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"contract": 1, "source_url": PRICES_URL, "models": saved}, f,
+                      indent=2, sort_keys=True)
+        os.replace(tmp, PRICES_PATH)
+        _SAVED_PRICES = saved
+    return result
+
+
+def spawn_price_sync(models):
+    """Run --sync-prices detached so SessionStart never waits on the network. No-op unless a
+    model actually needs a lookup; COST_TRACKER_NO_PRICE_SYNC=1 disables it."""
+    if os.environ.get("COST_TRACKER_NO_PRICE_SYNC") == "1":
+        return
+    todo = models_needing_prices(models)
+    if not todo:
+        return
+    import subprocess
+    try:
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "--sync-prices", *todo],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
 def rate_for(model):
-    p = PRICING.get(_canonical_model(model))
+    p, source = _pricing_entry(model)
     if p is None:
         return None
+    if source == "assumed":
+        ASSUMED_SEEN.add(_canonical_model(model))
     intro_until = p.get("intro_until")
     if intro_until and TODAY <= intro_until:
         in_rate = p.get("intro_input", p["input"])
@@ -543,9 +745,9 @@ def tally(paths, day=None, skip_sids=None):
                 usage[model]["cache_write_5m"] += w5
                 usage[model]["cache_write_1h"] += w1
                 usage[model]["cache_read"] += u.get("cache_read_input_tokens", 0) or 0
-                if (_canonical_model(model) not in PRICING
-                        and not is_non_billable(model)):
+                if not is_priced(model) and not is_non_billable(model):
                     unknown_models.add(model)
+                SEEN_MODELS.add(model)
     return usage, unknown_models
 
 
@@ -860,6 +1062,7 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
 def main_session_start():
     total, pct, remaining, unknown_models, priced_any, current_session_total, ledger_total, recon_total = compute()
     if not priced_any:
+        spawn_price_sync(SEEN_MODELS)
         return  # nothing billable found for today yet — stay silent
     # NOT "prior sessions": the label must describe what the number aggregates, not assume the
     # current session is absent. A session that has been running since an earlier day already has a
@@ -868,6 +1071,7 @@ def main_session_start():
     print(format_line(total, pct, remaining, unknown_models, "all sessions with an entry today",
                       current_session_total, ledger_total, recon_total,
                       warn=not is_free_session()))
+    spawn_price_sync(SEEN_MODELS)
 
 
 def main_check():
@@ -903,6 +1107,15 @@ Usage:
                              session with a ledger entry today. Always prints.
   budget-tally.py --check    Stop mode: recompute including the current session's turns.
                              Silent unless a warning threshold is newly crossed today.
+  budget-tally.py --sync-prices [MODEL ...]
+                             Look up rates for claude-* ids the built-in table does not know
+                             (from LiteLLM's public price table) and save them to
+                             <config dir>/prices.json. Only ids never saved before, or saved
+                             as an assumption >24h ago, are fetched; with nothing to look up it
+                             touches no network. SessionStart runs this in the background for
+                             any unknown claude-* id it meets. With no MODEL, prints the saved
+                             table. Until a lookup lands, an unknown id is priced as the newest
+                             known version of its family (opus/sonnet/haiku/fable).
   budget-tally.py --help     This text.
 
 Every figure printed is on the GATEWAY axis — the markup is applied, so the total and the
@@ -916,6 +1129,8 @@ Environment:
   COST_TRACKER_CONFIG_DIR                       config dir holding the learned cap and markup
   COST_TRACKER_HISTORY                          history log path
   COST_TRACKER_PROJECTS_DIR                     transcripts dir used for reconstruction
+  COST_TRACKER_PRICES_URL                       price table to sync unknown models from
+  COST_TRACKER_NO_PRICE_SYNC                    1 = never start the background price lookup
   ANTHROPIC_BASE_URL                            a localhost value marks a FREE session (local or
                                                 free-API): the tally prints without the ⚠️ cap
                                                 WARNING, and --check stays silent
@@ -934,11 +1149,19 @@ if __name__ == "__main__":
     if "--help" in args or "-h" in args:
         main_help()
         sys.exit(0)
-    unknown = [a for a in args if a.startswith("-") and a != "--check"]
+    unknown = [a for a in args if a.startswith("-") and a not in ("--check", "--sync-prices")]
     if unknown:
         print("budget-tally.py: unrecognised option: %s" % " ".join(unknown), file=sys.stderr)
         print("Try 'budget-tally.py --help'.", file=sys.stderr)
         sys.exit(2)
+    if "--sync-prices" in args:
+        models = [a for a in args if not a.startswith("-")]
+        if models:
+            for m, src in sorted(sync_prices(models).items()):
+                print(f"{m}: {src}")
+        else:
+            print(json.dumps(_saved_prices(), indent=2, sort_keys=True))
+        sys.exit(0)
     try:
         if "--check" in args:
             main_check()

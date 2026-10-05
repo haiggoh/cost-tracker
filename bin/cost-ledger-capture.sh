@@ -65,16 +65,27 @@ if command -v jq >/dev/null 2>&1; then
     # today's attributable spend is then (cum - baseline); see header.
     BASE=0
     PRIOR_PHANTOM=""
+    PRIOR_CUM=0
     if [ -f "$DEST" ]; then
       # split "<date> <cum> [<baseline>] [<local_phantom_cum>]" (whitespace) into $1..$4
       # shellcheck disable=SC2046
       set -- $(cat "$DEST" 2>/dev/null)
       PRIOR_PHANTOM="${4:-}"     # non-empty only if the PREVIOUS render was local (field 4)
+      PRIOR_CUM="${2:-0}"
       if [ "$1" = "$TODAY_UTC" ]; then
         BASE="${3:-0}"           # same UTC day: keep established baseline (legacy 2-field -> 0)
       else
         BASE="${2:-0}"           # day rolled over mid-session: prior cumulative carries in
       fi
+    fi
+    # CLOUD -> LOCAL (added 0.10.1). A local render must not ERASE the cloud cumulative the
+    # session already reached: it FREEZES it. Before this, the gate wrote 0 and the record's
+    # last row — which is what every reader uses — reported a session that had spent real gateway
+    # money as $0.00. Measured 2026-10-04 on 9bc4ee06: $4.64 on Opus 5.5, then a switch to the
+    # local lane, then a day total missing exactly that $4.64. A brand-new local session has no
+    # prior record, so PRIOR_CUM is 0 and the old "<date> 0 <baseline> <phantom>" shape is kept.
+    if [ "$IS_LOCAL" = "1" ]; then
+      COST="$PRIOR_CUM"
     fi
     # MIDNIGHT-CROSSING LIMITATION (known, unfixed). When a session starts before 00:00 UTC
     # and its FIRST render lands after it, there is no prior entry to carry a baseline in, so
@@ -98,9 +109,22 @@ if command -v jq >/dev/null 2>&1; then
       # LC_ALL=C because this machine's locale is comma-decimal: awk would otherwise parse
       # "40.42186999999999" as 40, truncating at the '.'. Harmless for a >0 test, but the next
       # person to do arithmetic here would get a silently wrong baseline.
+      #
+      # The new baseline is phantom - frozen_cloud + old_baseline, not the bare phantom: the
+      # phantom is the LIFETIME cumulative and so includes any cloud stretch BEFORE the local
+      # one, which is real spend already booked today and must survive the handoff
+      # (cloud -> local -> cloud). With no earlier cloud stretch this reduces to the phantom.
+      # Clamped at 0: a resume can restart the counter below the frozen figure, and a negative
+      # baseline would be quarantined by every reader; the clamp undercounts only that case.
       if LC_ALL=C awk -v p="$PRIOR_PHANTOM" -v c="$COST" \
            'BEGIN{ exit !(p+0 > 0 && c+0 > 0) }' 2>/dev/null; then
-        BASE="$PRIOR_PHANTOM"
+        if LC_ALL=C awk -v f="$PRIOR_CUM" 'BEGIN{ exit !(f+0 > 0) }' 2>/dev/null; then
+          BASE=$(LC_ALL=C awk -v p="$PRIOR_PHANTOM" -v f="$PRIOR_CUM" -v b="$BASE" \
+            'BEGIN{ n = p - f + b; if (n < 0) n = 0; printf "%.15g\n", n }' 2>/dev/null) \
+            || BASE="$PRIOR_PHANTOM"
+        else
+          BASE="$PRIOR_PHANTOM"  # no earlier cloud stretch: the phantom verbatim, unrounded
+        fi
       fi
     fi
     # HISTORY (added 2026-08-18): the per-session file is OVERWRITTEN every render, so when a

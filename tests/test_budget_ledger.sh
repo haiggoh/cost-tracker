@@ -110,6 +110,29 @@ set -- $hist_line
 is "history records the phantom as field 6 while local" "$6" "12.5"
 is "history still records the gated cost as field 4" "$4" "0"
 
+# --- A8: CLOUD -> LOCAL. A session that spent on the gateway and then moved to a local lane
+# must keep the cloud cumulative it reached. Measured 2026-10-04 on 9bc4ee06: $4.64 of gateway
+# spend, then every local render wrote cost 0 and the day reported the session as $0.00.
+SID4="44444444-aaaa-bbbb-cccc-dddddddddddd"
+L4="$TMP/.claude/cost-ledger/$SID4"
+render4() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID4" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+render4 4.64 ""
+render4 5.10 http://localhost:8000
+set -- $(cat "$L4")
+is "cloud->local keeps the cloud cumulative it reached (field 2)" "$2" "4.64"
+is "cloud->local still records the phantom (field 4)" "$4" "5.10"
+render4 14.37 http://localhost:8000
+set -- $(cat "$L4")
+is "cloud cumulative stays frozen while local" "$2" "4.64"
+
+# --- A9: ...and back to CLOUD. Today's spend is the first cloud stretch PLUS what accrues after
+# the handoff — not just the second stretch, which re-anchoring on the bare phantom would give.
+render4 14.50 ""
+set -- $(cat "$L4")
+delta="$(awk -v c="$2" -v b="$3" 'BEGIN{printf "%.2f", c-b}')"
+is "local->cloud keeps BOTH cloud stretches (4.64 + 0.13)" "$delta" "4.77"
+
 # --- A7: fail-safe. The passthrough must survive a ledger it cannot write.
 chmod 500 "$TMP/.claude/cost-ledger"
 out="$(render 99 "")"

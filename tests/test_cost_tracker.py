@@ -184,6 +184,36 @@ def test_history_rows_are_grouped_not_summed(tmp_path):
     assert data["cloud_usd"] == pytest.approx(6.0)   # last row wins, not 1+2+3+4+5+6
 
 
+def test_cloud_then_local_keeps_the_cloud_spend(tmp_path):
+    """9bc4ee06 on 2026-10-04: $4.64 on the gateway, then the session moved to a local lane and
+    every later render (pre-0.10.1 capture) wrote cost 0. Last-row-wins reported $0.00."""
+    ct, ledger = load_ct(tmp_path)
+    sid = "abababab-0000-0000-0000-000000000001"
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        f"2026-09-03T11:00:00Z {sid} 2026-09-03 2.10 0 2.10\n"
+        f"2026-09-03T12:06:00Z {sid} 2026-09-03 4.64 0 4.64\n"
+        f"2026-09-03T12:16:00Z {sid} 2026-09-03 0 0 4.64\n"
+        f"2026-09-03T23:17:00Z {sid} 2026-09-03 0 0 14.37\n"
+    )
+    (ledger / sid).write_text("2026-09-03 0 0 14.37")   # the old capture's local line
+    data = ct.collect("today")
+    assert data["cloud_usd"] == pytest.approx(4.64)
+    assert data["sessions"][sid]["axis"] == "cloud"
+
+
+def test_a_session_that_was_only_ever_local_stays_free(tmp_path):
+    ct, ledger = load_ct(tmp_path)
+    sid = "abababab-0000-0000-0000-000000000002"
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        f"2026-09-03T11:00:00Z {sid} 2026-09-03 0 0 3.00\n"
+        f"2026-09-03T12:00:00Z {sid} 2026-09-03 0 0 9.00\n"
+    )
+    (ledger / sid).write_text("2026-09-03 0 0 9.00")
+    data = ct.collect("today")
+    assert data["cloud_usd"] == pytest.approx(0.0)
+    assert data["sessions"][sid]["axis"] == "local"
+
+
 def test_live_ledger_wins_over_history_for_the_same_session_day(tmp_path):
     ct, ledger = load_ct(tmp_path)
     sid = "dddddddd-0000-0000-0000-000000000001"
@@ -313,7 +343,10 @@ def test_a_cloud_session_that_switches_to_local_mid_day_is_not_a_reset(tmp_path)
     )
     data = ct.collect("today")
     assert data["sessions"][sid]["reset_anchored"] is False
-    assert data["sessions"][sid]["axis"] == "local"
+    # 0.10.1: this used to assert axis == "local", which pinned the bug — the $5.00 billed on
+    # cloud before the switch vanished. The cloud figure reached is kept, frozen at the switch.
+    assert data["sessions"][sid]["axis"] == "cloud"
+    assert data["cloud_usd"] == pytest.approx(5.0)
 
 
 def test_a_small_day_figure_beside_a_large_lifetime_is_correct_not_a_lost_day(tmp_path):

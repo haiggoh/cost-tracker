@@ -527,6 +527,12 @@ def read_history():
     # reports 0 and would otherwise look like a reset on every single row.
     peak = {}
     reset_seen = set()
+    # CLOUD -> LOCAL (0.10.1). Before the capture fix, a session that moved from the gateway to a
+    # local lane wrote cost 0 on every local render, so "last row wins" booked its real cloud
+    # spend as $0 (9bc4ee06 on 2026-10-04: $4.64). The last CLOUD row of the day still holds that
+    # figure, so a local zero after it is read as the cloud cumulative frozen there — exactly
+    # what the fixed capture now writes itself.
+    last_cloud = {}
     try:
         f = open(HISTORY_PATH, "r", errors="ignore")
     except OSError:
@@ -555,6 +561,11 @@ def read_history():
                 if rec.cum == 0.0 and raw_cost > 0:
                     rec.axis = "local"
             key = (sid, day)
+            if rec.cum > 0.0:
+                last_cloud[key] = rec
+            elif rec.axis == "local" and key in last_cloud:
+                frozen = last_cloud[key]
+                rec.cum, rec.baseline, rec.axis = frozen.cum, frozen.baseline, "cloud"
             if rec.cum > 0.0:
                 if rec.cum < peak.get(key, 0.0):
                     reset_seen.add(key)
@@ -727,6 +738,11 @@ def _merged_records(fast=False):
         prior = merged.get(key)
         if prior is not None and prior.reset_anchored:
             r.reset_anchored = True
+        # A pre-0.10.1 local ledger line ("<day> 0 <base> <phantom>") written after a cloud
+        # stretch would erase the cloud figure history just recovered — keep history's.
+        if (prior is not None and r.axis == "local" and r.cum == 0.0
+                and prior.axis == "cloud" and prior.cum > 0.0):
+            continue
         merged[key] = r
     return merged, quarantined
 
