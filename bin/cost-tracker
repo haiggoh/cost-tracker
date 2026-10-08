@@ -814,7 +814,8 @@ def estimate_unseen(days, covered_sids, fast=False):
     --refresh-estimate` to rebuild it, so the NEXT render is current. With no cache yet it
     reports zero, labelled `pending`, rather than blocking the statusline."""
     zero = {"uncovered_usd": 0.0, "uncovered_sessions": [], "classifier_usd": 0.0,
-            "classifier_calls": 0, "total_usd": 0.0, "source": "off"}
+            "classifier_calls": 0, "outside_usd": 0.0, "by_source": {}, "total_usd": 0.0,
+            "source": "off"}
     if os.environ.get("COST_TRACKER_ESTIMATES", "1") == "0":
         return zero
     key = ",".join(sorted(days))
@@ -841,10 +842,25 @@ def estimate_unseen(days, covered_sids, fast=False):
             out["classifier_usd"] += e["classifier_usd"]
             out["classifier_calls"] += e["classifier_calls"]
             sessions.update(e["uncovered_sessions"])
+            # Outside-process spend, per named source (see budget-tally SIDE_SPENDERS). Only the
+            # part with no transcript (outside_usd) is new money; the rest labels uncovered_usd.
+            out["outside_usd"] += e.get("outside_usd", 0.0)
+            by = out["by_source"] = dict(out["by_source"])
+            for sid, v in (e.get("by_source") or {}).items():
+                acc = by.setdefault(sid, {"label": v["label"], "usd": 0.0, "basis": v["basis"],
+                                          "in_uncovered": v["in_uncovered"]})
+                acc["usd"] = round(acc["usd"] + v["usd"], 4)
+                for k in ("calls",):
+                    if k in v:
+                        acc[k] = acc.get(k, 0) + v[k]
+                if "sessions" in v:
+                    acc["sessions"] = sorted(set(acc.get("sessions", [])) | set(v["sessions"]))
         out["uncovered_sessions"] = sorted(sessions)
         out["uncovered_usd"] = round(out["uncovered_usd"], 4)
         out["classifier_usd"] = round(out["classifier_usd"], 4)
-        out["total_usd"] = round(out["uncovered_usd"] + out["classifier_usd"], 4)
+        out["outside_usd"] = round(out["outside_usd"], 4)
+        out["total_usd"] = round(out["uncovered_usd"] + out["classifier_usd"]
+                                 + out["outside_usd"], 4)
     except Exception as e:  # an estimate must never break the report or the statusline
         return dict(zero, source=f"unavailable ({type(e).__name__})")
     try:
@@ -948,6 +964,9 @@ def collect(period="today", since=None, fast=False, days=None):
         "estimated_uncovered_sessions": est["uncovered_sessions"],
         "estimated_classifier_usd": est["classifier_usd"],
         "estimated_classifier_calls": est["classifier_calls"],
+        # Spend by processes outside any session, named by source (additive keys).
+        "estimated_outside_usd": est.get("outside_usd", 0.0),
+        "estimated_by_source": est.get("by_source", {}),
         "estimate_source": est["source"],
         "billed_usd": round((cloud_total + est["total_usd"]) * markup, 4),
         "billed_pct_of_cap": (round((cloud_total + est["total_usd"]) * markup / cap, 4)
