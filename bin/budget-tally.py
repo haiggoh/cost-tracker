@@ -910,18 +910,201 @@ def paths_for_day(day):
     return out
 
 
+# ── Spend by processes OUTSIDE the interactive session ─────────────────────────────────────────
+# Measured 2026-10-07: ledger $34.63, gateway refusal $40.02, and the OTel sink matched the ledger
+# to the cent — the gap was other processes on the same key. Each one is named here so the tally
+# can say WHICH, not just "reconstructed". Two kinds:
+#   * a transcript exists (an Agent-SDK session): it is already inside `uncovered_usd`; matching
+#     its first prompt only LABELS that slice — `transcript_prompt` entries.
+#   * no transcript at all: the spend is invisible to every other figure here and is ADDED as a
+#     new component — `log` entries, read from the spender's own log.
+SIDE_SPENDERS = (
+    {"id": "security-guidance-sdk", "label": "security-guidance (sdk reviews)",
+     "kind": "transcript_prompt",
+     "prompt_prefix": "Review this change for security vulnerabilities."},
+    {"id": "security-guidance-stop", "label": "security-guidance (stop-hook reviews, est.)",
+     "kind": "log"},
+    {"id": "remember", "label": "remember (logged)", "kind": "log"},
+)
+_SIDE_LABEL = {s["id"]: s["label"] for s in SIDE_SPENDERS}
+LAST_BY_SOURCE = {}   # set by compute(); read by format_line
+
+
+def _remember_dirs():
+    raw = os.environ.get("COST_TRACKER_REMEMBER_DIRS")
+    if raw:
+        return [d for d in raw.split(":") if d]
+    home = os.path.expanduser("~")
+    return ([os.path.join(home, ".remember")]
+            + sorted(glob.glob(os.path.join(home, "ClaudeWorkspace", "*", ".remember"))))
+
+
+def _sg_log_paths():
+    base = os.environ.get("COST_TRACKER_SG_LOG") or os.path.join(
+        os.environ.get("SECURITY_WARNINGS_STATE_DIR") or os.path.expanduser("~/.claude/security"),
+        "log.txt")
+    return [base + ".1", base]   # rotated copy first: it holds the older lines
+
+
+def _local_to_utc_day(local_date, hms):
+    """Both plugin logs stamp LOCAL wall time; the tally's day is UTC."""
+    try:
+        t = datetime.strptime(f"{local_date} {hms}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return t.astimezone(timezone.utc).date().isoformat()   # naive -> system local tz
+
+
+_REMEMBER_COST_RE = re.compile(r"^(\d\d:\d\d:\d\d) .*\(\$([0-9]+(?:\.[0-9]+)?)\)")
+
+
+def remember_logged(day):
+    """(usd, calls) remember priced itself for UTC `day`, from `memory-YYYY-MM-DD.log`.
+
+    Every `claude -p` it runs logs one `($x)` line — successes as `tokens:`, failed calls as
+    `call exited 1 after spending tokens:` (still billed). Lines are LOCAL time under the file's
+    date, so a UTC day spans two files."""
+    usd, calls = 0.0, 0
+    d = date.fromisoformat(day)
+    names = {f"memory-{(d + timedelta(days=k)).isoformat()}.log" for k in (-1, 0, 1)}
+    for root in _remember_dirs():
+        for name in names:
+            path = os.path.join(root, "logs", name)
+            try:
+                f = open(path, "r", errors="replace")
+            except OSError:
+                continue
+            with f:
+                for line in f:
+                    m = _REMEMBER_COST_RE.match(line)
+                    if m and _local_to_utc_day(name[7:17], m.group(1)) == day:
+                        usd += float(m.group(2))
+                        calls += 1
+    return usd, calls
+
+
+_SG_STOP_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)\.\d+\] Stop hook: reviewing ")
+
+
+def security_stop_reviews(day):
+    """Count of security-guidance Stop-hook LLM reviews on UTC `day`. These call the API by
+    direct HTTP: no transcript, no OTel, and the plugin keeps its cost in memory only — so the
+    count is all there is, and the dollar figure is an estimate."""
+    n = 0
+    for path in _sg_log_paths():
+        try:
+            f = open(path, "r", errors="replace")
+        except OSError:
+            continue
+        with f:
+            for line in f:
+                m = _SG_STOP_RE.match(line)
+                if m and _local_to_utc_day(m.group(1), m.group(2)) == day:
+                    n += 1
+    return n
+
+
+def _first_user_prompt(path):
+    """(entrypoint, text) of a transcript's first user record, or (None, '')."""
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") != "user":
+                    continue
+                c = (d.get("message") or {}).get("content")
+                if isinstance(c, list):
+                    c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+                return d.get("entrypoint"), c if isinstance(c, str) else ""
+    except OSError:
+        pass
+    return None, ""
+
+
+def classify_session(path):
+    """The SIDE_SPENDERS id a transcript belongs to, or None. SDK sessions only — the entrypoint
+    alone would label every headless run, so the opening prompt must match too."""
+    entry, text = _first_user_prompt(path)
+    if not (entry or "").startswith("sdk"):
+        return None
+    for s in SIDE_SPENDERS:
+        if s["kind"] == "transcript_prompt" and text.startswith(s["prompt_prefix"]):
+            return s["id"]
+    return None
+
+
+def _outside_sources(day, uncovered_paths, local):
+    """by_source dict for `day`. Transcript-backed entries are subsets of uncovered_usd; log
+    entries are new spend."""
+    out = {}
+    groups = defaultdict(list)
+    for p in uncovered_paths:
+        sid = _session_id_of(p)
+        if sid in local:
+            continue
+        # a subagent file inherits its parent's classification
+        parent = p if os.path.basename(os.path.dirname(p)) != "subagents" else os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(p))), sid + ".jsonl")
+        sp = classify_session(parent)
+        if sp:
+            groups[sp].append(p)
+    for sp, paths in groups.items():
+        per_session = defaultdict(float)
+        for p in paths:
+            per_session[_session_id_of(p)] += _price(tally([p], day=day)[0])[0]
+        spent = {s: u for s, u in per_session.items() if u > 0}   # a file touched today ≠ spend today
+        if spent:
+            out[sp] = {"label": _SIDE_LABEL[sp], "usd": round(sum(spent.values()), 4),
+                       "sessions": sorted(spent), "basis": "transcript", "in_uncovered": True}
+
+    n_stop = security_stop_reviews(day)
+    if n_stop:
+        # ONE direct HTTP request per review (Opus, ~30k-token prompt, thinking) — not comparable
+        # to an agentic SDK review (6-9 requests). Default calibrated on 2026-10-07, the one day
+        # with a refusal figure AND per-source data: gateway $40.02 − ledger $32.30 − sdk reviews
+        # $4.08 − remember $0.38 − classifier $0.13 = $3.13 over 10 stop reviews.
+        per = float(os.environ.get("COST_TRACKER_SG_STOP_USD", "0.31"))
+        out["security-guidance-stop"] = {"label": _SIDE_LABEL["security-guidance-stop"],
+                                         "usd": round(n_stop * per, 4), "calls": n_stop,
+                                         "basis": f"count × ${per:.2f} (COST_TRACKER_SG_STOP_USD)",
+                                         "in_uncovered": False}
+    r_usd, r_calls = remember_logged(day)
+    if r_calls:
+        out["remember"] = {"label": _SIDE_LABEL["remember"], "usd": round(r_usd, 4),
+                           "calls": r_calls, "basis": "its own log", "in_uncovered": False}
+    return out
+
+
+def outside_usd(by_source):
+    """Spend in by_source that is NOT already inside uncovered_usd."""
+    return round(sum(v["usd"] for v in by_source.values() if not v.get("in_uncovered")), 4)
+
+
+def side_spend_note(by_source):
+    """'; side: <label> $x, …' for the tally line, or '' when there is none."""
+    parts = [f"{v['label']} ${v['usd']:.2f}"
+             for _id, v in sorted(by_source.items()) if v.get("usd", 0) > 0]
+    return f"; side: {', '.join(parts)}" if parts else ""
+
+
 def estimate_day(day, covered_sids):
     """The spend the ledger cannot see for UTC `day`, split by cause. For cost-tracker.
 
     covered_sids: sessions the ledger already has an authoritative figure for on `day`.
     Returns {"uncovered_usd", "uncovered_sessions", "classifier_usd", "classifier_calls",
-             "classifier_usd_per_call", "unknown_models"} — every figure list-price, never marked up."""
+             "classifier_usd_per_call", "unknown_models", "by_source", "outside_usd"} — every
+    figure list-price, never marked up. `by_source` names the spender behind each slice;
+    `outside_usd` is the part of it no transcript holds (so it is NOT in uncovered_usd)."""
     paths = paths_for_day(day)
     local = local_lane_sessions(day)
     uncovered = [p for p in paths if _session_id_of(p) not in covered_sids]
     usage, unknown = tally(uncovered, day=day, skip_sids=local)
     recon, _, unpriced = _price(usage)
     cls_usd, n_calls = estimate_classifier_usd(paths, day=day, skip_sids=local)
+    by_source = _outside_sources(day, uncovered, local)
     return {
         "uncovered_usd": round(recon, 4),
         "uncovered_sessions": sorted({_session_id_of(p) for p in uncovered} - local),
@@ -929,6 +1112,8 @@ def estimate_day(day, covered_sids):
         "classifier_calls": n_calls,
         "classifier_usd_per_call": classifier_usd_per_call(),
         "unknown_models": sorted(unknown | unpriced),
+        "by_source": by_source,
+        "outside_usd": outside_usd(by_source),
     }
 
 
@@ -963,6 +1148,11 @@ def compute():
     # as opposed to the authoritative ledger, and format_line labels that split.
     cls_usd, _ = estimate_classifier_usd(paths, skip_sids=local)
     recon_total += cls_usd
+    # Outside-process spend: transcript-backed slices are already in recon_total (only labelled);
+    # log-backed ones are new. format_line names every slice via LAST_BY_SOURCE.
+    global LAST_BY_SOURCE
+    LAST_BY_SOURCE = _outside_sources(TODAY, uncovered, local)
+    recon_total += outside_usd(LAST_BY_SOURCE)
 
     total = ledger_total + recon_total
     priced_any = recon_priced or bool(ledger)
@@ -1055,7 +1245,7 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
         cap_str = f"${CAP_USD:.0f} cap"
     return (
         f"{prefix}today's spend ({session_scope}) ≈ ${shown_total:.2f} of {cap_str} "
-        f"(~${shown_remaining:.2f} left, {basis}){note}"
+        f"(~${shown_remaining:.2f} left, {basis}{side_spend_note(LAST_BY_SOURCE)}){note}"
     )
 
 
@@ -1131,6 +1321,10 @@ Environment:
   COST_TRACKER_PROJECTS_DIR                     transcripts dir used for reconstruction
   COST_TRACKER_PRICES_URL                       price table to sync unknown models from
   COST_TRACKER_NO_PRICE_SYNC                    1 = never start the background price lookup
+  COST_TRACKER_REMEMBER_DIRS                    colon-separated remember dirs whose logs/ are summed
+                                                (default ~/.remember + ~/ClaudeWorkspace/*/.remember)
+  COST_TRACKER_SG_LOG                           security-guidance log (default ~/.claude/security/log.txt)
+  COST_TRACKER_SG_STOP_USD                      est. $ per security-guidance Stop-hook review (default 0.31)
   ANTHROPIC_BASE_URL                            a localhost value marks a FREE session (local or
                                                 free-API): the tally prints without the ⚠️ cap
                                                 WARNING, and --check stays silent

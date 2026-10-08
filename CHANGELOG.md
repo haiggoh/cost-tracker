@@ -2,6 +2,36 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.11.0] — 2026-10-08
+
+### Added — spend by processes outside any session, named by source
+
+On 2026-10-07 the ledger held $32.30 for the day's sessions, the OTel request sink agreed to the
+cent, and the gateway still refused at $40.02. The gap was other processes on the same key, which
+no session-based figure can see. The tally now names each one:
+
+- **`security-guidance (sdk reviews)`**: the official security-guidance plugin's commit/push
+  reviews run as Agent-SDK sessions. They were already counted, but only inside the anonymous
+  "reconstructed" bucket. They are now recognised by their opening prompt (not by the SDK
+  entrypoint alone, which would label every headless run).
+- **`security-guidance (stop-hook reviews, est.)`**: its Stop-hook review calls the API directly,
+  with no transcript and no OTel. It is counted from `~/.claude/security/log.txt` and priced at
+  `COST_TRACKER_SG_STOP_USD` per review (default $0.31, calibrated against the 2026-10-07
+  refusal). This figure is an estimate and is labelled as one.
+- **`remember (logged)`**: the remember plugin prices every `claude -p` call it makes in its own
+  log (`~/.remember/logs`, plus `~/ClaudeWorkspace/*/.remember/logs`; override with
+  `COST_TRACKER_REMEMBER_DIRS`). Those amounts are now summed per UTC day. Its log uses local
+  time, so a UTC day can span two of its files.
+
+The budget-tally line gains `; side: <label> $x, …`. `cost-tracker --json` gains
+`estimated_outside_usd` and `estimated_by_source` (additive keys only), and `billed_usd` now
+includes the outside spend that has no transcript. `uncovered_usd` keeps its exact meaning.
+
+### Fixed
+
+- The test suites now point both plugin-log paths into the temp dir. Without that, the real logs
+  on this machine leaked into the statusline-segment assertions.
+
 ## [0.10.1] — 2026-10-05
 
 ### Fixed — two ways real gateway spend read as $0

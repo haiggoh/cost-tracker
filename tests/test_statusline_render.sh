@@ -37,6 +37,11 @@ dir_line()   { printf '%s' "$1" | grep -v -E '^JoyIA' | grep -v -E '\$[0-9]' | h
 # fail against a perfectly correct renderer. The segment gets its own section, with a
 # ledger dir the test controls.
 export COST_TRACKER_STATUSLINE=0
+# Outside-process spend reads plugin logs under $HOME (remember, security-guidance); point both
+# at nothing so this machine's real logs cannot move a segment figure.
+TMP_NOLOGS="$(mktemp -d)"
+export COST_TRACKER_REMEMBER_DIRS="$TMP_NOLOGS/remember"
+export COST_TRACKER_SG_LOG="$TMP_NOLOGS/sg/log.txt"
 
 # For cloud session tests, ensure resolver detects cloud by setting ANTHROPIC_BASE_URL
 # to an Anthropic endpoint (the resolver keys off this).

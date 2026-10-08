@@ -40,6 +40,10 @@ def load_ct(tmp_path, today="2026-09-03", cap=None, savings_cmd="/bin/false",
     # Same trap as the cap, one axis over: an inherited markup would rescale every
     # denominator in the suite. Tests that WANT one set it after loading.
     os.environ.pop("COST_TRACKER_MARKUP", None)
+    # Outside-process spend reads plugin logs under $HOME (remember, security-guidance). Same trap
+    # as the cap: unpinned, this machine's real logs leak into every estimate in the suite.
+    os.environ["COST_TRACKER_REMEMBER_DIRS"] = str(tmp_path / "remember-none")
+    os.environ["COST_TRACKER_SG_LOG"] = str(tmp_path / "sg-none" / "log.txt")
     # The fast path would otherwise fork a background estimate refresh per render.
     os.environ["COST_TRACKER_NO_SPAWN"] = "1"
     if cap is None:
