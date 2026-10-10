@@ -172,3 +172,25 @@ def test_tally_line_names_each_source(tmp_path):
     assert "security-guidance (sdk reviews) $0.03" in line, line
     assert "remember (logged) $0.25" in line, line
     assert bt.side_spend_note({}) == ""
+
+
+def test_estimate_loads_without_load_module(tmp_path, monkeypatch):
+    """Python 3.15 removed SourceFileLoader.load_module(). 0.11.0 still called it, the estimate's
+    catch-all turned the AttributeError into source='unavailable', and every side-spend figure
+    read $0 on the live CLI while this suite (run on 3.14, where it only warns) stayed green.
+    Remove the method so the test fails on any interpreter, then assert the estimate RAN."""
+    from importlib.machinery import SourceFileLoader
+
+    def _removed(self, *a, **k):
+        raise AttributeError("'SourceFileLoader' object has no attribute 'load_module'")
+    monkeypatch.setattr(SourceFileLoader, "load_module", _removed)   # inherited, so delattr fails
+    logs = tmp_path / "rem" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "memory-2026-09-03.log").write_text("12:00:00 [tokens] x ($0.2500)\n")
+    os.environ["COST_TRACKER_CLASSIFIER_USD_PER_CALL"] = "0"
+    ct, ledger = load_ct(tmp_path, today=DAY)
+    os.environ["COST_TRACKER_REMEMBER_DIRS"] = str(tmp_path / "rem")
+    (ledger / "cloud").write_text(f"{DAY} 2.0 0")
+    data = ct.collect("today")
+    assert data["estimate_source"].startswith("estimated"), data["estimate_source"]
+    assert abs(data["estimated_outside_usd"] - 0.25) < 1e-9, data

@@ -765,10 +765,16 @@ ESTIMATE_CACHE_TTL_S = 120
 def _budget_tally():
     global _BT_MODULE
     if _BT_MODULE is None:
+        import importlib.util
         from importlib.machinery import SourceFileLoader
         here = os.path.dirname(os.path.realpath(__file__))
-        _BT_MODULE = SourceFileLoader(
-            "budget_tally", os.path.join(here, "budget-tally.py")).load_module()
+        # exec_module, not load_module: Python 3.15 removed load_module(), and the estimate's
+        # catch-all turned that into a silent $0 side spend (0.11.0 on the live CLI).
+        loader = SourceFileLoader("budget_tally", os.path.join(here, "budget-tally.py"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        sys.modules[loader.name] = mod   # what load_module did; dataclasses etc. look it up
+        loader.exec_module(mod)
+        _BT_MODULE = mod
     # budget-tally resolves its paths from BUDGET_TALLY_* at import; THIS process may have been
     # pointed elsewhere by COST_TRACKER_*. Bind it to our paths so the estimate reads the same
     # ledger, history and transcripts as everything else here — otherwise a test (or a user
