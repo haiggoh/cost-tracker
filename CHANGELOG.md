@@ -2,6 +2,22 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.11.1] — 2026-10-10
+
+### Fixed — side-spend estimate was dead on Python 3.15
+
+`cost-tracker` loaded `budget-tally.py` with `SourceFileLoader.load_module()`, which Python 3.15
+removed. The estimate's catch-all turned the `AttributeError` into
+`estimate_source: "unavailable (AttributeError)"`, so on the live CLI every 0.11.0 side-spend
+figure (security-guidance reviews, remember, classifier, uncovered SDK sessions) read **$0** and
+`calibrate` kept reporting ~80% of the gateway's figure. The test suite stayed green because its
+interpreter (3.14) only warned. It now loads with `exec_module()`, and a regression test removes
+`load_module` so it fails on any interpreter if the estimate stops running.
+
+With the estimate alive, the refusal days read: 10-06 $49.07 vs gateway $40.25 (the flat
+`COST_TRACKER_SG_STOP_USD` rate overcounts that day), 10-07 $39.99 vs $40.02, 10-08 $37.38 vs
+$40.78, 10-09 $36.41 vs $40.07. The stop-hook rate is therefore NOT yet validated.
+
 ## [0.11.0] — 2026-10-08
 
 ### Added — spend by processes outside any session, named by source
