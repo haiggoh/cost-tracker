@@ -2,6 +2,29 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.11.2] — 2026-10-11
+
+### Fixed — a free session resumed on the gateway could book its whole free lifetime as spend
+
+`cost-ledger-capture.sh` already re-anchors the baseline when a session moves from a local or
+free-API lane (Nemotron etc.) to the gateway, using the phantom cumulative it keeps in field 4.
+But `claude --resume` on the gateway can render the statusline once with `total_cost_usd` 0,
+before the resumed cumulative is restored. That cloud zero wrote a 3-field record and dropped the
+phantom, so the next render, carrying the full free lifetime (hundreds of dollars on long
+Nemotron sessions: 13043911 reached $1172 of phantom), would have been booked as gateway spend.
+A cloud zero after a local stretch now carries the phantom and the frozen cloud cumulative
+forward until real cloud cost arrives. Transcript reconstruction was already per-message safe
+(local message ids are never priced), so only the ledger path was exposed.
+
+### Fixed — Stop-hook reviews the endpoint rejected were priced as billed
+
+`security-guidance (stop-hook reviews, est.)` counted every `Stop hook: reviewing` line. Inside a
+free session the local proxy 400s every model the plugin tries in ~0.1s, so nothing is billed: on
+2026-10-06, 33 of 37 logged reviews were such rejections ($10.23 overcounted at $0.31 each), and
+all 10 on 2026-10-07, the day the $0.31 default was fitted on. A review now counts only if its
+block holds no `API error:` line. The default rate is relabelled UNCALIBRATED in the code, since
+its fit was to zero real reviews.
+
 ## [0.11.1] — 2026-10-10
 
 ### Fixed — side-spend estimate was dead on Python 3.15
