@@ -984,23 +984,39 @@ def remember_logged(day):
 
 
 _SG_STOP_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)\.\d+\] Stop hook: reviewing ")
+_SG_HOOK_RE = re.compile(r"^\[[^\]]+\] Hook called with args:")
+_SG_API_ERROR_RE = re.compile(r"^\[[^\]]+\] API error: ")
 
 
 def security_stop_reviews(day):
     """Count of security-guidance Stop-hook LLM reviews on UTC `day`. These call the API by
     direct HTTP: no transcript, no OTel, and the plugin keeps its cost in memory only — so the
-    count is all there is, and the dollar figure is an estimate."""
+    count is all there is, and the dollar figure is an estimate.
+
+    A review whose block (from its 'reviewing' line to the next hook invocation) holds an
+    'API error:' line is NOT counted: inside a free session the local proxy 400s every model the
+    plugin tries in ~0.1s, so nothing reaches the gateway. Measured 2026-10-06: 33 of 37 logged
+    reviews were such rejections, and 10-07 (the day the default rate was fitted on) had no others."""
     n = 0
     for path in _sg_log_paths():
         try:
             f = open(path, "r", errors="replace")
         except OSError:
             continue
+        pending = None   # is the open review block on `day`, and has it failed?
         with f:
             for line in f:
                 m = _SG_STOP_RE.match(line)
-                if m and _local_to_utc_day(m.group(1), m.group(2)) == day:
-                    n += 1
+                if m or _SG_HOOK_RE.match(line):
+                    if pending is not None and not pending["failed"]:
+                        n += 1
+                    pending = None
+                    if m and _local_to_utc_day(m.group(1), m.group(2)) == day:
+                        pending = {"failed": False}
+                elif pending is not None and _SG_API_ERROR_RE.match(line):
+                    pending["failed"] = True
+        if pending is not None and not pending["failed"]:
+            n += 1
     return n
 
 
@@ -1063,9 +1079,10 @@ def _outside_sources(day, uncovered_paths, local):
     n_stop = security_stop_reviews(day)
     if n_stop:
         # ONE direct HTTP request per review (Opus, ~30k-token prompt, thinking) — not comparable
-        # to an agentic SDK review (6-9 requests). Default calibrated on 2026-10-07, the one day
-        # with a refusal figure AND per-source data: gateway $40.02 − ledger $32.30 − sdk reviews
-        # $4.08 − remember $0.38 − classifier $0.13 = $3.13 over 10 stop reviews.
+        # to an agentic SDK review (6-9 requests). The $0.31 default is UNCALIBRATED: it was fitted
+        # on 2026-10-07 as $3.13 over "10 stop reviews", but all 10 were endpoint rejections (see
+        # security_stop_reviews), so that $3.13 was some other gap. Kept as an order-of-magnitude
+        # guess for one ~30k-token Opus call until a refusal day has enough real reviews to fit.
         per = float(os.environ.get("COST_TRACKER_SG_STOP_USD", "0.31"))
         out["security-guidance-stop"] = {"label": _SIDE_LABEL["security-guidance-stop"],
                                          "usd": round(n_stop * per, 4), "calls": n_stop,

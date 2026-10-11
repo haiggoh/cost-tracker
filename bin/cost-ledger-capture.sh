@@ -162,8 +162,21 @@ if command -v jq >/dev/null 2>&1; then
     # A LOCAL render writes a FOURTH field: the phantom cumulative it just suppressed, so the
     # next render can tell a local zero from a not-yet-spent zero (see the guard above).
     # budget-tally.py reads fields 1-3 and ignores extras, so this stays backward compatible.
-    if [ "$IS_LOCAL" = "1" ]; then
-      printf '%s %s %s %s\n' "$TODAY_UTC" "$COST" "$BASE" "$RAW_COST" > "$DEST.tmp" 2>/dev/null \
+    #
+    # FREE -> CLOUD with a ZERO in between (0.11.2). `claude --resume` on the gateway can render
+    # BEFORE the resumed lifetime cumulative is restored, reporting 0. The guard above does not
+    # fire on a zero (correctly), but writing a 3-field record here would DROP the phantom, so the
+    # next render — carrying the whole free lifetime — would have nothing to re-anchor on and
+    # would book it all as gateway spend. A cloud zero after a local stretch therefore CARRIES the
+    # phantom forward (and the frozen cloud cumulative) until real cloud cost arrives.
+    CARRY=""
+    if [ "$IS_LOCAL" = "0" ] && [ -n "$PRIOR_PHANTOM" ] && \
+       LC_ALL=C awk -v c="$COST" 'BEGIN{ exit !(c+0 == 0) }' 2>/dev/null; then
+      CARRY="$PRIOR_PHANTOM"
+      COST="$PRIOR_CUM"
+    fi
+    if [ "$IS_LOCAL" = "1" ] || [ -n "$CARRY" ]; then
+      printf '%s %s %s %s\n' "$TODAY_UTC" "$COST" "$BASE" "${CARRY:-$RAW_COST}" > "$DEST.tmp" 2>/dev/null \
         && mv "$DEST.tmp" "$DEST" 2>/dev/null || true
     else
       printf '%s %s %s\n' "$TODAY_UTC" "$COST" "$BASE" > "$DEST.tmp" 2>/dev/null \

@@ -194,3 +194,32 @@ def test_estimate_loads_without_load_module(tmp_path, monkeypatch):
     data = ct.collect("today")
     assert data["estimate_source"].startswith("estimated"), data["estimate_source"]
     assert abs(data["estimated_outside_usd"] - 0.25) < 1e-9, data
+
+
+def test_stop_review_rejected_by_the_endpoint_is_not_counted(tmp_path):
+    """Measured 2026-10-06: 33 of 37 logged Stop-hook reviews were inside FREE sessions, where the
+    local LiteLLM proxy 400s both claude-opus-4-7 and the sonnet fallback in ~0.1s. Nothing was
+    billed, yet each 'reviewing' line was priced at $0.31 — an $10+ overcount that day. A review
+    counts only if its block (up to the next hook invocation) holds no 'API error:' line."""
+    log = tmp_path / "sg-log.txt"
+    log.write_text(
+        # billed: no API error before the next hook call
+        "[2026-09-03 12:00:00.000] Processing: hook_event=Stop, tool=\n"
+        "[2026-09-03 12:00:00.100] Stop hook: reviewing 2 changed files (standard diff)\n"
+        "[2026-09-03 12:00:01.600] LLM code review: no vulnerabilities found\n"
+        "[2026-09-03 12:00:01.610] Stop hook: LLM reviews took 1.5s total\n"
+        "[2026-09-03 12:00:05.000] Hook called with args: ['x']\n"
+        # rejected: both models 400 (free lane) — the plugin still logs 'no vulnerabilities'
+        "[2026-09-03 12:05:49.169] Stop hook: reviewing 8 changed files (standard diff)\n"
+        '[2026-09-03 12:05:49.209] API error: 400 - {"type":"error","error":{}}\n'
+        "[2026-09-03 12:05:49.212] single: claude-opus-4-7 failed, falling back to sonnet\n"
+        '[2026-09-03 12:05:49.224] API error: 400 - {"type":"error","error":{}}\n'
+        "[2026-09-03 12:05:49.227] LLM code review: no vulnerabilities found\n"
+        "[2026-09-03 12:05:49.230] Stop hook: LLM reviews took 0.1s total\n"
+        "[2026-09-03 12:05:49.233] Stop hook: API call failed with status 400\n"
+        "[2026-09-03 12:05:49.434] Hook called with args: ['x']\n"
+        # billed again, and the LAST block in the file (no trailing hook call)
+        "[2026-09-03 12:10:00.000] Stop hook: reviewing 1 changed files (standard diff)\n"
+        "[2026-09-03 12:10:32.000] Stop hook: LLM reviews took 32.1s total\n")
+    _ct, bt, _ = _bt(tmp_path, sg_log=str(log))
+    assert bt.security_stop_reviews(DAY) == 2

@@ -133,6 +133,29 @@ set -- $(cat "$L4")
 delta="$(awk -v c="$2" -v b="$3" 'BEGIN{printf "%.2f", c-b}')"
 is "local->cloud keeps BOTH cloud stretches (4.64 + 0.13)" "$delta" "4.77"
 
+# --- A10: FREE -> CLOUD resume with a $0 render in between. `claude --resume` on cloud can render
+# the statusline BEFORE the resumed lifetime cumulative is restored (cost 0). That cloud render used
+# to write a 3-field record and DROP field 4, so the next render — which carries the whole free
+# lifetime — had no phantom to re-anchor on and booked all of it as gateway spend.
+SID5="55555555-2222-3333-4444-555555555555"
+L5="$TMP/.claude/cost-ledger/$SID5"
+render5() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID5" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+render5 3.0 http://127.0.0.1:4000
+render5 5.0 http://127.0.0.1:4000
+render5 0 https://llmgw.example.io
+set -- $(cat "$L5")
+is "cloud zero after a free stretch keeps the phantom (field 4)" "${4:-}" "5.0"
+render5 5.2 https://llmgw.example.io
+set -- $(cat "$L5")
+delta="$(awk -v c="$2" -v b="$3" 'BEGIN{printf "%.2f", c-b}')"
+is "free->cloud resume books only the cloud delta (0.20), not the free lifetime" "$delta" "0.20"
+render5 5.9 https://llmgw.example.io
+set -- $(cat "$L5")
+delta="$(awk -v c="$2" -v b="$3" 'BEGIN{printf "%.2f", c-b}')"
+is "...and keeps accruing normally afterwards" "$delta" "0.90"
+is "phantom is consumed once cloud spend is booked (3 fields)" "$#" "3"
+
 # --- A7: fail-safe. The passthrough must survive a ledger it cannot write.
 chmod 500 "$TMP/.claude/cost-ledger"
 out="$(render 99 "")"
