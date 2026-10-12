@@ -31,7 +31,10 @@ counted as a session and never silently dropped. `doctor` prints them.
 Environment overrides (all optional):
   COST_TRACKER_LEDGER_DIR   default ~/.claude/cost-ledger
   COST_TRACKER_HISTORY      default ~/.claude/cost-ledger-history.log
-  COST_TRACKER_CAP_USD      daily cap; falls back to BUDGET_TALLY_CAP_USD, then unset
+  COST_TRACKER_CAP_USD      daily cap; falls back to BUDGET_TALLY_CAP_USD, then a gateway's learned cap
+  COST_TRACKER_FEE          gateway fee override (alias COST_TRACKER_MARKUP); 1 = none
+  COST_TRACKER_APPLY_GAP    0 = warnings do not project the measured gap
+  COST_TRACKER_PROVIDERS    provider fee registry (default <plugin>/config/providers.json)
   COST_TRACKER_TODAY        override "today" as YYYY-MM-DD (tests)
   COST_TRACKER_SAVINGS_CMD  argv (shell-split) printing savings-ledger JSON
   COST_TRACKER_ESTIMATES    0 = ledger only; no no-ledger / classifier estimate
@@ -100,7 +103,11 @@ def read_config():
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    # 0.12.0: the single legacy `markup` splits into `fee` (set by hand = a stated charge) and
+    # `gap` (learned by calibrate = an observation). Migrated on read, dropped on the next write.
+    return _connection().migrate_config(data)
 
 
 def write_config(data):
@@ -277,7 +284,10 @@ def measure_markup(cal):
     well inside the gate, and 4x tighter as a multiplicative model (CV 0.0178) than as an
     additive one (0.0752), which is the evidence that it IS a rate and not a fixed fee.
     """
-    ratios = [r["gateway_usd"] / r["ours_usd"]
+    # The GAP is measured on top of list x FEE (0.12.0): the fee is published and deterministic,
+    # so it is divided out first and only what nobody has explained is left in the ratio.
+    fee = float(cal.get("fee") or MARKUP_IDENTITY)
+    ratios = [r["gateway_usd"] / (r["ours_usd"] * fee)
               for r in cal.get("days", [])
               if r.get("verdict") != "no-data" and r.get("ours_usd")
               and r.get("gateway_usd")]
@@ -322,23 +332,29 @@ def learned_markup():
 
 
 def markup_factor():
-    """What the gateway bills per dollar we report. 1.0 unless PROVEN otherwise.
+    """The FEE the session's gateway charges per dollar of list price. 1.0 unless the session is
+    routed through a gateway AND a fee is known for it (0.12.0).
 
-    Resolution order, most explicit first:
-      1. COST_TRACKER_MARKUP — a deliberate override always wins (and `1` disables).
-      2. the factor learned by `calibrate --learn-markup` from refusal evidence.
-      3. 1.0 — identity. No gateway, no evidence, no adjustment, unchanged output.
+    Resolution (bin/cost_connection.py): COST_TRACKER_FEE / COST_TRACKER_MARKUP override ->
+    a fee set by hand (`cost-tracker fee --set`) -> the published fee of a registered provider
+    (config/providers.json) -> 1.0. A subscription, Console-key or cloud-provider session is at
+    list price whatever this machine's config says: the fee belongs to the reseller.
+    The measured GAP is a separate axis (gap_factor) and never feeds this.
     """
-    raw = os.environ.get("COST_TRACKER_MARKUP")
-    if raw:
-        try:
-            v = float(raw)
-            if v > 0:
-                return v
-        except ValueError:
-            pass
-    f, _cfg = learned_markup()
-    return f if f else MARKUP_IDENTITY
+    try:
+        return float(connection()["fee"]) or MARKUP_IDENTITY
+    except Exception:
+        return MARKUP_IDENTITY
+
+
+def gap_factor():
+    """The measured, UNEXPLAINED ratio on top of list x fee (from `calibrate --learn-gap`), or
+    None. Reported separately; warnings project with it unless COST_TRACKER_APPLY_GAP=0."""
+    try:
+        g = connection().get("gap")
+    except Exception:
+        return None
+    return float(g) if g and g > 0 else None
 
 
 def cap_usd(auto_learn=False):
@@ -360,6 +376,15 @@ def cap_usd(auto_learn=False):
                 continue
             if v > 0:
                 return v
+    try:
+        conn = connection()
+    except Exception:
+        conn = {"kind": "gateway"}
+    # A refusal-learned DAILY key cap is a property of a reselling gateway. A subscription
+    # (percent windows), a Console key (monthly tier cap) or a cloud provider never has one,
+    # and inheriting this machine's learned $40 would invent a ceiling that does not exist.
+    if conn.get("kind") != "gateway":
+        return conn.get("cap_usd") if conn.get("cap_kind") == "spend-limit" else None
     cap, _cfg = learned_cap(auto_learn=auto_learn)
     return cap
 
@@ -759,6 +784,33 @@ def _merged_records(fast=False):
 # COST_TRACKER_ESTIMATES=0 turns them off and restores ledger-only totals.
 
 _BT_MODULE = None
+_CC_MODULE = None
+
+
+def _connection():
+    """The shared resolver (bin/cost_connection.py), loaded by path so this CLI keeps no
+    .py extension. Same loader shape as _budget_tally()."""
+    global _CC_MODULE
+    if _CC_MODULE is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        loader = SourceFileLoader("cost_connection", os.path.join(here, "cost_connection.py"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _CC_MODULE = mod
+    _CC_MODULE.config_path = lambda: CONFIG_PATH   # bind to THIS process's config dir
+    return _CC_MODULE
+
+
+STATUSLINE_PAYLOAD = None   # set by `statusline --payload -`: Claude Code's stdin JSON
+
+
+def connection(payload=None):
+    """{kind, provider, fee, cap_kind, gap, ...} for this process's environment (and, on the
+    statusline path, the payload Claude Code sent it — the only place `rate_limits` lives)."""
+    return _connection().resolve_connection(os.environ, payload or STATUSLINE_PAYLOAD)
 ESTIMATE_CACHE_TTL_S = 120
 
 
@@ -940,13 +992,14 @@ def collect(period="today", since=None, fast=False, days=None):
             cap_source = "env override"
         else:
             cap_source = "learned from a budget-kill message"
-    markup = markup_factor()
-    if os.environ.get("COST_TRACKER_MARKUP"):
-        markup_source = "env override"
-    elif markup != MARKUP_IDENTITY:
-        markup_source = "measured against the gateway's own figures"
-    else:
-        markup_source = "none (list price — no gateway markup measured)"
+    try:
+        conn = connection()
+    except Exception:
+        conn = {"kind": "unknown", "fee": MARKUP_IDENTITY, "fee_source": "none (list price)",
+                "gap": None, "cap_kind": "none"}
+    markup = float(conn.get("fee") or MARKUP_IDENTITY)
+    markup_source = conn.get("fee_source") or "none (list price)"
+    gap = conn.get("gap") if os.environ.get("COST_TRACKER_APPLY_GAP", "1") != "0" else None
     return {
         "contract": CONTRACT,
         "period": label,
@@ -980,6 +1033,19 @@ def collect(period="today", since=None, fast=False, days=None):
         # The cap expressed in OUR units: the figure our own total may reach before the
         # gateway refuses. With no markup this is just the cap.
         "effective_cap_usd": (round(cap / markup, 4) if cap else None),
+        # FEE and GAP are separate axes (0.12.0). `markup` above is the FEE (published,
+        # deterministic). The GAP is measured and unexplained; `projected_usd` adds it so a
+        # warning can fire in time, and is always labelled as including an unknown.
+        "connection": conn.get("kind"),
+        "provider": conn.get("provider"),
+        "cap_kind": conn.get("cap_kind"),
+        "fee": markup,
+        "fee_source": markup_source,
+        "gap": conn.get("gap"),
+        "gap_applied": bool(gap),
+        "projected_usd": (round((cloud_total + est["total_usd"]) * markup * gap, 4) if gap else None),
+        "projected_pct_of_cap": (round((cloud_total + est["total_usd"]) * markup * gap / cap, 4)
+                                 if gap and cap else None),
         "sessions": {sid: {"period_usd": round(s["period_usd"], 4),
                            "lifetime_usd": round(s["lifetime_usd"], 4),
                            "days": s["days"], "axis": s["axis"],
@@ -1174,13 +1240,16 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
     ours = daily_totals(sorted(gw))
     cov_first, cov_last = history_coverage()
     rows = []
+    # Compare against list x FEE (0.12.0): the published fee is not an error, so it is applied
+    # before the verdict. What remains below the gateway is the gap, the only unexplained part.
+    fee = markup_factor()
     for day in sorted(gw):
         g, o = gw[day], ours[day]
         # Compare the gateway against everything we attribute to the day: the ledger plus the
         # estimated spend it cannot see (SDK sessions, classifier). `ledger_usd` keeps the
         # ledger-only figure visible.
         total = round(o["ours_usd"] + o["estimated_usd"], 4)
-        delta = round(total - g["gateway_usd"], 4)
+        delta = round(total * fee - g["gateway_usd"], 4)
         covered = cov_first is not None and day >= cov_first
         if not covered:
             verdict = "no-data"
@@ -1206,7 +1275,7 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
             # not merely a floor. The shortfall is therefore the whole error, and a ratio
             # that holds steady across days with very different session mixes is what
             # distinguishes a systematic missing component from a few absent sessions.
-            "ours_pct_of_gateway": (round(100.0 * total / g["gateway_usd"], 2)
+            "ours_pct_of_gateway": (round(100.0 * total * fee / g["gateway_usd"], 2)
                                     if g["gateway_usd"] else None),
             "n_refusals": g["n_refusals"],
             "stale_repeats": g["stale_repeats"],
@@ -1246,7 +1315,15 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
         "files_scanned": found["files_scanned"],
         "days": rows,
     }
-    out["measured_markup"] = measure_markup(out)
+    fee = markup_factor()
+    out["fee"] = fee
+    out["fee_source"] = connection().get("fee_source")
+    for r in rows:
+        r["ours_with_fee_usd"] = round(r["ours_usd"] * fee, 4)
+        r["gap_ratio"] = (round(r["gateway_usd"] / (r["ours_usd"] * fee), 4)
+                          if r["ours_usd"] and r["verdict"] != "no-data" else None)
+    out["measured_markup"] = measure_markup(out)   # the GAP (name kept for JSON consumers)
+    out["measured_gap"] = out["measured_markup"]
     out["classifier_estimate_check"] = classifier_estimate_check(rows)
     return out
 
@@ -1403,7 +1480,13 @@ def render_statusline(data):
     if not saved:
         saved = None
     what = "cloud " if saved is not None else ""
-    if cap:
+    if data.get("connection") == "subscription":
+        # A subscription is metered in percent windows, never dollars; the dollar figure is an
+        # API-equivalent estimate that "isn't relevant for billing" (code.claude.com/docs/en/
+        # costs). The renderer prints the 5h/7d windows itself, so this segment only labels
+        # the dollar figure honestly.
+        seg = f"{label}: {what}≈${data['cloud_usd']:.2f} api-equiv"
+    elif cap:
         if markup != MARKUP_IDENTITY:
             # Gateway axis: the numerator is what the gateway bills, against the cap the
             # gateway actually enforces. "gw" marks the axis so the figure is never read
@@ -1412,6 +1495,10 @@ def render_statusline(data):
         else:
             # No markup: the two axes are identical, so there is nothing to name.
             seg = f"{label}: {what}${data['billed_usd']:.2f}/${cap:.0f}"
+        if data.get("projected_usd") is not None:
+            # The measured gap, cause unknown: a projection BESIDE the billed figure, never in
+            # place of it. "~" marks an estimate and "+gap" names its basis.
+            seg += f" (~${data['projected_usd']:.2f} +gap)"
     else:
         seg = f"{label}: {what}${data['billed_usd']:.2f}"
     if saved is not None:
@@ -1485,6 +1572,8 @@ def render_calibrate(data):
         lines.append("  for any day, so the daily total is unverified either way.")
         return "\n".join(lines)
 
+    if data.get("fee") and data["fee"] != MARKUP_IDENTITY:
+        lines.append(f"  ours = list price × fee ×{data['fee']:.4f} ({data.get('fee_source')})")
     lines.append(f"  {'day':<12}{'ours':>10}{'gateway':>11}{'delta':>10}  "
                  f"{'sess':>4} {'kills':>5}  verdict")
     lines.append("  " + "-" * 62)
@@ -1496,7 +1585,8 @@ def render_calibrate(data):
             note = f"  (floor: {r['reset_anchored_sessions']} resumed)"
         # A no-data day has no delta worth printing: the zero is an absent source, not a
         # measurement, and a printed -40.09 reads as a finding.
-        ours = "     —" if r["verdict"] == "no-data" else f"{r['ours_usd']:>10.2f}"
+        ours = ("     —" if r["verdict"] == "no-data"
+                else f"{r['ours_usd'] * (data.get('fee') or 1.0):>10.2f}")
         delta = "        —" if r["verdict"] == "no-data" else f"{r['delta_usd']:>+10.2f}"
         lines.append(f"  {r['day']:<12}{ours:>10}{r['gateway_usd']:>11.2f}"
                      f"{delta:>10}  {r['sessions_counted']:>4} "
@@ -1504,8 +1594,8 @@ def render_calibrate(data):
     lines.append("  " + "-" * 62)
     if data["undercount_days"]:
         lines.append(f"  {data['undercount_days']} of {data['days_calibrated']} calibrated "
-                     f"UNDERCOUNT — ${data['unaccounted_usd']:.2f} of real spend never "
-                     f"reached our total.")
+                     f"UNDERCOUNT — ${data['unaccounted_usd']:.2f} the gateway charged beyond "
+                     f"list × fee.")
         lines.append(f"  worst: {data['worst_day']} at ${data['worst_delta_usd']:.2f}.")
         if data["median_pct_of_gateway"] is not None:
             lines.append(f"  we report a median {data['median_pct_of_gateway']:.1f}% of "
@@ -1539,97 +1629,116 @@ def render_calibrate(data):
     m = data.get("measured_markup") or {}
     if m.get("n_days"):
         lines.append("")
-        lines.append(f"  gateway markup: this account's gateway billed a median "
-                     f"×{m['factor']:.4f} of list")
+        if out_fee := data.get("fee"):
+            if out_fee != MARKUP_IDENTITY:
+                lines.append(f"  fee applied first: ×{out_fee:.4f} ({data.get('fee_source')})")
+        lines.append(f"  measured gap beyond the fee: the gateway billed a median "
+                     f"×{m['factor']:.4f} of list × fee")
         lines.append(f"    price over {m['n_days']} calibrated day(s) "
                      f"(range ×{m['ratio_min']:.3f}-×{m['ratio_max']:.3f}"
                      + (f", CV {m['cv']:.3f}" if m.get("cv") is not None else "") + ").")
         if m.get("reason"):
             lines.append(f"    NOT learned: {m['reason']}.")
         else:
-            lines.append("    Steady enough to be a RATE rather than a scatter, so it can "
-                         "be recorded as a")
-            lines.append("    second axis: `cost-tracker calibrate --learn-markup`. Our own "
-                         "total is left")
-            lines.append("    exactly as measured; what the markup changes is the "
-                         "DENOMINATOR — how much")
-            lines.append("    of the cap a dollar of list price actually consumes.")
+            lines.append("    Steady enough to record: `cost-tracker calibrate --learn-gap`. "
+                         "It is stored apart")
+            lines.append("    from the fee, its CAUSE IS UNKNOWN, and it is never folded into "
+                         "the fee: warnings")
+            lines.append("    project with it, billed figures stay list × fee.")
     return "\n".join(lines)
 
 
-def render_markup(cfg, resolved):
-    """Show the markup, its provenance, and — when there is none — WHY that is correct.
+KIND_LABEL = {
+    "subscription": "Claude subscription (Pro / Max / Team / Enterprise)",
+    "api-key": "Anthropic API key or bearer token (Claude Console)",
+    "cloud-provider": "cloud provider (Bedrock / Agent Platform / Foundry)",
+    "apps-gateway": "Claude apps gateway",
+    "gateway": "LLM gateway / proxy (ANTHROPIC_BASE_URL)",
+    "local": "local or free lane (localhost)",
+    "first-party": "Anthropic first-party (subscription or key, not yet distinguishable)",
+}
+LIMIT_LABEL = {
+    "daily-key": "daily per-key cap, learned from the gateway's refusal message",
+    "percent-window": "rolling 5-hour and weekly windows, in percent (no dollar cap)",
+    "spend-limit": "the gateway's spend limit",
+    "monthly": "monthly tier spend cap (Start $500 / Build $1,000 / Scale $200,000)",
+    "none": "none knowable here",
+}
 
-    The empty state carries the finding. Someone on a plain Anthropic account should read
-    this and stop, rather than go looking for the missing 20% that isn't theirs to find.
-    """
+
+def render_fee(conn):
+    """The FEE (published, deterministic) and the GAP (measured, unexplained), as two blocks.
+    The empty state carries the finding: on a non-gateway connection there is no fee to find."""
     lines = []
-    env = os.environ.get("COST_TRACKER_MARKUP")
-    if resolved == MARKUP_IDENTITY:
-        lines.append("gateway markup: NONE (×1.0) — spend is reported at Anthropic list "
-                     "price.")
+    if conn["fee"] == MARKUP_IDENTITY:
+        lines.append("gateway fee: NONE (×1.0) — spend is reported at Anthropic list price.")
     else:
-        lines.append(f"gateway markup: ×{resolved:.4f} — this account's gateway bills that "
-                     f"much per")
-        lines.append("  dollar of list price.")
-    if env:
-        lines.append(f"  source: ×{env} from $COST_TRACKER_MARKUP (an explicit override "
-                     "always wins)")
-    m = (cfg or {}).get("markup")
-    if m:
-        lines.append(f"  basis:       {m.get('basis', 'unknown')}")
-        if m.get("n_days"):
-            lines.append(f"  measured on: {m['n_days']} calibrated UTC day(s)"
-                         + (f", CV {m['cv']:.3f}" if m.get("cv") is not None else ""))
-        if m.get("ratio_min") and m.get("ratio_max"):
-            lines.append(f"  per-day range: ×{m['ratio_min']:.3f} … ×{m['ratio_max']:.3f}")
-        lines.append(f"  recorded:    {m.get('measured_at', 'unknown')}")
-    elif not env:
-        lines.append("  Nothing has been measured, and on a normal Claude Code account "
-                     "nothing ever will")
-        lines.append("  be: a markup can only be learned from a GATEWAY refusal message, "
-                     "which a")
-        lines.append("  first-party account never produces. This is the correct and "
-                     "expected state.")
+        lines.append(f"gateway fee: ×{conn['fee']:.4f} (+{(conn['fee'] - 1) * 100:.2f}%)")
+    lines.append(f"  source:     {conn['fee_source']}")
+    lines.append(f"  connection: {KIND_LABEL.get(conn['kind'], conn['kind'])}"
+                 + (f" — {conn['provider']}" if conn.get("provider") else ""))
+    if conn["kind"] != "gateway":
+        lines.append("  A fee is a reseller's charge, so it applies only to sessions routed through a")
+        lines.append("  gateway. This connection is billed (or metered) at list price; that is the")
+        lines.append("  correct and expected state, not a missing measurement.")
+    lines.append("")
+    if conn.get("gap"):
+        lines.append(f"measured gap: ×{conn['gap']:.4f} on top of list × fee — CAUSE UNKNOWN")
+        lines.append(f"  from {conn.get('gap_n_days') or '?'} calibrated refusal day(s)"
+                     + (f", CV {conn['gap_cv']:.3f}" if conn.get("gap_cv") is not None else "")
+                     + ". Stored apart from the fee and never folded into it:")
+        lines.append("  a fitted constant once hid real unseen spend for weeks.")
+        lines.append("  Warnings PROJECT with it so the cap warning fires in time "
+                     "(COST_TRACKER_APPLY_GAP=0 to stop);")
+        lines.append("  billed figures stay list × fee.")
+    else:
+        lines.append("measured gap: none recorded. `cost-tracker calibrate --learn-gap` measures "
+                     "one from a")
+        lines.append("  gateway's refusal messages once a few are on record; it refuses to "
+                     "learn a ratio")
+        lines.append("  the evidence does not support.")
     lines.append("")
     lines.append("what this is for")
-    lines.append("  Claude Code's own `total_cost_usd` prices tokens at Anthropic LIST "
-                 "rates, and it")
-    lines.append("  is accurate: reconstructing a session from its own usage records "
-                 "reproduces that")
-    lines.append("  figure to within a rounding error. cost-tracker reports it faithfully "
-                 "and does")
-    lines.append("  not recompute it.")
-    lines.append("")
-    lines.append("  A RESELLING gateway (LiteLLM and similar) can still bill a different "
-                 "amount for")
-    lines.append("  the same tokens. Then our total is right about cost and wrong as a "
-                 "predictor of")
-    lines.append("  the refusal — which is the only number that actually stops the work. "
-                 "The markup")
-    lines.append("  is that second axis. It never edits our figure; it moves the "
-                 "DENOMINATOR, so the")
-    lines.append("  cap is expressed in the units we can actually measure.")
-    lines.append("")
-    lines.append("  Measured once, so nobody repeats the investigation: on the gateway "
-                 "this was")
-    lines.append("  built against, the factor was ~×1.23 and steady (19 days, "
-                 "×1.205-×1.289, CV")
-    lines.append("  0.053) — a multiplicative model fit ~4x tighter than an additive one, "
-                 "which is")
-    lines.append("  what rules out a fixed per-day fee. With a $40 cap that puts the real "
-                 "ceiling")
-    lines.append("  near $32 of list-price spend, matching every observed kill day. Ruled "
-                 "out along")
-    lines.append("  the way: day-boundary misattribution, missing sessions, a long-context "
-                 "premium")
-    lines.append("  (there is none), tokenizer inflation, and a second consumer of the key.")
-    lines.append("")
-    lines.append("  Your gateway's factor is its own. Run `cost-tracker calibrate "
-                 "--learn-markup`")
-    lines.append("  once you have a few refusals on record; it refuses to learn a factor "
-                 "the")
-    lines.append("  evidence does not support.")
+    lines.append("  Claude Code's `total_cost_usd` prices tokens at Anthropic LIST rates "
+                 "(code.claude.com/")
+    lines.append("  docs/en/statusline). A reselling gateway can bill more for the same tokens: "
+                 "its fee is")
+    lines.append("  published (config/providers.json cites each one). Anything the gateway "
+                 "charges beyond")
+    lines.append("  list × fee is the gap, reported as an unknown until someone explains it.")
+    return "\n".join(lines)
+
+
+# Pre-0.12 name, kept so external callers keep working.
+def render_markup(cfg, resolved):
+    return render_fee(connection())
+
+
+def render_connection(conn):
+    lines = [f"connection: {KIND_LABEL.get(conn['kind'], conn['kind'])}"]
+    if conn.get("host"):
+        lines.append(f"  endpoint host: {conn['host']}")
+    if conn["kind"] == "gateway":
+        lines.append(f"  provider:      {conn['provider'] or 'unknown (no fee applied)'}"
+                     + (f"  [{conn['provider_source']}]" if conn.get("provider_source") else ""))
+        if not conn["provider"]:
+            lines.append("    map a private host to a known provider with "
+                         "`cost-tracker connection --map-host HOST PROVIDER`")
+    lines.append(f"  fee:           ×{conn['fee']:.4f}  ({conn['fee_source']})")
+    lines.append(f"  limit:         {LIMIT_LABEL.get(conn['cap_kind'], conn['cap_kind'])}")
+    cap = conn.get("cap_usd_resolved", conn.get("cap_usd"))
+    if cap:
+        lines.append(f"  cap:           ${cap:.2f}" + (f" per {conn['cap_period']}" if conn.get("cap_period") else ""))
+    elif conn["cap_kind"] == "monthly":
+        lines.append("  cap:           not set — `cost-tracker cap --set USD --monthly`, or learned "
+                     "from an")
+        lines.append("                 `enforced_spend_limit_reached` refusal")
+    if conn.get("windows"):
+        lines.append("  windows:       " + ", ".join(f"{k} {v:.0f}%" for k, v in conn["windows"].items()
+                                                  if v is not None))
+    if conn.get("gap"):
+        lines.append(f"  measured gap:  ×{conn['gap']:.4f} beyond the fee, cause unknown "
+                     f"({conn.get('gap_n_days')} day(s))")
     return "\n".join(lines)
 
 
@@ -1700,7 +1809,11 @@ def _sid_from_raw(raw):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="cost-tracker",
-        description="Report Claude Code spend on three labelled axes: session, today, local.")
+        description="Report Claude Code spend on three labelled axes: session, today, local.",
+        epilog="Environment variables (all optional): COST_TRACKER_CAP_USD, COST_TRACKER_FEE "
+               "(alias COST_TRACKER_MARKUP), COST_TRACKER_APPLY_GAP, COST_TRACKER_PROVIDERS, "
+               "COST_TRACKER_CONFIG_DIR, COST_TRACKER_LEDGER_DIR, COST_TRACKER_HISTORY, "
+               "COST_TRACKER_PROJECTS_DIR, COST_TRACKER_STATUSLINE. See README 'Environment'.")
     sub = ap.add_subparsers(dest="cmd")
 
     def add_period(p):
@@ -1721,6 +1834,9 @@ def main(argv=None):
     st.add_argument("--fast", action="store_true",
                     help="skip the history log and read savings from the derived rollup; "
                          "for the per-render statusline path")
+    st.add_argument("--payload", metavar="-", dest="payload",
+                    help="read Claude Code's statusline JSON from stdin ('-') so the connection "
+                         "kind (subscription / apps gateway) can be told from its rate_limits")
     st.add_argument("--refresh-estimate", action="store_true", dest="refresh_estimate",
                     help="rebuild the cached no-ledger/classifier estimate and exit "
                          "(the statusline spawns this in the background)")
@@ -1735,15 +1851,31 @@ def main(argv=None):
                      help="how far back to look for refusals (default 365)")
     cal.add_argument("--tolerance", type=float, default=0.01, metavar="USD",
                      help="ignore gaps smaller than this (default 0.01)")
-    cal.add_argument("--learn-markup", action="store_true", dest="learn_markup",
-                     help="record the measured gateway markup so it does not have to be "
-                          "re-derived (refused unless the per-day ratios are steady)")
+    cal.add_argument("--learn-gap", "--learn-markup", action="store_true", dest="learn_gap",
+                     help="record the measured GAP (gateway / (list x fee)) so it is reported and "
+                          "projected; refused unless the per-day ratios are steady. Never "
+                          "changes the fee. (--learn-markup is the pre-0.12 name)")
 
-    mk = sub.add_parser("markup", help="show the gateway markup and where it came from")
+    fe = sub.add_parser("fee", help="show the gateway FEE (published, deterministic) and its source")
+    fe.add_argument("--set", metavar="FACTOR", dest="set_fee",
+                    help="record the fee by hand, e.g. 1.05 for +5%% (1 = none)")
+    fe.add_argument("--clear", action="store_true",
+                    help="forget a hand-set fee; the registry fee for your provider applies again")
+    fe.add_argument("--json", action="store_true")
+
+    cn = sub.add_parser("connection",
+                        help="how this session connects, and which limit, fee and gap apply")
+    cn.add_argument("--map-host", nargs=2, metavar=("HOST", "PROVIDER"), dest="map_host",
+                    help="map a gateway host to a provider in config/providers.json, LOCALLY "
+                         "(for private hostnames that must never be shipped)")
+    cn.add_argument("--unmap-host", metavar="HOST", dest="unmap_host")
+    cn.add_argument("--json", action="store_true")
+
+    mk = sub.add_parser("markup", help="(pre-0.12) show the fee and the measured gap together")
     mk.add_argument("--set", metavar="FACTOR", dest="set_markup",
-                    help="record a factor by hand (1 = none)")
+                    help="same as `fee --set`")
     mk.add_argument("--clear", action="store_true",
-                    help="forget the learned markup and go back to list price only")
+                    help="forget the hand-set fee AND the measured gap")
     mk.add_argument("--json", action="store_true")
 
     cp = sub.add_parser("cap", help="show the daily cap and where it came from")
@@ -1768,26 +1900,26 @@ def main(argv=None):
 
     if cmd == "calibrate":
         data = calibrate(since_days=args.since_days, tolerance=args.tolerance)
-        if getattr(args, "learn_markup", False):
+        if getattr(args, "learn_gap", False):
             m = data.get("measured_markup") or {}
             if m.get("factor") and not m.get("reason"):
                 cfg = read_config() or {"contract": CONTRACT}
-                cfg["markup"] = {
+                cfg["gap"] = {
                     "factor": m["factor"],
                     "n_days": m["n_days"], "cv": m.get("cv"),
                     "ratio_min": m.get("ratio_min"), "ratio_max": m.get("ratio_max"),
                     "measured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "basis": ("median per-day gateway/ours ratio over calibrated days, "
-                              "from the gateway's own `Current cost` at refusals"),
+                    "basis": ("median per-day gateway / (list x fee) over calibrated days, from "
+                              "the gateway's own `Current cost` at refusals; cause unknown"),
                 }
                 if write_config(cfg):
-                    print(f"cost-tracker: recorded a gateway markup of "
-                          f"×{m['factor']:.4f} from {m['n_days']} day(s).")
+                    print(f"cost-tracker: recorded a measured gap of ×{m['factor']:.4f} from "
+                          f"{m['n_days']} day(s). The fee is unchanged.")
                 else:
                     print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
             else:
-                # Refusing to learn is a RESULT, not a failure: identity stays in force.
-                print("cost-tracker: no markup recorded — "
+                # Refusing to learn is a RESULT, not a failure.
+                print("cost-tracker: no gap recorded — "
                       + (m.get("reason") or "no evidence to measure one from")
                       + ".", file=sys.stderr)
         if args.json:
@@ -1798,39 +1930,61 @@ def main(argv=None):
         # a report nobody reads. No refusal on record is INCONCLUSIVE, and exits 0.
         return 1 if data["undercount_days"] else 0
 
-    if cmd == "markup":
-        if args.set_markup:
+    if cmd in ("fee", "markup"):
+        set_v = getattr(args, "set_fee", None) or getattr(args, "set_markup", None)
+        if set_v:
             try:
-                v = float(args.set_markup)
+                v = float(set_v)
             except ValueError:
                 ap.error("--set needs a number")
             if v <= 0:
                 ap.error("--set needs a positive number")
             cfg = read_config() or {"contract": CONTRACT}
             if v == MARKUP_IDENTITY:
-                cfg.pop("markup", None)
+                cfg.pop("fee", None)
             else:
-                cfg["markup"] = {
-                    "factor": v, "n_days": 0, "cv": None,
-                    "measured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "basis": "set by hand with `cost-tracker markup --set`",
-                }
+                cfg["fee"] = {"factor": v, "set_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              "source": f"set by hand with `cost-tracker {cmd} --set`"}
             if not write_config(cfg):
                 print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
         elif args.clear:
             cfg = read_config() or {}
-            if cfg.pop("markup", None) is not None and not write_config(cfg):
+            changed = cfg.pop("fee", None) is not None
+            if cmd == "markup":
+                changed = (cfg.pop("gap", None) is not None) or changed
+            if changed and not write_config(cfg):
                 print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
-        cfg = read_config()
-        resolved = markup_factor()
+        conn = connection()
         if args.json:
-            print(json.dumps({"contract": CONTRACT, "markup": resolved,
-                              "is_identity": resolved == MARKUP_IDENTITY,
-                              "config_path": CONFIG_PATH,
-                              "config": (cfg or {}).get("markup")},
+            print(json.dumps({"contract": CONTRACT, "fee": conn["fee"],
+                              "fee_source": conn["fee_source"], "gap": conn["gap"],
+                              "markup": conn["fee"], "is_identity": conn["fee"] == MARKUP_IDENTITY,
+                              "connection": conn, "config_path": CONFIG_PATH},
                              indent=2, sort_keys=True))
             return 0
-        print(render_markup(cfg, resolved))
+        print(render_fee(conn))
+        return 0
+
+    if cmd == "connection":
+        if args.map_host or args.unmap_host:
+            cfg = read_config() or {"contract": CONTRACT}
+            hm = cfg.setdefault("connection", {}).setdefault("host_map", {})
+            if args.map_host:
+                host, provider = args.map_host[0].lower(), args.map_host[1]
+                if provider not in _connection().read_registry():
+                    ap.error(f"unknown provider {provider!r}; known: "
+                             + ", ".join(sorted(_connection().read_registry())))
+                hm[host] = provider
+            else:
+                hm.pop(args.unmap_host.lower(), None)
+            if not write_config(cfg):
+                print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+        conn = connection()
+        conn["cap_usd_resolved"] = cap_usd()
+        if args.json:
+            print(json.dumps({"contract": CONTRACT, **conn}, indent=2, sort_keys=True))
+            return 0
+        print(render_connection(conn))
         return 0
 
     if cmd == "cap":
@@ -1868,6 +2022,14 @@ def main(argv=None):
         measured = collect("today", fast=True)["cloud_usd"]
         print(render_cap(cfg, resolved, measured_today=measured))
         return 0
+
+    if getattr(args, "payload", None) == "-":
+        global STATUSLINE_PAYLOAD
+        try:
+            p = json.loads(sys.stdin.read() or "{}")
+            STATUSLINE_PAYLOAD = p if isinstance(p, dict) else None
+        except (ValueError, OSError):
+            STATUSLINE_PAYLOAD = None
 
     if getattr(args, "refresh_estimate", False):
         try:

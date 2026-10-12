@@ -2,6 +2,50 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.12.0] — 2026-10-12
+
+### Added — connection-aware limits: the right ceiling for subscription, API-key, cloud and gateway users
+
+cost-tracker used to measure everyone against `$40/day`, one gateway key's cap, hard-coded as
+`budget-tally.py`'s default. A new shared resolver, `bin/cost_connection.py`, now works out how
+the paid session connects. It follows Claude Code's documented credential order and reads only
+the environment and the statusline payload, with no subprocess and no network. Each connection
+then gets its own kind of limit:
+
+- **Subscription** (Pro / Max / Team / Enterprise): detected from `rate_limits` in the statusline
+  payload. The limit is the 5-hour and weekly windows, in percent, which the renderer already
+  shows. The dollar segment now reads `≈$x api-equiv`, with no denominator.
+- **Console API key**: no daily cap. The tier cap is MONTHLY ($500 / $1,000 / $200,000).
+- **Bedrock / Agent Platform / Foundry**: no cap is knowable locally; the cloud console owns it.
+- **Claude apps gateway**: `rate_limits.spend_limit` (`limit_usd`, `period`).
+- **Reselling gateway**: a non-Anthropic `ANTHROPIC_BASE_URL`. The daily key cap is still learned
+  from its refusal message, and it applies only here.
+
+`cost-tracker connection` prints the decision. `statusline --payload -` lets the renderer pass
+Claude Code's stdin JSON through, since `rate_limits` lives nowhere else.
+
+### Changed — the fee and the measured gap are two separate axes
+
+- **Fee**: a gateway's published, deterministic charge, from the new shipped registry
+  `config/providers.json` (llmgateway.io: ×1.05, citing its pricing page). It is applied only
+  when the session's endpoint host matches a registered host, either exactly or as a subdomain.
+  Lookalike hosts get no fee. A private hostname can be linked to a provider locally with
+  `connection --map-host`, so it never enters the repo. New `cost-tracker fee [--set|--clear]`.
+- **Gap**: what the gateway charges beyond list × fee. `calibrate` now applies the fee first, so
+  its verdicts and "ours" column are list × fee, and records the gap with `--learn-gap`
+  (`--learn-markup` still works). The gap is never folded into the fee. Warnings project with it
+  (`incl. measured gap ×1.047 (cause unknown)`); `COST_TRACKER_APPLY_GAP=0` turns that off.
+  Billed figures stay list × fee.
+- **Migration on read**: a legacy `markup` that was set by hand becomes the `fee`; one learned
+  by calibrate becomes the `gap`. `COST_TRACKER_MARKUP` remains an alias of `COST_TRACKER_FEE`.
+
+### Fixed
+
+- A direct Anthropic session (subscription or key) no longer inherits a gateway's learned cap,
+  or a gateway fee set in this machine's config.
+- `test_estimate_loads_without_load_module` now also passes on Python 3.15, where
+  `load_module` is absent rather than deprecated. The suite now runs green on both 3.14 and 3.15.
+
 ## [0.11.2] — 2026-10-11
 
 ### Fixed — a free session resumed on the gateway could book its whole free lifetime as spend

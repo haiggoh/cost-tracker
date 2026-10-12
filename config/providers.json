@@ -1,0 +1,13 @@
+{
+  "contract": 1,
+  "note": "Published, deterministic fees of reselling LLM gateways, keyed by provider. A fee here is applied ONLY when the session's ANTHROPIC_BASE_URL host matches one of `hosts` (exact or subdomain) or is mapped to the provider with `cost-tracker connection --map-host`. Never put a private/corporate hostname in this shipped file; map it locally instead.",
+  "providers": {
+    "llmgateway.io": {
+      "fee": 1.05,
+      "fee_source": "https://llmgateway.io/pricing — 'Pay per token + 5% fee' (free plan, provider list rates); verified 2026-10-11",
+      "fee_excludes": "+1.5% international card fee; Enterprise plans are custom; BYOK has no platform fee",
+      "hosts": ["api.llmgateway.io"],
+      "cap_kind": "daily-key"
+    }
+  }
+}

@@ -183,7 +183,7 @@ def test_estimate_loads_without_load_module(tmp_path, monkeypatch):
 
     def _removed(self, *a, **k):
         raise AttributeError("'SourceFileLoader' object has no attribute 'load_module'")
-    monkeypatch.setattr(SourceFileLoader, "load_module", _removed)   # inherited, so delattr fails
+    monkeypatch.setattr(SourceFileLoader, "load_module", _removed, raising=False)   # 3.15: absent
     logs = tmp_path / "rem" / "logs"
     logs.mkdir(parents=True)
     (logs / "memory-2026-09-03.log").write_text("12:00:00 [tokens] x ($0.2500)\n")

@@ -40,6 +40,16 @@ def load_ct(tmp_path, today="2026-09-03", cap=None, savings_cmd="/bin/false",
     # Same trap as the cap, one axis over: an inherited markup would rescale every
     # denominator in the suite. Tests that WANT one set it after loading.
     os.environ.pop("COST_TRACKER_MARKUP", None)
+    os.environ.pop("COST_TRACKER_FEE", None)
+    os.environ.pop("COST_TRACKER_APPLY_GAP", None)
+    # The CONNECTION decides which cap and fee apply (0.12.0). Inherited, this machine's real
+    # ANTHROPIC_BASE_URL would decide it, so the suite would pass on a gateway box and fail on a
+    # stranger's. Pin a neutral, UNREGISTERED gateway (fee 1.0, learned caps apply) — the shape
+    # every pre-0.12 test was written against. Connection tests set their own.
+    for var in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+                "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        os.environ.pop(var, None)
+    os.environ["ANTHROPIC_BASE_URL"] = "https://gw.example.test"
     # Outside-process spend reads plugin logs under $HOME (remember, security-guidance). Same trap
     # as the cap: unpinned, this machine's real logs leak into every estimate in the suite.
     os.environ["COST_TRACKER_REMEMBER_DIRS"] = str(tmp_path / "remember-none")

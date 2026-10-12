@@ -262,7 +262,7 @@ FREE_LEDGER="$TMP/free-ledger"; mkdir -p "$FREE_LEDGER"
 printf '%s\t36.00\t0\n' "$(date -u +%F)" > "$FREE_LEDGER/aaaaaaaa-0000-0000-0000-000000000001"
 tally_at() {  # $1 = ANTHROPIC_BASE_URL, $2 = mode ("" or --check)
   HOME="$TMP" BUDGET_TALLY_LEDGER_DIR="$FREE_LEDGER" BUDGET_TALLY_PROJECTS_DIR="$TMP/none" \
-    BUDGET_TALLY_STAMP="$TMP/stamp-$RANDOM" COST_TRACKER_MARKUP=1 ANTHROPIC_BASE_URL="$1" \
+    BUDGET_TALLY_STAMP="$TMP/stamp-$RANDOM" COST_TRACKER_MARKUP=1 BUDGET_TALLY_CAP_USD=40 ANTHROPIC_BASE_URL="$1" \
     python3 "$TALLY" ${2:+"$2"} 2>&1
 }
 case "$(tally_at '' '')" in

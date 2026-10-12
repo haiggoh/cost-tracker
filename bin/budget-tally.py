@@ -61,7 +61,8 @@ file (BUDGET_TALLY_STAMP) — otherwise every subsequent turn would repeat it.
 
 Test overrides (all optional):
   BUDGET_TALLY_PROJECTS_DIR   root to scan for *.jsonl (default ~/.claude/projects)
-  BUDGET_TALLY_CAP_USD        the daily cap to report against (default 40)
+  BUDGET_TALLY_CAP_USD        the daily cap to report against (default: resolved from the
+                              connection; a gateway's learned key cap, else none)
   BUDGET_TALLY_WARN_PCT       warning threshold as a fraction (default 0.75)
   BUDGET_TALLY_STAMP          path to the once-per-day warn stamp (default ~/.claude/.budget-tally-warned)
   BUDGET_TALLY_TODAY          override "today" as YYYY-MM-DD (for testing)
@@ -77,36 +78,61 @@ from datetime import date, datetime, timedelta, timezone
 PROJECTS_DIR = os.environ.get(
     "BUDGET_TALLY_PROJECTS_DIR", os.path.expanduser("~/.claude/projects")
 )
-CAP_USD = float(os.environ.get("BUDGET_TALLY_CAP_USD", "40"))
-# A resold gateway can bill more than list price for the same tokens, in which case the
-# cap is reached at a LOWER figure than the one we can measure — so a percentage against
-# the raw cap under-warns exactly when the warning matters. `cost-tracker markup` owns
-# this factor; here we only READ it, and 1.0 (no gateway, or nothing measured) leaves
-# every number and the whole message byte-identical to before.
-def _markup_factor():
-    raw = os.environ.get("COST_TRACKER_MARKUP")
-    if raw:
-        try:
-            v = float(raw)
-            if v > 0:
-                return v
-        except ValueError:
-            pass
-    path = os.path.join(
-        os.environ.get("COST_TRACKER_CONFIG_DIR",
-                       os.path.expanduser("~/.claude/cost-tracker")), "cap.json")
+# 0.12.0: the cap, the fee and the measured gap come from the SAME resolver cost-tracker uses
+# (bin/cost_connection.py), keyed on how this session connects. Before, CAP_USD defaulted to 40 —
+# one gateway key's daily cap — so every subscription, Console-key and Bedrock user was warned
+# against a ceiling that does not exist for them.
+def _load_connection():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    here = os.path.dirname(os.path.realpath(__file__))
+    loader = SourceFileLoader("cost_connection", os.path.join(here, "cost_connection.py"))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    sys.modules.setdefault(loader.name, mod)
+    loader.exec_module(mod)
+    return mod
+
+
+def conn_config_path():
+    return os.path.join(os.environ.get("COST_TRACKER_CONFIG_DIR",
+                                       os.path.expanduser("~/.claude/cost-tracker")), "cap.json")
+
+
+def _resolve():
+    """(cap_usd or None, fee, gap or None, connection dict). Never raises."""
     try:
-        with open(path) as f:
-            m = (json.load(f) or {}).get("markup") or {}
-        v = float(m.get("factor") or 0)
-        return v if v > 0 else 1.0
-    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
-        return 1.0
+        conn = _load_connection().resolve_connection(os.environ)
+    except Exception:
+        conn = {"kind": "unknown", "fee": 1.0, "gap": None, "cap_kind": "none",
+                "provider": None, "fee_source": "none (list price)"}
+    cap = None
+    for var in ("COST_TRACKER_CAP_USD", "BUDGET_TALLY_CAP_USD"):
+        try:
+            v = float(os.environ.get(var) or 0)
+        except ValueError:
+            v = 0
+        if v > 0:
+            cap = v
+            break
+    if cap is None and conn.get("kind") == "gateway":
+        # A reselling gateway's daily key cap, learned by `cost-tracker cap` from its refusal.
+        try:
+            with open(conn_config_path()) as f:
+                k = (json.load(f) or {}).get("key") or {}
+            cap = float(k.get("cap_usd") or 0) or None
+        except (OSError, ValueError, TypeError, AttributeError):
+            cap = None
+    elif cap is None and conn.get("cap_kind") == "spend-limit":
+        cap = conn.get("cap_usd")
+    gap = conn.get("gap") if os.environ.get("COST_TRACKER_APPLY_GAP", "1") != "0" else None
+    return cap, float(conn.get("fee") or 1.0), gap, conn
 
 
-MARKUP = _markup_factor()
-# The cap in the units this script actually measures.
-EFFECTIVE_CAP_USD = (CAP_USD / MARKUP) if CAP_USD else CAP_USD
+CAP_USD, MARKUP, GAP, CONNECTION = _resolve()
+# The cap in the units this script measures (list price). The warning PROJECTS with the measured
+# gap as well (user decision 2026-10-11), so it fires before the gateway's own refusal does.
+_PROJ = MARKUP * (GAP or 1.0)
+EFFECTIVE_CAP_USD = (CAP_USD / _PROJ) if CAP_USD else None
 WARN_PCT = float(os.environ.get("BUDGET_TALLY_WARN_PCT", "0.75"))
 STAMP_PATH = os.environ.get("BUDGET_TALLY_STAMP", os.path.expanduser("~/.claude/.budget-tally-warned"))
 # Authoritative per-session cost ledger written by the statusLine wrapper
@@ -1174,7 +1200,7 @@ def compute():
     total = ledger_total + recon_total
     priced_any = recon_priced or bool(ledger)
     pct = total / EFFECTIVE_CAP_USD if EFFECTIVE_CAP_USD else 0.0
-    remaining = EFFECTIVE_CAP_USD - total
+    remaining = (EFFECTIVE_CAP_USD - total) if EFFECTIVE_CAP_USD else None
 
     current_session_total = 0.0
     cur = current_session_path()
@@ -1245,24 +1271,38 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
         basis = "authoritative statusline cost-ledger"
     else:
         basis = "reconstructed from token usage"
+    kind = CONNECTION.get("kind")
+    if not CAP_USD:
+        # No dollar cap applies to this connection (subscription windows, a Console key's
+        # monthly cap, a cloud provider's console) — print the spend with no denominator rather
+        # than an invented one, and say what the figure is.
+        what = {"subscription": "API-equivalent, not billed — your limit is the 5h/weekly window",
+                "first-party": "list price; no daily cap applies",
+                "api-key": "list price; Console keys have a MONTHLY tier cap, no daily one",
+                "cloud-provider": "list price; spend limits live in your cloud console",
+                "local": "free lane"}.get(kind, "no cap known")
+        fee_note = f", fee ×{MARKUP:.2f}" if MARKUP != 1.0 else ""
+        return (f"budget-tally: today's spend ({session_scope}) ≈ ${total * MARKUP:.2f} "
+                f"({what}{fee_note}; {basis}{side_spend_note(LAST_BY_SOURCE)}){note}")
     prefix = f"⚠️ WARNING — {pct * 100:.0f}% of daily cap used: " if warn and pct >= WARN_PCT else "budget-tally: "
-    # With no markup this renders exactly as it always has. With one, BOTH figures move to
-    # the gateway axis: the user is measured against the gateway's cap and its refusal
-    # message quotes that number, so a different denominator here reads as a second,
-    # unexplained cap. The percentage and the headroom are unchanged either way — the ratio
-    # is the same whichever axis both sides are expressed in. Only the recorded value stays
-    # at list price; every user-facing figure has the markup applied.
+    # Both figures on the GATEWAY axis when a fee applies: the user is measured against the
+    # gateway's cap and its refusal message quotes that number. The FEE is published and
+    # deterministic; the GAP is measured and unexplained, so it is named separately and its
+    # projection is shown beside the billed figure, never in place of it.
+    shown_total = total * MARKUP
+    shown_remaining = CAP_USD - shown_total
     if MARKUP != 1.0:
-        shown_total = total * MARKUP
-        shown_remaining = CAP_USD - shown_total if CAP_USD else remaining
-        cap_str = f"${CAP_USD:.0f} cap (gateway ×{MARKUP:.2f} applied)"
+        provider = CONNECTION.get("provider") or "gateway"
+        cap_str = f"${CAP_USD:.0f} cap ({provider} fee ×{MARKUP:.2f} applied)"
     else:
-        shown_total = total
-        shown_remaining = remaining
         cap_str = f"${CAP_USD:.0f} cap"
+    gap_note = ""
+    if GAP:
+        gap_note = (f"; incl. measured gap ×{GAP:.3f} (cause unknown) ≈ ${shown_total * GAP:.2f}, "
+                    f"~${CAP_USD - shown_total * GAP:.2f} left")
     return (
         f"{prefix}today's spend ({session_scope}) ≈ ${shown_total:.2f} of {cap_str} "
-        f"(~${shown_remaining:.2f} left, {basis}{side_spend_note(LAST_BY_SOURCE)}){note}"
+        f"(~${shown_remaining:.2f} left{gap_note}, {basis}{side_spend_note(LAST_BY_SOURCE)}){note}"
     )
 
 
@@ -1331,7 +1371,8 @@ at list price; it is the canonical record and is never rewritten.
 
 Environment:
   COST_TRACKER_CAP_USD / BUDGET_TALLY_CAP_USD   override the daily cap (USD)
-  COST_TRACKER_MARKUP                           override the gateway markup factor
+  COST_TRACKER_FEE (alias COST_TRACKER_MARKUP)  override the gateway FEE factor
+  COST_TRACKER_APPLY_GAP=0                      do not project the measured gap in warnings
   COST_TRACKER_LEDGER_DIR                       ledger directory (default ~/.claude/cost-ledger)
   COST_TRACKER_CONFIG_DIR                       config dir holding the learned cap and markup
   COST_TRACKER_HISTORY                          history log path
