@@ -2,6 +2,18 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.12.1] — 2026-10-12
+
+### Fixed — a trimmed history log's first day was calibrated as if it were complete
+
+`cost-ledger-capture.sh` trims the history log to its newest 20000 lines once it passes 25000,
+so the oldest day in a trimmed log begins at an arbitrary row. `calibrate` treated that day as
+fully covered. On the machine this was found on, the log began at 2026-10-01 14:25Z, so 10-01
+read $9.13 against the gateway's $40.06. That ×4.18 ratio pushed the per-day CV from 0.034 to
+0.675, and `--learn-gap` refused to record a gap that was in fact steady (×1.047 over 10 days).
+A log at or above the trim size now starts its coverage the day after its first row. A test
+pins the trim size to the wrapper's `tail -n` value so the two cannot drift.
+
 ## [0.12.0] — 2026-10-12
 
 ### Added — connection-aware limits: the right ceiling for subscription, API-key, cloud and gateway users

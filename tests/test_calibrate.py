@@ -25,7 +25,7 @@ import sys
 
 import pytest
 
-from conftest import load_ct
+from conftest import ROOT, load_ct
 
 KILL = ("API Error: Request rejected (429) · Budget has been exceeded! "
         "Key=Joyia-Code-M4m (sk-...YxHg) Current cost: {cost}, Max budget: 40.0")
@@ -431,3 +431,47 @@ def test_cli_says_so_when_there_is_nothing_to_calibrate_against(tmp_path):
     r = _run(tmp_path, "calibrate")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "no refusal" in r.stdout.lower()
+
+
+def test_the_first_history_day_is_partial_when_the_log_was_trimmed(tmp_path, monkeypatch):
+    """The capture wrapper trims the history to its newest 20000 lines, so a trimmed log's oldest
+    day starts at an arbitrary row. Measured 2026-10-12: the log began at 10-01 14:25Z, so 10-01
+    read $9.13 against the gateway's $40.06 — a x4.18 'gap' that was the trim, not the gateway,
+    and it pushed the per-day CV from 0.035 to 0.675 so no gap could be learned."""
+    monkeypatch.setenv("COST_TRACKER_HISTORY_TRIM_KEEP", "3")     # the wrapper's 20000, scaled
+    _transcripts(tmp_path, [
+        _rec(KILL.format(cost="40.06"), "2026-09-01T23:00:00.000Z"),
+        _rec(KILL.format(cost="40.02"), "2026-09-02T23:00:00.000Z"),
+    ])
+    _history(tmp_path, [
+        ("2026-09-01T14:25:29Z", "sess-a", "2026-09-01", 9.13, 0.0),    # trimmed: starts mid-day
+        ("2026-09-02T00:01:00Z", "sess-b", "2026-09-02", 1.00, 0.0),
+        ("2026-09-02T22:00:00Z", "sess-b", "2026-09-02", 32.00, 0.0),
+    ])
+    ct, _ = _load(tmp_path, today="2026-09-03")
+    data = ct.calibrate()
+    assert _day(data, "2026-09-01")["verdict"] == "no-data"
+    assert _day(data, "2026-09-02")["verdict"] == "undercount"
+    assert data["ledger_covers_from"] == "2026-09-02"
+
+
+def test_an_untrimmed_log_keeps_its_first_day(tmp_path, monkeypatch):
+    """Below the trim size the log was never cut, so its first day is a real start of recording."""
+    monkeypatch.setenv("COST_TRACKER_HISTORY_TRIM_KEEP", "4")
+    _transcripts(tmp_path, [_rec(KILL.format(cost="40.06"), "2026-09-01T23:00:00.000Z")])
+    _history(tmp_path, [
+        ("2026-09-01T14:25:29Z", "sess-a", "2026-09-01", 32.00, 0.0),
+        ("2026-09-02T00:01:00Z", "sess-b", "2026-09-02", 1.00, 0.0),
+        ("2026-09-02T22:00:00Z", "sess-b", "2026-09-02", 32.00, 0.0),
+    ])
+    ct, _ = _load(tmp_path, today="2026-09-03")
+    assert _day(ct.calibrate(), "2026-09-01")["verdict"] == "undercount"
+
+
+def test_the_trim_size_matches_the_capture_wrapper():
+    """The two numbers must move together, or coverage silently mis-reads the log again."""
+    import re
+    wrapper = (ROOT / "bin" / "cost-ledger-capture.sh").read_text()
+    keep = int(re.search(r"tail -n (\d+) \"\$HIST\"", wrapper).group(1))
+    cli = (ROOT / "bin" / "cost-tracker").read_text()
+    assert f'"COST_TRACKER_HISTORY_TRIM_KEEP", "{keep}"' in cli

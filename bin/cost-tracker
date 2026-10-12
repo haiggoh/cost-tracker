@@ -1140,6 +1140,9 @@ def gateway_totals(observations, stale_window_min=STALE_REPEAT_WINDOW_MIN):
     return out
 
 
+HISTORY_TRIM_KEEP = int(os.environ.get("COST_TRACKER_HISTORY_TRIM_KEEP", "20000"))  # = capture wrapper
+
+
 def history_coverage():
     """(first_day, last_day) the history log actually covers, or (None, None).
 
@@ -1157,12 +1160,14 @@ def history_coverage():
     the honest discriminator.
     """
     first = last = None
+    n_lines = 0
     try:
         f = open(HISTORY_PATH, "r", errors="ignore")
     except OSError:
         return None, None
     with f:
         for line in f:
+            n_lines += 1
             parts = line.split()
             if len(parts) < 5 or not _valid_date(parts[2]):
                 continue
@@ -1171,6 +1176,13 @@ def history_coverage():
                 first = day
             if last is None or day > last:
                 last = day
+    # A TRIMMED log's oldest day is a fragment. cost-ledger-capture.sh keeps only the newest
+    # HISTORY_TRIM_KEEP lines once the log passes 25000, and it never shrinks below that, so a log
+    # at or above that size HAS been trimmed and its first day was cut at an arbitrary row:
+    # 2026-10-01 began at 14:25Z and read $9.13 against the gateway's $40.06 (a "x4.18 gap" that
+    # blocked learning the real one). An untrimmed log's first day stays covered, as before.
+    if first and first != last and n_lines >= HISTORY_TRIM_KEEP:
+        first = (date.fromisoformat(first) + timedelta(days=1)).isoformat()
     return first, last
 
 
