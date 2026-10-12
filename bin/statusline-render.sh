@@ -445,7 +445,9 @@ except Exception:
             fi
             TODAY_SEG=
         else
-            TODAY_SEG=$(python3 "$CT_BIN" statusline --fast 2>/dev/null | head -1) || TODAY_SEG=
+            # The payload goes along so cost-tracker can tell a subscription (rate_limits windows)
+            # or a Claude apps gateway (spend_limit) from a plain key — env alone cannot.
+            TODAY_SEG=$(printf '%s' "$INPUT" | python3 "$CT_BIN" statusline --fast --payload - 2>/dev/null | head -1) || TODAY_SEG=
         fi
     fi
 fi

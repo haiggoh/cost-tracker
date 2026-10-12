@@ -477,30 +477,64 @@ def test_a_markup_is_refused_when_the_per_day_ratios_are_not_a_single_rate(tmp_p
                                         "gateway_usd": 40.0}]})["n_days"] == 0
 
 
-def test_the_markup_command_explains_the_absence_on_a_first_party_account(tmp_path):
+def test_the_fee_command_explains_the_absence_on_a_first_party_account(tmp_path):
     """The empty state must carry the finding, or the next user re-derives it."""
+    import os
     ct, _ = load_ct(tmp_path)
-    out = ct.render_markup(None, 1.0)
-    assert "NONE (×1.0)" in out
-    assert "list price" in out
+    os.environ.pop("ANTHROPIC_BASE_URL", None)
+    os.environ["ANTHROPIC_API_KEY"] = "sk-test-not-real"
+    try:
+        out = ct.render_fee(ct.connection())
+    finally:
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        os.environ["ANTHROPIC_BASE_URL"] = "https://gw.example.test"
+    assert "NONE (×1.0)" in out and "list price" in out
     assert "correct and expected state" in out
-    # The measured evidence travels with the tool.
-    assert "1.23" in out and "$32" in out
-    # And it says what was ruled out, so the dead ends aren't re-explored.
-    assert "day-boundary" in out and "tokenizer" in out
+    assert "API key" in out                       # names the connection it decided on
+    assert "measured gap: none recorded" in out
 
 
-def test_learn_markup_persists_the_factor_and_survives_a_reload(tmp_path):
+def test_fee_and_gap_render_as_two_separate_blocks(tmp_path):
+    import os
+    ct, _ = load_ct(tmp_path)
+    ct.write_config({"contract": 1, "fee": {"factor": 1.05, "source": "llmgateway.io/pricing"},
+                     "gap": {"factor": 1.047, "n_days": 7, "cv": 0.02}})
+    os.environ["ANTHROPIC_BASE_URL"] = "https://api.llmgateway.io"
+    try:
+        ct2, _ = load_ct(tmp_path)
+        os.environ["ANTHROPIC_BASE_URL"] = "https://api.llmgateway.io"
+        out = ct2.render_fee(ct2.connection())
+    finally:
+        os.environ["ANTHROPIC_BASE_URL"] = "https://gw.example.test"
+    assert "gateway fee: ×1.0500 (+5.00%)" in out
+    assert "measured gap: ×1.0470" in out and "CAUSE UNKNOWN" in out
+    assert out.index("gateway fee") < out.index("measured gap")
+
+
+def test_a_learned_markup_migrates_to_the_gap_never_to_the_fee(tmp_path):
+    """0.12.0: a factor MEASURED by calibrate is an observation (the gap), not a published
+    charge. It is reported and projected, but billed figures stay list x fee."""
     ct, _ = load_ct(tmp_path)
     cfg = {"contract": 1, "markup": {"factor": 1.2271, "n_days": 19, "cv": 0.0525,
                                      "basis": "median per-day ratio"}}
     ct.write_config(cfg)
     ct2, _ = load_ct(tmp_path)
-    assert ct2.markup_factor() == pytest.approx(1.2271)
-    # `markup --clear` goes back to list price only.
+    assert ct2.markup_factor() == 1.0
+    assert ct2.gap_factor() == pytest.approx(1.2271)
+    assert "markup" not in (ct2.read_config() or {})
+    # `markup --clear` goes back to list price only: fee AND gap forgotten.
     assert ct2.main(["markup", "--clear"]) == 0
     ct3, _ = load_ct(tmp_path)
-    assert ct3.markup_factor() == 1.0
+    assert ct3.markup_factor() == 1.0 and ct3.gap_factor() is None
+
+
+def test_a_hand_set_markup_migrates_to_the_fee(tmp_path):
+    ct, _ = load_ct(tmp_path)
+    ct.write_config({"contract": 1, "markup": {"factor": 1.05, "n_days": 0,
+                     "basis": "set by hand with `cost-tracker markup --set`"}})
+    ct2, _ = load_ct(tmp_path)
+    assert ct2.markup_factor() == pytest.approx(1.05)
+    assert ct2.gap_factor() is None
 
 
 def test_a_corrupt_or_absurd_markup_falls_back_to_identity_never_to_zero(tmp_path):

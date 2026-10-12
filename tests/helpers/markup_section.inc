@@ -8,10 +8,15 @@ echo "C. budget-tally.py — the gateway markup shrinks the DENOMINATOR, and onl
 # is what keeps ordinary first-party Claude Code unaffected.
 HELPER="$(cd "$(dirname "$0")" && pwd)/helpers/tally_line.py"   # $0 is the SOURCING suite
 
-tally_line() {  # $1 = cap.json contents, or "" for a machine that has learned nothing
+tally_line() {  # $1 = cap.json contents ("" = nothing learned), $2 = ANTHROPIC_BASE_URL
   cfgdir="$TMP/ct-config-$$-$RANDOM"
   mkdir -p "$cfgdir"
   if [ -n "$1" ]; then printf '%s\n' "$1" > "$cfgdir/cap.json"; fi
+  # every -u BEFORE the first VAR=: env stops parsing options at an assignment
+  env -u ANTHROPIC_AUTH_TOKEN -u COST_TRACKER_MARKUP -u COST_TRACKER_FEE \
+  -u COST_TRACKER_CAP_USD -u BUDGET_TALLY_CAP_USD \
+  ANTHROPIC_API_KEY="${TALLY_API_KEY-}" \
+  ANTHROPIC_BASE_URL="${2-https://gw.example.test}" \
   COST_TRACKER_CONFIG_DIR="$cfgdir" \
   BUDGET_TALLY_LEDGER_DIR="$TMP/mk-ledger" \
   BUDGET_TALLY_TODAY="2026-09-10" \
@@ -36,28 +41,43 @@ lacks() {  # $1 = label, $2 = haystack, $3 = needle that must be ABSENT
 mkdir -p "$TMP/mk-ledger" "$TMP/empty-projects"
 echo "2026-09-10 32.43 0" > "$TMP/mk-ledger/aaaaaaaa-0000-0000-0000-000000000001"
 
-plain="$(tally_line "")"
-contains "no markup: the message is unchanged" "$plain" 'of $40 cap'
-contains "no markup: 81% of the raw cap" "$plain" "81% of daily cap"
+# 0.12.0: the daily cap is a GATEWAY's, learned from its refusal. Every pre-0.12 assertion below
+# now runs on an (unregistered) gateway endpoint WITH a learned $40 — the shape it was written for.
+CAP='"key":{"cap_usd":40.0,"scope":"key"}'
 
-marked="$(tally_line '{"contract":1,"markup":{"factor":1.2271,"n_days":19}}')"
-# BOTH user-facing figures sit on the GATEWAY axis: the cap the user is measured against
-# is the gateway's $40 and its refusal message quotes that number, so a deflated
-# denominator here read as a second, unexplained cap. The list-price total stays canonical
-# in the LEDGER (unchanged on disk — asserted below) and in `cost-tracker report`; it is
-# simply not the figure a one-line warning leads with.
-contains "markup: the cap shown is the gateway's own \$40" "$marked" 'of $40 cap'
-contains "markup: and says the factor was applied" "$marked" 'gateway ×1.23 applied'
-contains "markup: the total shown is the BILLED figure, 32.43 x 1.2271" "$marked" '$39.79'
-lacks "markup: no deflated second cap is invented" "$marked" 'effective cap'
-# The RECORDED value must stay at list price — the multiplier is applied at the surface,
-# never baked into the ledger. This is what keeps the recording canonical.
-contains "markup: the ledger row on disk is still list price" \
+plain="$(tally_line "{\"contract\":1,$CAP}")"
+contains "no fee: the message is unchanged" "$plain" 'of $40 cap'
+contains "no fee: 81% of the raw cap" "$plain" "81% of daily cap"
+
+# A HAND-SET fee (the legacy hand-set markup migrates to it) moves both figures to the gateway axis.
+marked="$(tally_line "{\"contract\":1,$CAP,\"markup\":{\"factor\":1.2271,\"n_days\":0,\"basis\":\"set by hand\"}}")"
+contains "fee: the cap shown is the gateway's own \$40" "$marked" 'of $40 cap'
+contains "fee: and says the factor was applied" "$marked" 'fee ×1.23 applied'
+contains "fee: the total shown is the BILLED figure, 32.43 x 1.2271" "$marked" '$39.79'
+lacks "fee: no deflated second cap is invented" "$marked" 'effective cap'
+contains "fee: the ledger row on disk is still list price" \
     "$(cat "$TMP/mk-ledger/aaaaaaaa-0000-0000-0000-000000000001")" '32.43'
-# The finding, as a number a reader can act on: the same spend goes from a comfortable
-# 81% to essentially spent.
-contains "markup: the same spend is 99%, not 81%" "$marked" "99% of daily cap"
+contains "fee: the same spend is 99%, not 81%" "$marked" "99% of daily cap"
 
-# A corrupt factor must fall back to identity, never zero or invert the denominator.
-broken="$(tally_line '{"contract":1,"markup":{"factor":"nope"}}')"
-contains "a corrupt markup falls back to the raw cap" "$broken" 'of $40 cap'
+broken="$(tally_line "{\"contract\":1,$CAP,\"markup\":{\"factor\":\"nope\"}}")"
+contains "a corrupt factor falls back to the raw cap" "$broken" 'of $40 cap'
+
+# A LEARNED markup is an observation: it migrates to the GAP, which the warning projects and
+# names separately, while the fee and the billed figure stay at list price.
+gap="$(tally_line "{\"contract\":1,$CAP,\"markup\":{\"factor\":1.1,\"n_days\":7,\"cv\":0.02,\"basis\":\"measured\"}}")"
+contains "gap: the billed figure stays list x fee (fee 1.0)" "$gap" '≈ $32.43 of $40 cap'
+contains "gap: the projection is named as an unknown" "$gap" 'measured gap ×1.100 (cause unknown)'
+contains "gap: the WARNING fires on the projection (32.43 x 1.1 = 89%)" "$gap" '89% of daily cap'
+nogap="$(COST_TRACKER_APPLY_GAP=0 tally_line "{\"contract\":1,$CAP,\"gap\":{\"factor\":1.1,\"n_days\":7}}")"
+lacks "gap: COST_TRACKER_APPLY_GAP=0 removes the projection" "$nogap" 'measured gap'
+
+# THE DISCRIMINANT for strangers: a direct Anthropic connection never sees a $40 it does not
+# have — neither the old hard default nor this machine's learned gateway cap.
+direct="$(tally_line "{\"contract\":1,$CAP}" "")"
+lacks "direct Anthropic: no \$40 cap is invented" "$direct" '$40'
+lacks "direct Anthropic: no daily-cap percentage" "$direct" 'of daily cap'
+fresh="$(tally_line "" "")"
+lacks "a fresh machine with no config shows no \$40 either" "$fresh" '$40'
+key="$(TALLY_API_KEY=sk-test-not-real tally_line "{\"contract\":1,$CAP,\"fee\":{\"factor\":1.05}}" "")"
+contains "an API-key session says its cap is MONTHLY" "$key" 'MONTHLY tier cap'
+lacks "…and a gateway fee on this machine never reaches it" "$key" 'fee ×'

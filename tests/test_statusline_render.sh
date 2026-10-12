@@ -159,15 +159,28 @@ cat > "$TMPD/learned/cap.json" <<'JSON'
         "key_hint":"sk-...XXXX","observed_at":"2026-09-02T02:17:19.496Z",
         "source_file":"x.jsonl","raw":"Max budget: 40.0"}}
 JSON
-OUT="$(printf '%s' "$PAY" | env COST_TRACKER_STATUSLINE=1 \
+learned_render() {  # $1 = ANTHROPIC_BASE_URL, $2 = payload
+  printf '%s' "$2" | env COST_TRACKER_STATUSLINE=1 ANTHROPIC_BASE_URL="$1" \
     COST_TRACKER_LEDGER_DIR="$TMPD/ledger" \
     COST_TRACKER_HISTORY="$TMPD/nonexistent-history.log" \
     COST_TRACKER_CONFIG_DIR="$TMPD/learned" \
     COST_TRACKER_PROJECTS_DIR="$TMPD/no-transcripts" \
     LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
-    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g')"
-has "a LEARNED cap gives the segment a denominator with no env var set" \
+    sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g'
+}
+# 0.12.0: a refusal-learned daily cap belongs to the GATEWAY that refused. On a gateway endpoint
+# it is the denominator; on a direct Anthropic connection it must NOT be inherited.
+OUT="$(learned_render https://gw.example.test "$PAY")"
+has "a LEARNED cap gives a GATEWAY session's segment a denominator with no env var set" \
     "$(seg_line "$OUT")" "today: \$30.12/\$40"
+OUT="$(learned_render https://api.anthropic.com "$PAY")"
+hasnt "…but a direct Anthropic session never inherits that gateway's cap" "$(seg_line "$OUT")" '/$40'
+SUBPAY='{"model":{"display_name":"Opus 5"},"cost":{"total_cost_usd":3.14159},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1},"seven_day":{"used_percentage":41.2,"resets_at":2}}}'
+OUT="$(learned_render https://api.anthropic.com "$SUBPAY")"
+has "a SUBSCRIPTION session's dollar figure is labelled api-equiv (rate_limits reach cost-tracker)" \
+    "$(seg_line "$OUT")" "api-equiv"
+hasnt "…with no dollar denominator" "$(seg_line "$OUT")" '/$'
+has "…and the renderer still shows the 5h window" "$OUT" "5h 24%"
 
 # THE SYMLINK CASE, which is how the renderer is actually reached once wired: via
 # ~/.claude/scripts/statusline-render.sh pointing into the plugin. A plain
