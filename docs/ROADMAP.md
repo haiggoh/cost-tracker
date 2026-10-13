@@ -2,7 +2,7 @@
 
 ## Current released version
 
-`0.13.0`
+`0.14.0`
 
 If this disagrees with `.claude-plugin/plugin.json`, treat everything below as
 suspect — the manifest is authoritative. `tests/test_version_consistency.sh`

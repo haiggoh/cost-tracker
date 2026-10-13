@@ -16,7 +16,7 @@ membership from session age instead of stating what it summed. So:
 Reads (never writes) two stores produced by the statusline capture wrapper:
 
   ~/.claude/cost-ledger/<session_id>   one line, latest render wins
-        "<utc_date> <cum> [<baseline>] [<local_phantom_cum>]"
+        "<utc_date> <cum> [<baseline>] [<local_phantom_cum> [<phantom_baseline>]]"
   ~/.claude/cost-ledger-history.log    append-only, one line per render
         "<iso_ts> <session_id> <utc_date> <cum> <baseline> [<raw_cost>]"
 
@@ -395,10 +395,11 @@ class Record:
     """One parsed ledger record. `valid` False means QUARANTINED with a reason."""
 
     __slots__ = ("session_id", "valid", "reason", "day", "cum", "baseline",
-                 "phantom", "axis", "raw", "reset_anchored")
+                 "phantom", "phantom_base", "axis", "raw", "reset_anchored")
 
     def __init__(self, session_id, raw, valid, reason="", day=None, cum=0.0,
-                 baseline=0.0, phantom=None, axis="", reset_anchored=False):
+                 baseline=0.0, phantom=None, axis="", reset_anchored=False,
+                 phantom_base=None):
         self.session_id = session_id
         self.raw = raw
         self.valid = valid
@@ -411,6 +412,9 @@ class Record:
         # True when the session's own cumulative RESET below its carried-in baseline —
         # a resumed session, whose spend is anchored at the reset instead.
         self.reset_anchored = reset_anchored
+        # 0.14.0: the phantom carried INTO self.day (ledger field 5). None on legacy
+        # 4-field lines, which keep the full-anchor behaviour and self-heal at midnight.
+        self.phantom_base = phantom_base
 
     @property
     def day_usd(self):
@@ -443,6 +447,23 @@ class Record:
             return 0.0
         return self.cum
 
+    @property
+    def day_phantom(self):
+        """Phantom attributable to self.day — the delta over the phantom baseline
+        carried into that day (ledger field 5, 0.14.0), NOT the lifetime anchor.
+        Charging a multi-day free session's whole anchor to the day it last rendered
+        is the same defect day_usd documents for the booked axis (measured 2026-10-13:
+        c441f503 carried ~$73.77 of pre-midnight phantom into "today saved").
+        Legacy 4-field lines have no field 5; they keep the full-anchor behaviour and
+        self-heal at the next UTC midnight. Clamped at 0: a resume can restart the
+        phantom counter below the carried-in baseline (the same shape day_usd anchors
+        at a reset), and the clamp undercounts only that case."""
+        if self.phantom is None:
+            return None
+        if self.phantom_base is None:
+            return self.phantom
+        return max(0.0, self.phantom - self.phantom_base)
+
 
 def _valid_date(s):
     if not DATE_RE.match(s):
@@ -459,7 +480,7 @@ def parse_ledger_fields(session_id, fields, raw):
     problems always reports the same one."""
     if len(fields) < 2:
         return Record(session_id, raw, False, "too-few-fields")
-    if len(fields) > 4:
+    if len(fields) > 5:
         return Record(session_id, raw, False, "too-many-fields")
     if not _valid_date(fields[0]):
         # A history line starts with an ISO timestamp and lands here — which is
@@ -474,6 +495,8 @@ def parse_ledger_fields(session_id, fields, raw):
     cum = nums[0]
     baseline = nums[1] if len(nums) >= 2 else 0.0
     phantom = nums[2] if len(nums) >= 3 else None
+    # 0.14.0 field 5: the phantom carried into the day. Absent on legacy lines.
+    phantom_base = nums[3] if len(nums) >= 4 else None
     if cum < 0 or baseline < 0:
         return Record(session_id, raw, False, "negative-cost")
     # A cumulative BELOW its own carried-in baseline is not corruption, and this is
@@ -500,7 +523,7 @@ def parse_ledger_fields(session_id, fields, raw):
     else:
         axis = "cloud"
     return Record(session_id, raw, True, "", fields[0], cum, baseline, phantom, axis,
-                  reset_anchored=counter_reset)
+                  reset_anchored=counter_reset, phantom_base=phantom_base)
 
 
 def parse_ledger_line(session_id, text):
@@ -971,14 +994,16 @@ def collect(period="today", since=None, fast=False, days=None):
     zero_sessions = [sid for sid, s in sessions.items() if s["axis"] == "zero"]
     reset_sessions = [sid for sid, s in sessions.items() if s["reset_anchored"]]
 
-    # Sum phantoms for local sessions (field 4 from ledger) — this is what local/free API
-    # sessions would have cost at gateway rates. Used by statusline renderer for
-    # "today: $X saved with free agents" which combines local phantoms + free API phantoms
-    # + dispatch savings.
+    # Sum phantoms for local sessions — what local/free API sessions would have cost at
+    # gateway rates. Used by the statusline renderer for "today: $X saved with free
+    # agents", which combines the phantoms + dispatch savings. 0.14.0: the per-DAY
+    # accrual (field 4 minus the field-5 baseline carried in), not the lifetime anchor —
+    # a multi-day free session must not re-donate its earlier days to today.
     local_phantom_total = 0.0
-    for (sid, day), rec in per_session_day.items():
-        if rec.axis == "local" and rec.phantom is not None:
-            local_phantom_total += rec.phantom
+    for rec in per_session_day.values():
+        dp = rec.day_phantom
+        if rec.axis == "local" and dp is not None:
+            local_phantom_total += dp
     if fast:
         savings = read_savings_fast()
     else:
@@ -1430,7 +1455,7 @@ def render_table(data, short_ids=True):
     if data.get("local_phantom_usd") is not None:
         lines.append(f"{'local phantom':<{idw}}  {'local':<6}  "
                      f"{data['local_phantom_usd']:>14.2f}  "
-                     f"{'(phantom cumulative)':>18}")
+                     f"{'(today accrual)':>18}")
     if data["local_sessions"]:
         lines.append(f"note: {len(data['local_sessions'])} local session(s) contribute $0 "
                      "to cloud spend by design")

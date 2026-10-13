@@ -228,9 +228,21 @@
     }
   },
   {
+    "name": "five_field_local_with_phantom_baseline",
+    "case": "ok",
+    "content": "2026-09-03 0 0 90.5 73.77",
+    "expect": {
+      "valid": true,
+      "reason": "",
+      "today_usd": 0,
+      "axis": "local",
+      "reset_anchored": false
+    }
+  },
+  {
     "name": "too_many_fields",
     "case": "too-many-fields",
-    "content": "2026-09-03 10 5 1 2",
+    "content": "2026-09-03 10 5 1 2 3",
     "expect": {
       "valid": false,
       "reason": "too-many-fields",

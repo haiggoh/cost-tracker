@@ -2,6 +2,37 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.14.0] — 2026-10-13
+
+### Fixed — "saved with free agents" is now the day's accrual, not a lifetime dump
+
+The booked axis fixed its multi-day bug on 2026-07-29 (baseline carried per UTC day); the
+phantom axis, added 2026-08-29, kept the same defect on its own axis: a free session spanning
+several UTC days dumped its whole lifetime phantom anchor into "today saved". Measured
+2026-10-13: session c441f503 contributed ~$73.77 of pre-midnight phantom to a ~$427 statusline
+while accruing ~$5/min.
+
+- `cost-ledger-capture.sh`: local records gain a FIFTH field — the phantom carried into the
+  UTC day, maintained exactly like field 3. Legacy 4-field lines keep the old behaviour and
+  self-heal at the next midnight, mirroring the 2-field legacy rule.
+- `cost-tracker`: the aggregation sums the day's phantom accrual (field 4 − field 5, clamped
+  at 0); `report` labels the row "(today accrual)".
+- `cost-ledger-capture.sh` now logs every lane change (cloud→local freeze, local→cloud
+  re-anchor, local→cloud-zero carry) to `~/.claude/cost-ledger-transitions.log` — one line
+  per transition, never per render — because a wrong re-anchor was previously invisible
+  after the fact (the 2026-08-08 history-log rationale applies verbatim).
+- `tests/test_statusline_render.sh` pins a stub identity resolver: on any machine with
+  free-agents installed, the payload-pinning tests silently resolved the tester's own LIVE
+  session (six model assertions rendered "nvidia-glm53-thinking" instead of the payload's
+  model), because `_fa_find` falls through to the developer checkout when the override
+  holds no binary.
+
+Known limitation (unchanged, now visible in the transition log): the phantom anchor still
+re-anchors on lane transitions, so phantom accrued before a transition drops off the field-4
+axis (0b3b133b, 2026-10-13: ~$291 reads as $0), and a cloud→local freeze writes the lifetime
+RAW cost into field 4, so real cloud spend already counted in `cloud_usd` also sits inside
+the phantom sum. Recovering either needs the history log; a redesign is tracked separately.
+
 ## [0.13.0] — 2026-10-13
 
 ### Changed — the statusline shows one figure; the budget-tally warning carries the breakdown

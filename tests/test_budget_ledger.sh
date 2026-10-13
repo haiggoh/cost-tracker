@@ -156,6 +156,101 @@ delta="$(awk -v c="$2" -v b="$3" 'BEGIN{printf "%.2f", c-b}')"
 is "...and keeps accruing normally afterwards" "$delta" "0.90"
 is "phantom is consumed once cloud spend is booked (3 fields)" "$#" "3"
 
+# --- A11: PHANTOM BASELINE (0.14.0). A multi-day LOCAL session must not dump its whole
+# lifetime phantom anchor onto the new day. Field 5 carries the phantom INTO the day,
+# exactly as field 3 carries the booked cumulative. Measured 2026-10-13: c441f503
+# carried ~$73.77 of pre-midnight phantom inside a "~$427 saved today" statusline.
+SID6="66666666-0000-0000-0000-000000000001"
+L6="$TMP/.claude/cost-ledger/$SID6"
+render6() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID6" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+printf '2020-01-01 0 0 73.77\n' > "$L6"   # prior-day local record (legacy 4-field shape)
+render6 90.5 http://127.0.0.1:4000
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$L6")
+is "rollover writes the carried-in phantom as field 5" "${5:-MISSING}" "73.77"
+is "rollover keeps the current anchor in field 4" "$4" "90.5"
+is "rollover still books \$0 (field 2)" "$2" "0"
+render6 91.5 http://127.0.0.1:4000
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$L6")
+is "same-day render keeps the established phantom baseline" "${5:-MISSING}" "73.77"
+is "same-day render keeps the booked baseline" "$3" "0"
+
+# --- A12: legacy SAME-DAY 4-field line (no field 5 yet): the phantom baseline starts at
+# 0 — the old behaviour — and self-heals at the next UTC midnight, mirroring the way the
+# 2-field legacy rule treats the booked baseline.
+SID7="77777777-0000-0000-0000-000000000001"
+L7="$TMP/.claude/cost-ledger/$SID7"
+render7() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID7" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+printf '%s 0 0 12.0\n' "$(date -u +%F)" > "$L7"
+render7 13.0 http://127.0.0.1:4000
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$L7")
+is "legacy same-day line gets phantom baseline 0 (old behaviour)" "${5:-MISSING}" "0"
+is "legacy same-day line still tracks the anchor" "$4" "13.0"
+
+# --- A13: TRANSITION LOG (0.14.0). Lane changes re-anchor state silently; each LANE
+# CHANGE (never each render) appends one line so a wrong re-anchor is diagnosable after
+# the fact — the same rationale as the history log (2026-08-08).
+TR="$TMP/.claude/cost-ledger-transitions.log"
+SID8="88888888-0000-0000-0000-000000000001"
+render8() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID8" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+render8 5.0 http://127.0.0.1:4000         # local stretch
+render8 5.2 ""                            # back on cloud with real cost: guard re-anchors
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$TMP/.claude/cost-ledger/$SID8")
+is "local->cloud re-anchor still sets the cloud-delta baseline" "$3" "5.0"
+if grep -q " $SID8 local->cloud " "$TR" 2>/dev/null; then
+  ok "local->cloud transition is logged"
+else
+  bad "local->cloud transition is logged" "a local->cloud line" "$(cat "$TR" 2>/dev/null)"
+fi
+before=$(grep -c " $SID8 " "$TR" 2>/dev/null || true)
+render8 5.9 ""                            # steady cloud render: must NOT log
+after=$(grep -c " $SID8 " "$TR" 2>/dev/null || true)
+is "steady cloud renders do not log" "$after" "$before"
+
+# --- A14: CLOUD -> LOCAL is logged too (the freeze side of the guard), once.
+SID9="99999999-0000-0000-0000-000000000001"
+render9() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID9" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+render9 4.64 ""
+render9 5.10 http://localhost:8000
+if grep -q " $SID9 cloud->local " "$TR" 2>/dev/null; then
+  ok "cloud->local freeze is logged"
+else
+  bad "cloud->local freeze is logged" "a cloud->local line" "-"
+fi
+render9 14.37 http://localhost:8000       # still local: no second line
+n=$(grep -c " $SID9 " "$TR" 2>/dev/null || true)
+is "steady local renders do not log" "$n" "1"
+
+# --- A15: FREE -> CLOUD with a zero render (the CARRY path) is logged.
+SID10="aaaaaaaa-0000-0000-0000-000000000001"
+render10() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID10" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+render10 5.0 http://127.0.0.1:4000
+render10 0 https://llmgw.example.io
+if grep -q " $SID10 local->cloud-zero " "$TR" 2>/dev/null; then
+  ok "local->cloud-zero carry is logged"
+else
+  bad "local->cloud-zero carry is logged" "a carry line" "-"
+fi
+
+# --- A16: NOISE GUARD. Ordinary single-lane sessions log nothing at all.
+SID11="bbbbbbbb-0000-0000-0000-000000000001"
+render11() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID11" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+render11 3.3 ""
+SID12="cccccccc-0000-0000-0000-000000000001"
+printf '{"session_id":"%s","cost":{"total_cost_usd":1.0}}' "$SID12" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="http://127.0.0.1:4000" sh "$WRAPPER" > /dev/null
+is "cloud-only session logs no transition" "$(grep -c " $SID11 " "$TR" 2>/dev/null || true)" "0"
+is "a session's FIRST render logs no transition" "$(grep -c " $SID12 " "$TR" 2>/dev/null || true)" "0"
+
 # --- A7: fail-safe. The passthrough must survive a ledger it cannot write.
 chmod 500 "$TMP/.claude/cost-ledger"
 out="$(render 99 "")"
