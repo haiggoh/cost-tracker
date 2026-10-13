@@ -500,7 +500,9 @@ def read_ledger_today():
     wrapper ~/.claude/scripts/cost-ledger-capture.sh (see memory: cost-ledger-capture).
 
     Each file is named by session UUID and holds '<utc_date> <cum_cost_usd> <baseline>'
-    (3-field, current) or the legacy '<utc_date> <cum_cost_usd>' (2-field). cum_cost_usd
+    (3-field, current), '<utc_date> <cum_cost_usd>' (legacy 2-field), or — on local
+    records since 0.14.0 — up to two further fields (phantom, phantom baseline) that
+    this reader ignores. cum_cost_usd
     is the session's latest cumulative .cost.total_cost_usd — Claude Code's own
     ground-truth number (same as the built-in cost tracker / joyia statusline). baseline
     is the cumulative CARRIED INTO <utc_date> (the cumulative at the last render on the

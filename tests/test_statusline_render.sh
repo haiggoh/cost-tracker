@@ -47,6 +47,22 @@ export COST_TRACKER_SG_LOG="$TMP_NOLOGS/sg/log.txt"
 # to an Anthropic endpoint (the resolver keys off this).
 export ANTHROPIC_BASE_URL="https://api.anthropic.com"
 
+# PIN THE IDENTITY RESOLVER (0.14.0). The renderer prefers the resolver
+# (la-session-identity.sh) over the payload's model, and _fa_find falls back to the
+# developer checkout when COST_FREE_AGENTS_BIN holds no binary — so on a machine with
+# free-agents installed, these payload-pinning tests silently resolved the AMBIENT LIVE
+# session instead: six model assertions rendered the tester's own "nvidia-glm53-thinking"
+# (measured 2026-10-13) instead of the payload's "Opus 5 (1M)". A stub that answers
+# "unknown" sends the renderer down the legacy endpoint-detection path these tests were
+# written against; the resolver-trusted path keeps coverage in the plain-PATH section
+# below, which runs the real helpers under env -i. Note the override is a PRIORITY, not
+# an exclusive pin — a binary MUST exist in the dir or the checkout fallback re-leaks.
+STUB_BIN="$(mktemp -d)"
+printf '%s\n' '#!/bin/sh' 'printf "{\"schema_version\":1,\"session_kind\":\"unknown\",\"unknown_fallback\":true}"' \
+  > "$STUB_BIN/la-session-identity.sh"
+chmod +x "$STUB_BIN/la-session-identity.sh"
+export COST_FREE_AGENTS_BIN="$STUB_BIN"
+
 echo "statusline-render.sh"
 
 FULL='{"model":{"display_name":"Opus 5 (1M)"},"effort":{"level":"high"},

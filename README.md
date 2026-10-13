@@ -74,9 +74,15 @@ cumulative, because the window resets before the reset propagates.
 ## What it reads (and never writes)
 
 ```
-~/.claude/cost-ledger/<session_id>    "<utc_date> <cum> [<baseline>] [<local_phantom>]"
+~/.claude/cost-ledger/<session_id>    "<utc_date> <cum> [<baseline>] [<local_phantom> [<phantom_baseline>]]"
 ~/.claude/cost-ledger-history.log     "<iso_ts> <sid> <utc_date> <cum> <baseline> [<raw>]"
+~/.claude/cost-ledger-transitions.log "<iso_ts> <sid> <lane-change> <k=v ...>"   (0.14.0)
 ```
+
+On local records the phantom attributable to the day is `local_phantom − phantom_baseline`
+(the anchor minus what it carried into the day), so a multi-day free session no longer
+re-donates its earlier days to "today saved". The transitions log appends one line per
+lane change — cloud→local, local→cloud, local→cloud-zero — never per render.
 
 Capture belongs to `bin/cost-ledger-capture.sh`, the statusline wrapper. The flow is
 one-way: status line → ledger → reports.

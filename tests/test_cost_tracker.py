@@ -544,3 +544,69 @@ def test_a_corrupt_or_absurd_markup_falls_back_to_identity_never_to_zero(tmp_pat
         ct.write_config({"contract": 1, "markup": bad})
         ct2, _ = load_ct(tmp_path)
         assert ct2.markup_factor() == 1.0
+
+
+# --- 0.14.0: the phantom gets what the booked axis got on 2026-07-29 ------------------------
+# Field 4 (a session's lifetime phantom anchor) fixed the BOOKED axis's multi-day bug but
+# carried the same defect on its own axis: a free session spanning several UTC days dumps
+# its whole anchor onto whichever day it last renders. Measured 2026-10-13: session
+# c441f503 carried ~$73.77 of pre-midnight phantom into "today saved" (~$427 shown).
+# Field 5 carries the phantom INTO the day, exactly as field 3 carries the booked
+# cumulative, and the aggregation counts the delta — not the anchor.
+
+def test_phantom_baseline_counts_only_todays_accrual(tmp_path):
+    ct, ledger = load_ct(tmp_path)
+    sid = "c441f503-0000-0000-0000-000000000001"
+    (ledger / sid).write_text("2026-09-03 0 0 90.5 73.77")
+    data = ct.collect("today")
+    assert data["local_phantom_usd"] == pytest.approx(16.73)   # 90.5 - 73.77, not 90.5
+
+
+def test_phantom_sum_mixed_rollover_and_fresh_sessions(tmp_path):
+    """The live 2026-10-13 shape: one multi-day session (baseline carried in) beside one
+    that started today (no baseline yet) — each contributes its own slice only."""
+    ct, ledger = load_ct(tmp_path)
+    (ledger / "cccccccc-0000-0000-0000-000000000002").write_text("2026-09-03 0 0 90.5 73.77")
+    (ledger / "cccccccc-0000-0000-0000-000000000003").write_text("2026-09-03 0 0 4.15")
+    data = ct.collect("today")
+    assert data["local_phantom_usd"] == pytest.approx(20.88)   # 16.73 + 4.15
+
+
+def test_phantom_baseline_clamps_at_zero_never_negative(tmp_path):
+    """A resume can restart the phantom counter below the carried-in baseline — the same
+    shape as the booked axis's reset-anchored case. The delta clamps to 0 (a floor),
+    never a negative contribution, mirroring Record.day_usd. The parse assertions keep
+    this test honest: it must pass via clamping, not via the line being quarantined."""
+    ct, ledger = load_ct(tmp_path)
+    sid = "cccccccc-0000-0000-0000-000000000004"
+    rec = ct.parse_ledger_fields(sid, ["2026-09-03", "0", "0", "5.0", "9.0"], "raw")
+    assert rec.valid and rec.axis == "local"
+    (ledger / sid).write_text("2026-09-03 0 0 5.0 9.0")
+    data = ct.collect("today")
+    assert data["quarantined"] == []
+    assert not data.get("local_phantom_usd")    # total 0 -> key suppressed, never negative
+
+
+def test_legacy_four_field_line_keeps_full_phantom(tmp_path):
+    """Pre-0.14.0 local lines have no field 5. Old behaviour (the full anchor counts)
+    must hold so an unupgraded ledger never silently reports $0; it self-heals at the
+    next UTC midnight, exactly as the 2-field legacy rule does for the booked axis."""
+    ct, ledger = load_ct(tmp_path)
+    (ledger / "cccccccc-0000-0000-0000-000000000005").write_text("2026-09-03 0 0 12.0")
+    data = ct.collect("today")
+    assert data["local_phantom_usd"] == pytest.approx(12.0)
+
+
+def test_five_field_line_parses_without_quarantine(tmp_path):
+    """The old parser rejected >4 fields as too-many-fields — a 5-field line from the
+    fixed capture must parse cleanly with the baseline on the record, not land in
+    quarantine (which would silently drop the session from every figure)."""
+    ct, ledger = load_ct(tmp_path)
+    sid = "cccccccc-0000-0000-0000-000000000006"
+    rec = ct.parse_ledger_fields(sid, ["2026-09-03", "0", "0", "90.5", "73.77"], "raw")
+    assert rec.valid and rec.axis == "local"
+    assert rec.phantom == pytest.approx(90.5)
+    assert rec.phantom_base == pytest.approx(73.77)
+    (ledger / sid).write_text("2026-09-03 0 0 90.5 73.77")
+    data = ct.collect("today")
+    assert data["quarantined"] == []
