@@ -87,7 +87,10 @@ def _load_connection():
     from importlib.machinery import SourceFileLoader
     here = os.path.dirname(os.path.realpath(__file__))
     loader = SourceFileLoader("cost_connection", os.path.join(here, "cost_connection.py"))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:  # caught by _resolve()'s fail-open except
+        raise ImportError("cannot build a module spec for cost_connection.py")
+    mod = importlib.util.module_from_spec(spec)
     sys.modules.setdefault(loader.name, mod)
     loader.exec_module(mod)
     return mod
@@ -609,11 +612,7 @@ def _ledger_cum(sid):
 
 def _ledger_first_cum(sid):
     """Return the FIRST cumulative cost ever recorded for `sid` in the history log, or None."""
-    hist = os.environ.get(
-        "BUDGET_TALLY_LEDGER_DIR", os.path.expanduser("~/.claude/cost-ledger")
-    )
-    # The history log lives alongside the ledger dir (one level up in the same parent).
-    # Actually it's at ~/.claude/cost-ledger-history.log — find it relative to LEDGER_DIR.
+    # The history log sits beside the ledger dir: ~/.claude/cost-ledger-history.log.
     hist_path = os.path.join(os.path.dirname(LEDGER_DIR), "cost-ledger-history.log")
     try:
         with open(hist_path, "r", errors="ignore") as f:
@@ -1271,7 +1270,7 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
         basis = "authoritative statusline cost-ledger"
     else:
         basis = "reconstructed from token usage"
-    kind = CONNECTION.get("kind")
+    kind = CONNECTION.get("kind") or ""
     if not CAP_USD:
         # No dollar cap applies to this connection (subscription windows, a Console key's
         # monthly cap, a cloud provider's console) — print the spend with no denominator rather
