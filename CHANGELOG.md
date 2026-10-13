@@ -2,6 +2,22 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.13.0] — 2026-10-13
+
+### Changed — the statusline shows one figure; the budget-tally warning carries the breakdown
+
+On 2026-10-12 the gateway refused at `Current cost: 40.0819`. At that moment the statusline read
+`today: $38.26/$40 gw (~$40.07 +gap)`: the list x fee figure was off by $1.82, and the projection
+with the calibrated gap (x1.0472) was within one cent. So the segment now shows only the
+projection, `today: $40.07/$40`. With no gap calibrated it shows list x fee. The `gw` suffix and
+the `(~$X +gap)` aside are gone.
+
+The `budget-tally.py` line (SessionStart, and the Stop-hook warning) leads with that same figure
+and then lists the steps that apply: the calculated list-price spend with its basis and side
+spenders, then `× <provider> fee` with the billed figure, then `× measured gap` with the number
+of calibration days. On a direct connection with no fee and no gap, nothing is added.
+`cost-tracker report` is unchanged.
+
 ## [0.12.1] — 2026-10-12
 
 ### Fixed — a trimmed history log's first day was calibrated as if it were complete

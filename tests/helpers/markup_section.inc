@@ -52,7 +52,7 @@ contains "no fee: 81% of the raw cap" "$plain" "81% of daily cap"
 # A HAND-SET fee (the legacy hand-set markup migrates to it) moves both figures to the gateway axis.
 marked="$(tally_line "{\"contract\":1,$CAP,\"markup\":{\"factor\":1.2271,\"n_days\":0,\"basis\":\"set by hand\"}}")"
 contains "fee: the cap shown is the gateway's own \$40" "$marked" 'of $40 cap'
-contains "fee: and says the factor was applied" "$marked" 'fee ×1.23 applied'
+contains "fee: and names the factor as a step" "$marked" 'fee 1.23 (set by hand (migrated from markup)) = $39.79'
 contains "fee: the total shown is the BILLED figure, 32.43 x 1.2271" "$marked" '$39.79'
 lacks "fee: no deflated second cap is invented" "$marked" 'effective cap'
 contains "fee: the ledger row on disk is still list price" \
@@ -65,9 +65,15 @@ contains "a corrupt factor falls back to the raw cap" "$broken" 'of $40 cap'
 # A LEARNED markup is an observation: it migrates to the GAP, which the warning projects and
 # names separately, while the fee and the billed figure stay at list price.
 gap="$(tally_line "{\"contract\":1,$CAP,\"markup\":{\"factor\":1.1,\"n_days\":7,\"cv\":0.02,\"basis\":\"measured\"}}")"
-contains "gap: the billed figure stays list x fee (fee 1.0)" "$gap" '≈ $32.43 of $40 cap'
-contains "gap: the projection is named as an unknown" "$gap" 'measured gap ×1.100 (cause unknown)'
+# 0.13.0: the HEADLINE is the projection (what the gateway will quote); the breakdown follows.
+contains "gap: the headline is the projection, 32.43 x 1.1" "$gap" '≈ $35.67 of $40 cap'
+contains "gap: the breakdown starts from the calculated list figure" "$gap" 'calculated $32.43 at list price'
+contains "gap: the projection is named as an unknown" "$gap" 'measured gap 1.100 (cause unknown, calibrated on 7 refusal day(s)) = $35.67'
+lacks "gap: no fee step when the fee is 1.0" "$gap" ' fee '
 contains "gap: the WARNING fires on the projection (32.43 x 1.1 = 89%)" "$gap" '89% of daily cap'
+both="$(tally_line "{\"contract\":1,$CAP,\"fee\":{\"factor\":1.05},\"gap\":{\"factor\":1.1,\"n_days\":7}}")"
+contains "fee+gap: headline = 32.43 x 1.05 x 1.1" "$both" '≈ $37.46 of $40 cap'
+contains "fee+gap: the fee step shows the billed figure" "$both" 'fee 1.05 (set by hand) = $34.05'
 nogap="$(COST_TRACKER_APPLY_GAP=0 tally_line "{\"contract\":1,$CAP,\"gap\":{\"factor\":1.1,\"n_days\":7}}")"
 lacks "gap: COST_TRACKER_APPLY_GAP=0 removes the projection" "$nogap" 'measured gap'
 

@@ -445,7 +445,7 @@ def test_a_markup_moves_the_denominator_and_never_our_measured_total(tmp_path):
     # says $40, so anything else on the denominator confuses. The list-price figure and
     # the effective cap remain in the DATA (asserted above) and in `report`.
     line = ct.render_statusline(data)
-    assert line == "today: $37.65/$40 gw"
+    assert line == "today: $37.65/$40"
     assert "$32" not in line and "eff" not in line
     # 94% of the effective cap, not the reassuring 75% of the raw one.
     assert data["billed_pct_of_cap"] == pytest.approx(37.65 / 40, abs=1e-4)

@@ -198,7 +198,7 @@ def test_a_known_gateway_bills_list_times_fee_and_projects_the_gap(tmp_path, mon
     assert data["fee"] == 1.05 and "llmgateway.io/pricing" in data["fee_source"]
     assert data["billed_usd"] == pytest.approx(31.5)           # list x fee only
     assert data["projected_usd"] == pytest.approx(33.075)      # x gap, separately
-    assert ct.render_statusline(data) == "today: $31.50/$40 gw (~$33.08 +gap)"
+    assert ct.render_statusline(data) == "today: $33.08/$40"   # the projection IS the figure
 
 
 def test_the_gap_projection_can_be_turned_off(tmp_path, monkeypatch):
@@ -206,7 +206,7 @@ def test_the_gap_projection_can_be_turned_off(tmp_path, monkeypatch):
              cfg=dict(LEARNED_40, gap={"factor": 1.05, "n_days": 7}), COST_TRACKER_APPLY_GAP="0")
     data = ct.collect("today")
     assert data["projected_usd"] is None and data["gap"] == 1.05
-    assert ct.render_statusline(data) == "today: $31.50/$40 gw"
+    assert ct.render_statusline(data) == "today: $31.50/$40"
 
 
 def test_map_host_writes_locally_and_rejects_an_unknown_provider(tmp_path, monkeypatch, capsys):

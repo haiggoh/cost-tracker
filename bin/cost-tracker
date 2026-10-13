@@ -1456,9 +1456,9 @@ def render_table(data, short_ids=True):
 def render_statusline(data):
     """The frozen one-line statusline segment.
 
-      with a cap:    today: $37.35/$40 gw
+      with a cap:    today: $37.35/$40
       without a cap: today: $12.40
-      with savings:  today: cloud $37.35/$40 gw · local saved $4.80
+      with savings:  today: cloud $37.35/$40 · local saved $4.80
 
     The axis word is part of the string, not decoration: this segment coexists
     with the renderer's own session-lifetime "$<cost>", and two unlabelled
@@ -1472,11 +1472,15 @@ def render_statusline(data):
     refusal and $32 here. Showing a deflated cap to keep the numerator at list price
     optimised for the wrong reader. The full four-figure breakdown (list price, billed,
     cap, effective cap) stays in `cost-tracker report`, which has room to label axes;
-    this segment has one line and must therefore pick ONE axis and name it.
+    this segment has one line and must therefore pick ONE axis.
+
+    0.13.0 dropped the "gw" suffix and the "(~$X +gap)" aside (user decision 2026-10-13):
+    the numerator is the projection when a gap is calibrated, else list x fee, and the
+    "/$cap" denominator already says which axis it is on. The breakdown moved to the
+    budget-tally warning.
     """
     cap = data["cap_usd"]
     label = "today" if len(data["period_days_utc"]) == 1 else data["period"]
-    markup = data.get("markup") or MARKUP_IDENTITY
     # "cloud" is a CONTRAST word: it exists to separate cloud spend from the local-inference
     # savings figure. With no local figure beside it there is nothing to contrast with, so it
     # is noise on a line that has no room for any — and a cloud session shows no savings.
@@ -1499,18 +1503,15 @@ def render_statusline(data):
         # the dollar figure honestly.
         seg = f"{label}: {what}≈${data['cloud_usd']:.2f} api-equiv"
     elif cap:
-        if markup != MARKUP_IDENTITY:
-            # Gateway axis: the numerator is what the gateway bills, against the cap the
-            # gateway actually enforces. "gw" marks the axis so the figure is never read
-            # as Claude Code's own list-price total, which is the smaller number.
-            seg = f"{label}: {what}${data['billed_usd']:.2f}/${cap:.0f} gw"
-        else:
-            # No markup: the two axes are identical, so there is nothing to name.
-            seg = f"{label}: {what}${data['billed_usd']:.2f}/${cap:.0f}"
-        if data.get("projected_usd") is not None:
-            # The measured gap, cause unknown: a projection BESIDE the billed figure, never in
-            # place of it. "~" marks an estimate and "+gap" names its basis.
-            seg += f" (~${data['projected_usd']:.2f} +gap)"
+        # ONE figure against the gateway's cap: the best estimate of what the gateway's own
+        # `Current cost` reads. With a calibrated gap that is the projection (list x fee x gap),
+        # which matched the refusal to the cent on 2026-10-12 ($40.07 shown, $40.08 quoted)
+        # while list x fee read $38.26. Showing both on one line made the user do the
+        # comparison; the fee/gap breakdown lives in the budget-tally warning and `report`.
+        shown = data.get("projected_usd")
+        if shown is None:
+            shown = data["billed_usd"]
+        seg = f"{label}: {what}${shown:.2f}/${cap:.0f}"
     else:
         seg = f"{label}: {what}${data['billed_usd']:.2f}"
     if saved is not None:

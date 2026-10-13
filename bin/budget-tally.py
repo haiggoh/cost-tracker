@@ -87,7 +87,10 @@ def _load_connection():
     from importlib.machinery import SourceFileLoader
     here = os.path.dirname(os.path.realpath(__file__))
     loader = SourceFileLoader("cost_connection", os.path.join(here, "cost_connection.py"))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:  # caught by _resolve()'s fail-open except
+        raise ImportError("cannot build a module spec for cost_connection.py")
+    mod = importlib.util.module_from_spec(spec)
     sys.modules.setdefault(loader.name, mod)
     loader.exec_module(mod)
     return mod
@@ -609,11 +612,7 @@ def _ledger_cum(sid):
 
 def _ledger_first_cum(sid):
     """Return the FIRST cumulative cost ever recorded for `sid` in the history log, or None."""
-    hist = os.environ.get(
-        "BUDGET_TALLY_LEDGER_DIR", os.path.expanduser("~/.claude/cost-ledger")
-    )
-    # The history log lives alongside the ledger dir (one level up in the same parent).
-    # Actually it's at ~/.claude/cost-ledger-history.log — find it relative to LEDGER_DIR.
+    # The history log sits beside the ledger dir: ~/.claude/cost-ledger-history.log.
     hist_path = os.path.join(os.path.dirname(LEDGER_DIR), "cost-ledger-history.log")
     try:
         with open(hist_path, "r", errors="ignore") as f:
@@ -1271,7 +1270,7 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
         basis = "authoritative statusline cost-ledger"
     else:
         basis = "reconstructed from token usage"
-    kind = CONNECTION.get("kind")
+    kind = CONNECTION.get("kind") or ""
     if not CAP_USD:
         # No dollar cap applies to this connection (subscription windows, a Console key's
         # monthly cap, a cloud provider's console) — print the spend with no denominator rather
@@ -1289,21 +1288,27 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
     # gateway's cap and its refusal message quotes that number. The FEE is published and
     # deterministic; the GAP is measured and unexplained, so it is named separately and its
     # projection is shown beside the billed figure, never in place of it.
-    shown_total = total * MARKUP
-    shown_remaining = CAP_USD - shown_total
+    # 0.13.0 (user decision 2026-10-13): the HEADLINE is the best estimate of the gateway's own
+    # `Current cost` — list x fee x gap — the same figure the statusline shows. The breakdown
+    # follows it, one named step per factor, and only for the factors that apply.
+    billed = total * MARKUP
+    projected = billed * (GAP or 1.0)
+    headline = (f"{prefix}today's spend ({session_scope}) ≈ ${projected:.2f} of ${CAP_USD:.0f} cap "
+                f"(~${CAP_USD - projected:.2f} left)")
+    if MARKUP == 1.0 and not GAP:
+        return f"{headline} — {basis}{side_spend_note(LAST_BY_SOURCE)}{note}"
+    provider = CONNECTION.get("provider") or "gateway"
+    steps = [f"calculated ${total:.2f} at list price ({basis}{side_spend_note(LAST_BY_SOURCE)})"]
     if MARKUP != 1.0:
-        provider = CONNECTION.get("provider") or "gateway"
-        cap_str = f"${CAP_USD:.0f} cap ({provider} fee ×{MARKUP:.2f} applied)"
-    else:
-        cap_str = f"${CAP_USD:.0f} cap"
-    gap_note = ""
+        # The registry's citation is a URL plus a quote — right for `report`, too long here.
+        src = CONNECTION.get("fee_source") or ""
+        src = "published markup" if not src or "http" in src else src
+        steps.append(f"× {provider} fee {MARKUP:.2f} ({src}) = ${billed:.2f}")
     if GAP:
-        gap_note = (f"; incl. measured gap ×{GAP:.3f} (cause unknown) ≈ ${shown_total * GAP:.2f}, "
-                    f"~${CAP_USD - shown_total * GAP:.2f} left")
-    return (
-        f"{prefix}today's spend ({session_scope}) ≈ ${shown_total:.2f} of {cap_str} "
-        f"(~${shown_remaining:.2f} left{gap_note}, {basis}{side_spend_note(LAST_BY_SOURCE)}){note}"
-    )
+        n = CONNECTION.get("gap_n_days")
+        cal = f", calibrated on {n} refusal day(s)" if n else ""
+        steps.append(f"× measured gap {GAP:.3f} (cause unknown{cal}) = ${projected:.2f}")
+    return f"{headline} — " + " ".join(steps) + note
 
 
 def main_session_start():

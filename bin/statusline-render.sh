@@ -14,7 +14,7 @@
 # Line 2 (the SPEND line: both dollar figures together, today first since that is the one
 # measured against the cap. Its own line since 0.5.1 -- sharing line 1 overflowed one
 # terminal width and wrapped):
-#   session $<cost> · today: $<spent>/$<cap> gw
+#   session $<cost> · today: $<spent>/$<cap>
 # Line 3 (variable-length names, which can be long, + the previous git fields):
 #   <dir basename> · <branch> · <worktree> · +<added>/-<removed>
 #
@@ -41,7 +41,7 @@ Reads the statusLine JSON payload on stdin and prints up to three lines:
 
   CLOUD SESSION:
     JoyIA · <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
-    session $<cost> · today: $<billed>/$<cap> gw · local saved $<saved>
+    session $<cost> · today: $<spent>/$<cap> · local saved $<saved>
   LOCAL SESSION (ANTHROPIC_BASE_URL=localhost:8000-8010):
     <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
     local session saved $<session_phantom> · today: $<daily_saved> saved with free agents
@@ -461,7 +461,7 @@ fi
 #                                 X = this session's phantom, Y = combined daily savings
 #   FREE_API (ports 4141-4151):   "free api session saved $X · today: $Y saved with free agents"
 #                                 X = this session's phantom, Y = combined daily savings
-#   CLOUD (default):              "session $X · today: $Z/$cap gw · local saved $W"
+#   CLOUD (default):              "session $X · today: $Z/$cap · local saved $W"
 TODAY_LINE=
 if [ "$SESSION_KIND" = "local" ] || [ "$SESSION_KIND" = "free_api" ]; then
     # FREE session. Both lanes render identically apart from the label, so they share one
