@@ -1289,21 +1289,27 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
     # gateway's cap and its refusal message quotes that number. The FEE is published and
     # deterministic; the GAP is measured and unexplained, so it is named separately and its
     # projection is shown beside the billed figure, never in place of it.
-    shown_total = total * MARKUP
-    shown_remaining = CAP_USD - shown_total
+    # 0.13.0 (user decision 2026-10-13): the HEADLINE is the best estimate of the gateway's own
+    # `Current cost` — list x fee x gap — the same figure the statusline shows. The breakdown
+    # follows it, one named step per factor, and only for the factors that apply.
+    billed = total * MARKUP
+    projected = billed * (GAP or 1.0)
+    headline = (f"{prefix}today's spend ({session_scope}) ≈ ${projected:.2f} of ${CAP_USD:.0f} cap "
+                f"(~${CAP_USD - projected:.2f} left)")
+    if MARKUP == 1.0 and not GAP:
+        return f"{headline} — {basis}{side_spend_note(LAST_BY_SOURCE)}{note}"
+    provider = CONNECTION.get("provider") or "gateway"
+    steps = [f"calculated ${total:.2f} at list price ({basis}{side_spend_note(LAST_BY_SOURCE)})"]
     if MARKUP != 1.0:
-        provider = CONNECTION.get("provider") or "gateway"
-        cap_str = f"${CAP_USD:.0f} cap ({provider} fee ×{MARKUP:.2f} applied)"
-    else:
-        cap_str = f"${CAP_USD:.0f} cap"
-    gap_note = ""
+        # The registry's citation is a URL plus a quote — right for `report`, too long here.
+        src = CONNECTION.get("fee_source") or ""
+        src = "published markup" if not src or "http" in src else src
+        steps.append(f"× {provider} fee {MARKUP:.2f} ({src}) = ${billed:.2f}")
     if GAP:
-        gap_note = (f"; incl. measured gap ×{GAP:.3f} (cause unknown) ≈ ${shown_total * GAP:.2f}, "
-                    f"~${CAP_USD - shown_total * GAP:.2f} left")
-    return (
-        f"{prefix}today's spend ({session_scope}) ≈ ${shown_total:.2f} of {cap_str} "
-        f"(~${shown_remaining:.2f} left{gap_note}, {basis}{side_spend_note(LAST_BY_SOURCE)}){note}"
-    )
+        n = CONNECTION.get("gap_n_days")
+        cal = f", calibrated on {n} refusal day(s)" if n else ""
+        steps.append(f"× measured gap {GAP:.3f} (cause unknown{cal}) = ${projected:.2f}")
+    return f"{headline} — " + " ".join(steps) + note
 
 
 def main_session_start():

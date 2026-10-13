@@ -223,7 +223,7 @@ WIDEST=$(printf '%s' "$OUT" | awk '{ if (length($0) > m) m = length($0) } END { 
 # grepping for the string — argparse-style help never appears in the source.
 H="$(ANTHROPIC_BASE_URL=https://api.anthropic.com sh "$RENDER" --help 2>&1 </dev/null)"
 has  "--help explains what the script does" "$H" 'render the Claude Code status line'
-has  "--help lists the lines it prints" "$H" 'today: $<billed>'
+has  "--help lists the lines it prints" "$H" 'today: $<spent>/$<cap>'
 has  "--help documents the env var" "$H" 'COST_TRACKER_STATUSLINE=0'
 # It must not RENDER. The help text legitimately shows the layout, so the tell cannot be
 # the literal "JoyIA" — it is a rendered VALUE: a real run of this script always emits a
