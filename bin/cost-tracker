@@ -35,6 +35,8 @@ Environment overrides (all optional):
   COST_TRACKER_FEE          gateway fee override (alias COST_TRACKER_MARKUP); 1 = none
   COST_TRACKER_APPLY_GAP    0 = warnings do not project the measured gap
   COST_TRACKER_PROVIDERS    provider fee registry (default <plugin>/config/providers.json)
+  COST_TRACKER_PROXY_PRICES_URL  gateway price-table URL (default <base>/model/info); off = never probe
+  COST_TRACKER_OFFICIAL_PRICES   official Anthropic price JSON (default config/anthropic-prices.json)
   COST_TRACKER_TODAY        override "today" as YYYY-MM-DD (tests)
   COST_TRACKER_SAVINGS_CMD  argv (shell-split) printing savings-ledger JSON
   COST_TRACKER_ESTIMATES    0 = ledger only; no no-ledger / classifier estimate
@@ -1720,7 +1722,16 @@ def render_fee(conn):
         lines.append("  gateway. This connection is billed (or metered) at list price; that is the")
         lines.append("  correct and expected state, not a missing measurement.")
     lines.append("")
-    if conn.get("gap"):
+    if conn.get("price_table"):
+        lines.append("  The gateway publishes its own per-model price table; this factor is its "
+                     "median ratio")
+        lines.append("  to official Anthropic prices. `cost-tracker prices` lists every row.")
+        lines.append("")
+    if conn.get("gap_superseded"):
+        lines.append(f"measured gap: ×{conn['gap_superseded']:.4f} SUPERSEDED — the gateway's "
+                     "price table explains it,")
+        lines.append("  so it is no longer projected. `cost-tracker markup --clear` forgets it.")
+    elif conn.get("gap"):
         lines.append(f"measured gap: ×{conn['gap']:.4f} on top of list × fee — CAUSE UNKNOWN")
         lines.append(f"  from {conn.get('gap_n_days') or '?'} calibrated refusal day(s)"
                      + (f", CV {conn['gap_cv']:.3f}" if conn.get("gap_cv") is not None else "")
@@ -1752,6 +1763,65 @@ def render_markup(cfg, resolved):
     return render_fee(connection())
 
 
+_PP_MODULE = None
+
+
+def _proxy_prices():
+    """bin/proxy_prices.py, loaded by path (same shape as _connection())."""
+    global _PP_MODULE
+    if _PP_MODULE is None:
+        _PP_MODULE = sys.modules.get("proxy_prices")
+    if _PP_MODULE is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        loader = SourceFileLoader("proxy_prices", os.path.join(here, "proxy_prices.py"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _PP_MODULE = mod
+    return _PP_MODULE
+
+
+def _official_meta():
+    try:
+        with open(_proxy_prices().OFFICIAL_PATH) as f:
+            return json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def render_prices(conn, entry, pp):
+    meta = _official_meta()
+    lines = [f"official prices: {len(meta.get('models') or {})} Claude model(s) from "
+             f"{meta.get('source') or '?'} (verified {meta.get('verified_at') or '?'})"]
+    if conn.get("kind") != "gateway":
+        lines.append(f"connection: {KIND_LABEL.get(conn['kind'], conn['kind'])} — official "
+                     "prices apply as-is; no gateway table to look for.")
+        return "\n".join(lines)
+    lines.append(pp.summary(entry))
+    if entry and entry.get("proxy"):
+        lines.append("  per model: the gateway's own row where it lists the model; any other "
+                     "model is priced")
+        lines.append("  as official × the derived markup, so a new model is never priced at "
+                     "list or at $0.")
+        official = pp.load_official()
+        rows = []
+        for name in sorted(set(official) | set(entry.get("models") or {})):
+            rates, basis = pp.price_for(name, entry, official)
+            if rates:
+                rows.append(f"    {name:<22} in {rates['input']:<7.4g} out {rates['output']:<7.4g}"
+                            f" cache r {rates.get('cache_read', 0):<7.4g} w5m "
+                            f"{rates.get('cache_write_5m', 0):<7.4g} [{basis}]")
+        lines.append("  $/MTok as billed:")
+        lines.extend(rows)
+    if conn.get("gap_superseded"):
+        lines.append(f"  measured gap ×{conn['gap_superseded']:.4f} is SUPERSEDED by the price "
+                     "table and no longer applied")
+        lines.append("    (`cost-tracker markup --clear` forgets it).")
+    return "\n".join(lines)
+
+
 def render_connection(conn):
     lines = [f"connection: {KIND_LABEL.get(conn['kind'], conn['kind'])}"]
     if conn.get("host"):
@@ -1777,6 +1847,13 @@ def render_connection(conn):
     if conn.get("gap"):
         lines.append(f"  measured gap:  ×{conn['gap']:.4f} beyond the fee, cause unknown "
                      f"({conn.get('gap_n_days')} day(s))")
+    if conn.get("price_table"):
+        pt = conn["price_table"]
+        lines.append(f"  price table:   the gateway's own, {pt['models']} Claude model(s); "
+                     f"custom rows: {', '.join(pt['custom']) or 'none'}  (`cost-tracker prices`)")
+    if conn.get("gap_superseded"):
+        lines.append(f"  measured gap:  ×{conn['gap_superseded']:.4f} SUPERSEDED by the price "
+                     "table, not applied")
     return "\n".join(lines)
 
 
@@ -1909,6 +1986,13 @@ def main(argv=None):
     cn.add_argument("--unmap-host", metavar="HOST", dest="unmap_host")
     cn.add_argument("--json", action="store_true")
 
+    pr = sub.add_parser("prices",
+                        help="which price table applies: official Anthropic, or the gateway's own")
+    pr.add_argument("--refresh", action="store_true",
+                    help="ask the gateway for its price table now (otherwise re-learned daily "
+                         "in the background)")
+    pr.add_argument("--json", action="store_true")
+
     mk = sub.add_parser("markup", help="(pre-0.12) show the fee and the measured gap together")
     mk.add_argument("--set", metavar="FACTOR", dest="set_markup",
                     help="same as `fee --set`")
@@ -2003,6 +2087,19 @@ def main(argv=None):
         print(render_fee(conn))
         return 0
 
+    if cmd == "prices":
+        pp = _proxy_prices()
+        entry = pp.refresh(os.environ, force=True) if args.refresh else pp.cached(os.environ)
+        conn = connection()
+        if args.json:
+            print(json.dumps({"contract": CONTRACT, "connection": conn.get("kind"),
+                              "official_source": _official_meta().get("source"),
+                              "official_verified_at": _official_meta().get("verified_at"),
+                              "proxy": entry}, indent=2, sort_keys=True))
+            return 0
+        print(render_prices(conn, entry, pp))
+        return 0
+
     if cmd == "connection":
         if args.map_host or args.unmap_host:
             cfg = read_config() or {"contract": CONTRACT}
@@ -2087,6 +2184,12 @@ def main(argv=None):
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
     if cmd == "statusline":
+        # Re-learn a gateway's own price table when the cached copy has aged out (detached,
+        # one file read when fresh) — so a user without the budget-tally hooks still gets it.
+        try:
+            _proxy_prices().spawn_refresh(os.environ)
+        except Exception:
+            pass
         print(render_statusline(data))
     elif cmd == "doctor":
         print(render_doctor(data))

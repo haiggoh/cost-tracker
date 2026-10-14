@@ -48,7 +48,9 @@ def test_sonnet_5_5_is_priced_at_its_list_rate(tmp_path):
     r = bt.rate_for("claude-sonnet-5-5")
     assert r["input"] == pytest.approx(2e-6)
     assert r["output"] == pytest.approx(10e-6)
-    assert r["cache_read"] == pytest.approx(2e-7)
+    # $0.10, NOT $0.20: Sonnet 5.5 cache hits are 0.05x input (official pricing footnote 2,
+    # verified 2026-10-14). The pre-0.15 inline table and this test both said 0.1x.
+    assert r["cache_read"] == pytest.approx(1e-7)
     assert bt.rate_for("claude-sonnet-5-5[1m]") == r
 
 

@@ -151,15 +151,15 @@ YESTERDAY = (date.fromisoformat(TODAY) - timedelta(days=1)).isoformat()
 # intro_until: if set and TODAY <= that date, use intro_input/intro_output.
 PRICING = {
     "claude-sonnet-5": {
-        "input": 3.00e-6, "output": 15.00e-6,
-        "intro_input": 2.00e-6, "intro_output": 10.00e-6, "intro_until": "2026-08-31",
-        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
-    },
-    # Sonnet 5.5 (2026-09): $2 / $10 per MTok, cache read $0.20 (0.1x), per the claude-api skill
-    # and LiteLLM's table. Missing until 0.10.1, so 2026-10-03's Sonnet 5.5 session priced at $0.
-    "claude-sonnet-5-5": {
+        # $2/$10 announced as intro pricing, made the standard price (official footnote, 10-14).
         "input": 2.00e-6, "output": 10.00e-6,
         "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    # Sonnet 5.5 (2026-09): $2 / $10 per MTok, cache read $0.10 (0.05x — official footnote;
+    # 0.1x until 0.15.0). Missing until 0.10.1, so 2026-10-03's Sonnet 5.5 session priced at $0.
+    "claude-sonnet-5-5": {
+        "input": 2.00e-6, "output": 10.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.05,
     },
     "claude-sonnet-4-6": {
         "input": 3.00e-6, "output": 15.00e-6,
@@ -201,6 +201,35 @@ PRICING = {
         "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.025,
     },
 }
+
+
+# 0.15.0: the table above is now only the FALLBACK. The source of truth is
+# config/anthropic-prices.json — Anthropic's official list, cited and dated — shared with
+# bin/proxy_prices.py, which compares a gateway's own table against it. Loading it here means a
+# price change is one JSON edit, not two hand-kept copies drifting apart (the inline table had
+# already drifted: Sonnet 5 was still at $3/$15 after Anthropic made $2/$10 permanent).
+def _load_official_pricing():
+    path = os.environ.get("COST_TRACKER_OFFICIAL_PRICES", os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "config", "anthropic-prices.json"))
+    try:
+        with open(path) as f:
+            models = (json.load(f) or {}).get("models") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    out = {}
+    for name, r in models.items():
+        try:
+            inp = float(r["input"]) / 1e6
+            out[name] = {"input": inp, "output": float(r["output"]) / 1e6,
+                         "cache_write_5m_mult": float(r["cache_write_5m"]) / 1e6 / inp,
+                         "cache_write_1h_mult": float(r["cache_write_1h"]) / 1e6 / inp,
+                         "cache_read_mult": float(r["cache_read"]) / 1e6 / inp}
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+    return out or None
+
+
+PRICING = _load_official_pricing() or PRICING
 
 
 # Pseudo-models that appear in the "model" field of a transcript record but are NOT billable
@@ -347,7 +376,7 @@ def _pricing_entry(model):
 
 
 def is_priced(model):
-    return _pricing_entry(model)[0] is not None
+    return _pricing_entry(model)[0] is not None or _proxy_rate(model) is not None
 
 
 def _entry_from_litellm(row):
@@ -458,7 +487,35 @@ def spawn_price_sync(models):
         pass
 
 
+def _proxy_rate(model):
+    """A gateway's OWN row for `model`, expressed on the LIST axis (divided by the connection
+    fee), or None. Everything this script reconstructs is multiplied by the fee afterwards, so
+    returning row / fee makes that product the gateway's exact row — a model the gateway
+    prices off its usual markup (a CUSTOM row) is then priced as billed, not as list x markup."""
+    pt = CONNECTION.get("price_table")
+    if not pt or not MARKUP:
+        return None
+    try:
+        mod = sys.modules.get("proxy_prices")
+        if mod is None:
+            return None
+        row, basis = mod.price_for(model, mod.cached(os.environ))
+    except Exception:
+        return None
+    if basis != "proxy table" or not row or "input" not in row or "output" not in row:
+        return None
+    k = 1e-6 / MARKUP
+    inp = row["input"] * k
+    return {"input": inp, "output": row["output"] * k,
+            "cache_write_5m": row.get("cache_write_5m", row["input"] * 1.25) * k,
+            "cache_write_1h": row.get("cache_write_1h", row["input"] * 2.0) * k,
+            "cache_read": row.get("cache_read", row["input"] * 0.1) * k}
+
+
 def rate_for(model):
+    proxy = _proxy_rate(model)
+    if proxy is not None:
+        return proxy
     p, source = _pricing_entry(model)
     if p is None:
         return None
@@ -1313,7 +1370,29 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
     return f"{headline} — " + " ".join(steps) + note
 
 
+def spawn_proxy_price_refresh():
+    """Re-learn the gateway's own price table in the background when the cached copy is older
+    than its TTL (bin/proxy_prices.py). A no-op off a gateway; never waits on the network."""
+    try:
+        mod = sys.modules.get("proxy_prices")
+        if mod is None:
+            from importlib.machinery import SourceFileLoader
+            import importlib.util
+            loader = SourceFileLoader("proxy_prices", os.path.join(
+                os.path.dirname(os.path.realpath(__file__)), "proxy_prices.py"))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            if spec is None:
+                return
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[loader.name] = mod
+            loader.exec_module(mod)
+        mod.spawn_refresh(os.environ)
+    except Exception:
+        pass
+
+
 def main_session_start():
+    spawn_proxy_price_refresh()
     total, pct, remaining, unknown_models, priced_any, current_session_total, ledger_total, recon_total = compute()
     if not priced_any:
         spawn_price_sync(SEEN_MODELS)
@@ -1385,6 +1464,8 @@ Environment:
   COST_TRACKER_HISTORY                          history log path
   COST_TRACKER_PROJECTS_DIR                     transcripts dir used for reconstruction
   COST_TRACKER_PRICES_URL                       price table to sync unknown models from
+  COST_TRACKER_OFFICIAL_PRICES                  official price JSON (default config/anthropic-prices.json)
+  COST_TRACKER_PROXY_PRICES_URL                 gateway price-table URL (default <base>/model/info); off = never probe
   COST_TRACKER_NO_PRICE_SYNC                    1 = never start the background price lookup
   COST_TRACKER_REMEMBER_DIRS                    colon-separated remember dirs whose logs/ are summed
                                                 (default ~/.remember + ~/ClaudeWorkspace/*/.remember)

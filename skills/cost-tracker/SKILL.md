@@ -141,6 +141,12 @@ being used to decide whether there is headroom, because the error runs in the di
 walks a session into a hard stop while the display still promises room. "$32.43 of $40" is
 the shape of that trap.
 
+- **First, since 0.15.0: run `cost-tracker prices`.** A gateway that publishes its own
+  price table (LiteLLM `/model/info`) is priced from THAT table, learned automatically in the
+  background. Its rows are the bill, so no fee or gap needs learning, and a stored gap shows as
+  SUPERSEDED. The fee/gap steps below apply only to a gateway that publishes no table. Never
+  assume "list price + a reseller's published fee": that assumption once hid a flat ×1.10
+  regional-endpoint price behind a ×1.05 fee and a ×1.047 "unknown gap".
 - Run `cost-tracker markup` to see whether a factor is recorded on this machine. If one is,
   `statusline` and `budget-tally` already report against the **effective** cap and you can
   quote the percentage as-is.

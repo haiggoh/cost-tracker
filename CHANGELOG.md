@@ -2,6 +2,40 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.15.0] — 2026-10-14
+
+### Added — a gateway's own price table, and an official price registry
+
+On 2026-10-14 the gateway's budget turned out to be priced from its OWN table: LiteLLM's
+`GET <base>/model/info`. Every Claude row in it was official × 1.10 on every token type, which
+is Anthropic's documented 10% premium for regional cloud endpoints. cost-tracker had split that
+one factor into a reseller's 5% "fee" (a wrong host mapping) and a ×1.047 "gap" of unknown
+cause. 1.05 × 1.047 = 1.099, so the totals were right while the model behind them was wrong.
+
+- `config/anthropic-prices.json`: Anthropic's official prices (all 5 token types, Haiku 5.5's
+  >100k tier), citing platform.claude.com/docs/en/about-claude/pricing, verified 2026-10-14.
+  `budget-tally.py` now reads it; the inline table is only a fallback.
+- `bin/proxy_prices.py`: on a non-Anthropic, non-local endpoint, probes `<base>/model/info`
+  (detached, at most daily, credential sent via stdin). It caches the table per host in
+  `<config>/proxy-prices.json`, derives the markup (median gateway/official ratio) and flags
+  rows >2% off it as custom. A failed probe keeps the last table. Detection is by behaviour;
+  no hostname is shipped.
+- Resolution on such a gateway: listed model → its own row; unlisted model → official × derived
+  markup. The connection fee becomes the derived markup and a stored gap is reported as
+  SUPERSEDED, not applied. With no table, 0.14 behaviour is unchanged.
+- `cost-tracker prices [--refresh] [--json]`: which table applies, the markup, custom rows,
+  and every model's billed rate. `connection` and `fee` show the table and the superseded gap.
+- The SessionStart hook and `statusline` trigger the background refresh.
+
+### Fixed
+
+- Sonnet 5.5 cache reads are 0.05× input ($0.10/MTok), not 0.1×. The test pinned the wrong value.
+- Sonnet 5 fallback rates: the $2/$10 introductory price became the standard price
+  (official footnote); the inline table still reverted to $3/$15 after 2026-08-31.
+
+Verified on the live gateway: `calibrate` reads a median 100.0% of the gateway's own
+`Current cost` over 11 refusal days (was ~95.5% at list × 1.05), with no gap applied.
+
 ## [0.14.0] — 2026-10-13
 
 ### Fixed — "saved with free agents" is now the day's accrual, not a lifetime dump

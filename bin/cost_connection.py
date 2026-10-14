@@ -28,6 +28,7 @@ never folded into the fee: a fitted constant once hid real unseen spend for week
 """
 import json
 import os
+import sys
 from urllib.parse import urlparse
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -106,6 +107,26 @@ def _provider_for(host, registry, cfg):
     return None, None
 
 
+def _proxy_entry(env):
+    """This gateway's CACHED price table (bin/proxy_prices.py), or None. Reads a file only —
+    the probe itself runs detached, so the statusline never waits on the network."""
+    try:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        mod = sys.modules.get("proxy_prices")
+        if mod is None:
+            loader = SourceFileLoader("proxy_prices", os.path.join(HERE, "proxy_prices.py"))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            if spec is None:
+                return None
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[loader.name] = mod
+            loader.exec_module(mod)
+        return mod.cached(env)
+    except Exception:
+        return None
+
+
 def _env_float(env, *names):
     for n in names:
         raw = env.get(n)
@@ -148,27 +169,45 @@ def resolve_connection(env=None, payload=None):
     out = {"kind": kind, "host": host or None, "provider": None, "provider_source": None,
            "fee": IDENTITY, "fee_source": "none (list price)",
            "cap_usd": None, "cap_kind": "none", "cap_period": None, "cap_source": None,
-           "windows": None, "gap": None, "gap_n_days": None, "gap_cv": None}
+           "windows": None, "gap": None, "gap_n_days": None, "gap_cv": None,
+           "price_table": None, "gap_superseded": None}
 
     if kind == "gateway":
         registry = read_registry()
         provider, psrc = _provider_for(host, registry, cfg)
-        out["provider"], out["provider_source"] = provider, psrc
+        proxy = _proxy_entry(env)
         p = registry.get(provider) or {}
         env_fee = _env_float(env, "COST_TRACKER_FEE", "COST_TRACKER_MARKUP")
         hand = cfg.get("fee") if isinstance(cfg.get("fee"), dict) else None
+        gap = cfg.get("gap") if isinstance(cfg.get("gap"), dict) else None
+        if proxy and proxy.get("markup"):
+            # 0.15.0: the gateway publishes its OWN price table. That table IS the bill, so it
+            # outranks a registry fee matched by host, and it makes a measured gap obsolete —
+            # the gap only ever existed because the real table was unknown.
+            provider, psrc = "price-table proxy", "the gateway's own /model/info"
+            out["price_table"] = {"markup": proxy["markup"], "models": len(proxy.get("models") or {}),
+                                  "matched": proxy.get("matched"), "custom": proxy.get("custom") or [],
+                                  "fetched_at": proxy.get("fetched_at"),
+                                  "last_error": proxy.get("last_error")}
+        out["provider"], out["provider_source"] = provider, psrc
         if env_fee:
             out["fee"], out["fee_source"] = env_fee, "env override"
         elif hand and hand.get("factor"):
             out["fee"] = float(hand["factor"])
             out["fee_source"] = hand.get("source") or "set by hand"
+        elif out["price_table"]:
+            out["fee"] = float(out["price_table"]["markup"])
+            out["fee_source"] = (f"gateway price table: median of {out['price_table']['matched']} "
+                                 "model(s) vs official Anthropic prices")
         elif p.get("fee"):
             out["fee"], out["fee_source"] = float(p["fee"]), p.get("fee_source") or provider
         out["cap_kind"] = p.get("cap_kind") or "daily-key"
-        gap = cfg.get("gap") if isinstance(cfg.get("gap"), dict) else None
         if gap and gap.get("factor"):
-            out["gap"] = float(gap["factor"])
-            out["gap_n_days"], out["gap_cv"] = gap.get("n_days"), gap.get("cv")
+            if out["price_table"]:
+                out["gap_superseded"] = float(gap["factor"])
+            else:
+                out["gap"] = float(gap["factor"])
+                out["gap_n_days"], out["gap_cv"] = gap.get("n_days"), gap.get("cv")
     elif kind == "subscription":
         rl = (payload or {}).get("rate_limits") or {}
         out["cap_kind"] = "percent-window"

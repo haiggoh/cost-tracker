@@ -41,6 +41,7 @@ per-session table is printed so a reader can audit the label instead of trusting
 | `cost-tracker fee [--set F] [--clear] [--json]` | the gateway's published fee, its source, and why a direct account has none |
 | `cost-tracker calibrate [--json] [--tolerance USD] [--since-days N] [--learn-gap]` | our daily total (list × fee) vs the gateway's own figure; **exits 1 on a measured undercount** |
 | `cost-tracker markup [--set F] [--clear] [--json]` | pre-0.12 name: fee and measured gap together |
+| `cost-tracker prices [--refresh] [--json]` | which price table applies (official Anthropic, or the gateway's own), the derived markup, custom rows, and every model's billed rate |
 
 Periods longer than today read the append-only history log, grouped by
 `(session_id, utc_date)` with the last row per group winning — the per-session
@@ -176,13 +177,41 @@ environment and the statusline payload, and never starts a process or touches th
 | Claude Console API key | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`, no custom endpoint | a **monthly** tier spend cap (Start $500, Build $1,000, Scale $200,000), no daily one ([rate limits](https://platform.claude.com/docs/en/api/rate-limits)) | none |
 | Bedrock / Agent Platform / Foundry | `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` | in your cloud console; none knowable here | none |
 | Claude apps gateway | `rate_limits.spend_limit` in the payload | its `limit_usd` per `period` | none |
-| Reselling LLM gateway | `ANTHROPIC_BASE_URL` on a non-Anthropic host | its own cap, learned from its refusal message (daily per key for llmgateway.io) | its **published** fee, if the provider is known |
+| Reselling LLM gateway | `ANTHROPIC_BASE_URL` on a non-Anthropic host | its own cap, learned from its refusal message (daily per key for llmgateway.io) | its **own price table** when it publishes one (LiteLLM `/model/info`), else its published fee, if the provider is known |
 | Local / free lane | a localhost `ANTHROPIC_BASE_URL` | none (free) | none |
 
 Before 0.12.0 every user was measured against a hard-coded `$40/day`. That is one gateway
 key's cap, and nobody else has it.
 
+## Prices: official by default, the gateway's own table when it has one
+
+- **Official prices** ship in [`config/anthropic-prices.json`](config/anthropic-prices.json),
+  copied from Anthropic's [pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
+  with the date they were verified. Direct Anthropic users (subscription, Console key) are
+  priced from it as-is. When Anthropic changes a price or ships a model, this one file changes.
+- **A gateway's own table.** On a non-Anthropic, non-local `ANTHROPIC_BASE_URL`, cost-tracker
+  asks the endpoint once a day, in the background, for `GET <base>/model/info` (LiteLLM's
+  price route, sent with the session's own credential via stdin, never on a command line). If
+  it answers with a price table, that table is the bill:
+  1. a model the table lists is priced **exactly as listed**;
+  2. a model it does not list (say, a release the gateway has not added yet) is priced at
+     official × the table's **derived markup**: the median gateway/official ratio across
+     every model both list;
+  3. a gateway that cannot be reached keeps its last table.
+
+  Rows more than 2% off that median are reported as **custom** (`cost-tracker prices`), so an
+  exception is visible, not averaged away. Detection is by behaviour, not by hostname, so no
+  private hostname is ever shipped. `COST_TRACKER_PROXY_PRICES_URL` points it at another
+  route, or `off` stops the probe.
+
+  Why: one LiteLLM gateway billed exactly official × 1.10 on every token type. That is
+  Anthropic's documented 10% premium for regional cloud endpoints. Until 0.15.0 that factor
+  was read as a reseller's 5% fee times an unexplained ×1.047 "gap".
+
 ## Fee vs gap: two numbers, kept apart
+
+With a gateway price table, the fee is the table's markup and the gap is **superseded**: it
+is shown, not applied. Without one, the rules below still hold.
 
 A reselling gateway can bill more than list price for the same tokens. cost-tracker keeps
 the two reasons for that apart:
@@ -220,6 +249,8 @@ that figure and never recomputes or rewrites it.
 | `COST_TRACKER_FEE` | unset — a gateway fee override (`COST_TRACKER_MARKUP` is the pre-0.12 alias); `1` disables it |
 | `COST_TRACKER_APPLY_GAP` | `1` — set `0` so warnings stop projecting the measured gap |
 | `COST_TRACKER_PROVIDERS` | the shipped `config/providers.json` — provider fee registry |
+| `COST_TRACKER_OFFICIAL_PRICES` | the shipped `config/anthropic-prices.json` — official Anthropic prices |
+| `COST_TRACKER_PROXY_PRICES_URL` | `<ANTHROPIC_BASE_URL>/model/info` — a gateway's price table; `off` disables the probe |
 | `COST_TRACKER_PROJECTS_DIR` | `~/.claude/projects` — transcripts the learner reads |
 | `COST_TRACKER_TODAY` | today, UTC — override for tests |
 | `COST_TRACKER_SAVINGS_CMD` | auto-discovered `local-agents` savings ledger |
