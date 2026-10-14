@@ -2,13 +2,20 @@
 
 ## Current released version
 
-`0.14.0`
+`0.15.0`
 
 If this disagrees with `.claude-plugin/plugin.json`, treat everything below as
 suspect — the manifest is authoritative. `tests/test_version_consistency.sh`
 asserts the two agree, along with the top numbered CHANGELOG heading.
 
 ## Shipped
+
+- **Gateway price tables + official price registry (0.15.0).** A LiteLLM gateway's own
+  `/model/info` table is learned in the background and priced per model; unlisted models use
+  official × the derived markup. The ×1.05 fee × ×1.047 "gap" turned out to be one flat ×1.10
+  regional-endpoint price. Next: a per-model mix for LEDGER sessions (the ledger stores only a
+  list-price total, so it is scaled by the median markup; custom-row models in a ledger session
+  are therefore approximated).
 
 - **Calibration against the gateway's own figure (`calibrate`, 0.4.0).** Our daily total
   vs the cumulative the gateway stated when it refused, per UTC day, with the sign and the
