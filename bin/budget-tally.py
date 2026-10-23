@@ -125,7 +125,11 @@ def _resolve():
             cap = float(k.get("cap_usd") or 0) or None
         except (OSError, ValueError, TypeError, AttributeError):
             cap = None
-    elif cap is None and conn.get("cap_kind") == "spend-limit":
+    elif cap is None and conn.get("cap_kind") in ("spend-limit", "daily-key"):
+        # 0.16.0: "daily-key" reaches here only from a FREE/local session, which carries the
+        # gateway key's cap as context for the day's aggregate. A gateway session takes the branch
+        # above (kind == "gateway") and reads the same file directly, so widening this tuple cannot
+        # change a gateway's resolution.
         cap = conn.get("cap_usd")
     gap = conn.get("gap") if os.environ.get("COST_TRACKER_APPLY_GAP", "1") != "0" else None
     return cap, float(conn.get("fee") or 1.0), gap, conn
@@ -1265,8 +1269,17 @@ def compute():
     if cur:
         sid = _session_id_of(cur)
         if sid in ledger:
+            # Authoritative even on a free lane: a session that moved from the gateway onto a
+            # free lane carries real gateway spend, and blanking it would lose that.
             current_session_total = ledger[sid]
-        else:
+        elif sid not in local and not is_free_session():
+            # 0.16.0: the reconstruction path was OUTSIDE the local-lane skip that protects the
+            # aggregate, so a headless free session with no ledger entry reconstructed at cloud
+            # rates and printed `this session ≈ $X` for a session that costs $0. `local` only
+            # knows sessions that rendered a statusline (local_lane_sessions reads the capture
+            # history log), so a HEADLESS free session is invisible to it — and the per-message
+            # id heuristic misses a free lane whose proxy mints gateway-shaped ids
+            # (`msg_bdrk_…`). is_free_session() needs neither.
             cur_usage, _ = tally([cur])
             current_session_total, _, _ = _price(cur_usage)
 
@@ -1314,8 +1327,43 @@ def is_free_session():
                            "https://localhost", "https://127.0.0.1"))
 
 
+def _format_free_lane(total, unknown_models, ledger_total, recon_total):
+    """A free lane prints the GATEWAY's day, and says whose money it is.
+
+    This session's own turns cost $0, so a bare dollar figure reads as "I am spending money" when
+    every cent of it belongs to other sessions on the gateway. The figure stays — priced on the
+    axis the gateway itself bills (0.16.0: the markup is resolved from the gateway's learned price
+    table, not from this session's localhost endpoint, which is what made the two disagree) — but
+    ownership is stated FIRST and the cap is named as context, because a free lane does not draw
+    against it.
+
+    The phantom "saved with free agents" axis is deliberately absent here: it is a DIFFERENT axis,
+    owned by statusline-render.sh, and summing it into a spend line would add two numbers that must
+    never be added.
+    """
+    note = ""
+    if unknown_models:
+        note = f" (unpriced model(s) excluded: {', '.join(sorted(unknown_models))})"
+    billed = total * MARKUP
+    fee = f" at fee ×{MARKUP:.2f}" if MARKUP != 1.0 else ""
+    if ledger_total > 0 and recon_total > 0:
+        basis = f"${ledger_total:.2f} authoritative + ${recon_total:.2f} reconstructed"
+    elif ledger_total > 0:
+        basis = f"${ledger_total:.2f} authoritative"
+    else:
+        basis = f"${recon_total:.2f} reconstructed"
+    side = side_spend_note(LAST_BY_SOURCE)
+    cap = ""
+    if CAP_USD:
+        cap = f" of ${CAP_USD:.0f} cap (~${max(0.0, CAP_USD - billed):.2f} left)"
+    return (f"budget-tally: free lane — this session costs $0; today's gateway spend "
+            f"(other sessions) ≈ ${billed:.2f}{cap} — {basis}{side}{fee}{note}")
+
+
 def format_line(total, pct, remaining, unknown_models, session_scope,
-                current_session_total, ledger_total, recon_total, warn=True):
+                current_session_total, ledger_total, recon_total, warn=True, free=False):
+    if free:
+        return _format_free_lane(total, unknown_models, ledger_total, recon_total)
     note = ""
     if unknown_models:
         note = f" (unpriced model(s) excluded: {', '.join(sorted(unknown_models))})"
@@ -1403,7 +1451,7 @@ def main_session_start():
     # "prior sessions" under-counted by ~$14 in a real long-running session (2026-08-10).
     print(format_line(total, pct, remaining, unknown_models, "all sessions with an entry today",
                       current_session_total, ledger_total, recon_total,
-                      warn=not is_free_session()))
+                      warn=not is_free_session(), free=is_free_session()))
     spawn_price_sync(SEEN_MODELS)
 
 
@@ -1462,7 +1510,10 @@ Environment:
   COST_TRACKER_LEDGER_DIR                       ledger directory (default ~/.claude/cost-ledger)
   COST_TRACKER_CONFIG_DIR                       config dir holding the learned cap and markup
   COST_TRACKER_HISTORY                          history log path
-  COST_TRACKER_PROJECTS_DIR                     transcripts dir used for reconstruction
+  BUDGET_TALLY_PROJECTS_DIR                     transcripts dir used for reconstruction
+                                                (--help previously named COST_TRACKER_PROJECTS_DIR,
+                                                which this script never read; the documented name
+                                                silently fell back to ~/.claude/projects)
   COST_TRACKER_PRICES_URL                       price table to sync unknown models from
   COST_TRACKER_OFFICIAL_PRICES                  official price JSON (default config/anthropic-prices.json)
   COST_TRACKER_PROXY_PRICES_URL                 gateway price-table URL (default <base>/model/info); off = never probe
@@ -1473,7 +1524,12 @@ Environment:
   COST_TRACKER_SG_STOP_USD                      est. $ per security-guidance Stop-hook review (default 0.31)
   ANTHROPIC_BASE_URL                            a localhost value marks a FREE session (local or
                                                 free-API): the tally prints without the ⚠️ cap
-                                                WARNING, and --check stays silent
+                                                WARNING, and --check stays silent. Since 0.16.0 the
+                                                fee is NOT taken from this endpoint — a free lane
+                                                reports the day's gateway spend at the markup the
+                                                gateway itself publishes, learned from
+                                                proxy-prices.json, so its figure agrees with the
+                                                gateway's own refusal instead of reading 10% low
 
 Exit status is 0 even on an internal error: this must never break a hook."""
 

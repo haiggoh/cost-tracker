@@ -2,6 +2,67 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.16.0] — 2026-10-23
+
+### Fixed — a free lane priced the gateway's day at list
+
+On 2026-10-23 one day produced three figures for the same spend: the gateway's own refusal
+(`Current cost: 40.02651716249998, Max budget: 40.0`), the statusline in a gateway session
+(`session $35.43 · today: $40.11/$40`), and budget-tally from a free-API session
+(`≈ $36.47` — identical at 16:41 and again at 18:03, so not a stale snapshot).
+
+The ledger's base was right ($35.43 + $0.90 = $36.33; the day's free-lane sessions are
+structurally $0 and carry only a phantom axis). `36.4656 × 1.10 = 40.1122` — the statusline's
+figure to the cent. The whole gap was the **×1.10 gateway markup**, and the reason it went
+missing is structural: `resolve_connection()` had branches for `gateway`, `subscription`,
+`apps-gateway` and `api-key`, and **none for `local`**. A free session's `ANTHROPIC_BASE_URL`
+is `localhost`, so no branch matched and `out` kept its default `fee = 1.0` — the *current
+session's* endpoint was deciding the price of *other sessions'* gateway spend. The same
+fall-through also blocked the learned `cap.json` and the cached `proxy-prices.json` (which held
+a perfectly good `markup 1.1` for `llmgw.joyia.p7s1.io`).
+
+- `bin/cost_connection.py`: a `local` branch. The fee comes from the freshest cached gateway
+  price table **whatever host it was learned from** — the per-session ledger records no host
+  attribution, and every non-zero dollar in it is gateway spend, so that table is the right
+  price for it. The learned key cap is resolved too, as context. This session's own turns stay
+  fee-free; only the aggregate it reports is repriced.
+- `bin/proxy_prices.py`: `cached_any_host()`, the host-agnostic read `cached(env)` cannot do
+  (it derives the host from `ANTHROPIC_BASE_URL`, so a free lane has no cache row). Same
+  contract: file read only, never the network, and an OLD entry still counts.
+- `COST_TRACKER_FEE` / `COST_TRACKER_MARKUP` are now honoured off the gateway. They are
+  documented in `--help` as overrides but were read only inside the `gateway` branch — measured:
+  `COST_TRACKER_MARKUP=1.10` printed an unchanged `$36.47`. Documented behaviour that silently
+  does nothing is worse than a missing flag.
+- `--help` advertised `COST_TRACKER_PROJECTS_DIR`, which the code never read (it reads
+  `BUDGET_TALLY_PROJECTS_DIR`), so the documented way to redirect the transcript tree silently
+  pointed at the real `~/.claude/projects` instead.
+
+### Changed — a free lane's SessionStart line says whose money it is
+
+This session's turns cost $0, so a bare dollar figure read as "I am spending money" when every
+cent of it belonged to other sessions. The line now leads with ownership, keeps the figure
+(priced on the axis the gateway bills), and names the cap as context:
+
+    budget-tally: free lane — this session costs $0; today's gateway spend (other sessions)
+    ≈ $40.11 of $40 cap (~$0.00 left) — $36.33 authoritative + $0.13 reconstructed;
+    side: remember (logged) $0.08 at fee ×1.10
+
+The phantom "saved with free agents" axis is deliberately **not** folded in: it is a different
+axis, owned by `statusline-render.sh`, and summing it into a spend line would add two numbers
+that must never be added.
+
+### Fixed — a free session no longer invents its own spend
+
+`current_session_total` was computed **outside** the local-lane skip that protects the
+aggregate (`compute()`), so a free session with usage today and no ledger entry reconstructed at
+cloud rates and printed `this session ≈ $X` for a session that costs $0. The authoritative ledger
+path stays unconditional — a session that moved from the gateway onto a free lane carries real
+gateway spend, and blanking it would lose that. Only the reconstruction path is guarded.
+
+The per-message id heuristic (`msg_<24-hex>`, verified against a real free-lane transcript) still
+runs, but it cannot catch a free lane whose proxy mints gateway-shaped ids (`msg_bdrk_…`), nor a
+session that never rendered a statusline; `is_free_session()` needs neither.
+
 ## [0.15.0] — 2026-10-14
 
 ### Added — a gateway's own price table, and an official price registry
