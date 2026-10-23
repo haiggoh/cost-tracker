@@ -2,6 +2,58 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.17.0] — 2026-10-23
+
+### Added — `report --breakdown`, and a configurable phantom basis
+
+`report` gains a visual section (`--breakdown`): spend by category and savings on the free
+lanes, as labelled percentage bars. Every bar carries its label and its figure, so identity is
+never colour-alone, and `report --json` prints the same figures as data.
+
+    saved on free lanes — Opus 5.5 (as recorded)
+    ████████████████████████████████  free-lane sessions (phantom)  708.36  100.0%
+    ································  dispatches from paid sessions    0.00    0.0%
+                                      TOTAL saved                    708.36  100.0%
+
+**Two kinds of saving, deliberately separate.** A whole session run on a free lane and a
+dispatch issued from a paid one come from different ledgers and answer different questions, so
+they get their own rows instead of one blended figure. Savings are never added to spend — $135
+spent and $600 saved is not $735.
+
+**The phantom basis is now a choice** (`--phantom-basis opus|sonnet`, or
+`COST_TRACKER_PHANTOM_BASIS`). The basis is a **display-time factor, never a re-pricing**: the
+ledger stores a dollar figure, not tokens, so re-basing stored data by re-pricing it is not
+possible. The stored (Opus) figure is always quoted beside the re-based one.
+
+The Sonnet factor is exactly **0.5**, not an estimate: on the official table Opus 5.5 is $4/$20
+and Sonnet 5.5 is $2/$10, and *both* define their cache multipliers against their own input rate
+(`cache_read` 0.05×, `cache_write_5m` 1.25×, `cache_write_1h` 2.0×), so every token type on
+Sonnet 5.5 is exactly half of Opus 5.5 — independent of the token mix. `opus` (the default) is
+the stored figure's own basis and changes nothing, so the number people have been reading is
+byte-identical by default.
+
+### Not in this release (waypoint `cost-tracker-interactive-menu`, remaining)
+
+- **Per-session savings** — which session saved how much. The savings events in
+  `~/.claude/local-agents/savings.jsonl` record `"session": "None"`, so the per-session split is
+  not recoverable from the ledger as it stands; the writer (`free-agents/bin/savings-ledger.py`)
+  must record a session id first. Cross-repo, so it is staged rather than guessed at.
+- **A 30-day rolling window** — `daily_totals(days)` already provides the series; the window is
+  a follow-on rendering on top of this breakdown.
+- **Separating our local lane from each other API provider** in the report — needs per-provider
+  attribution, which the ledger does not carry yet.
+
+### Verification
+
+`tests/test_visual_report.py` (7): the breakdown's rows reconcile to its total, the two kinds of
+saving stay separate rows, savings never merge into spend, the Sonnet basis halves the phantom
+and spares the spend axis, the default basis changes nothing, a non-positive or unrecognised
+basis never fails silently into a lying value, and a bar is clamped so a large value cannot
+overflow the track. Mutation-checked: breaking the basis factor and blending the two savings rows
+killed exactly the two tests covering them.
+
+Full suite: 205 passed (`pytest -n auto`) and all four shell suites pass.
+
 ## [0.16.1] — 2026-10-23
 
 ### Fixed — the install suite was lane-dependent
