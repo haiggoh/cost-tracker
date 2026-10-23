@@ -176,6 +176,44 @@ def cached(env=None):
     return e if isinstance(e, dict) and e.get("proxy") else None
 
 
+def _stamp(entry):
+    """Best available freshness for an entry: a float when the writer recorded one, else 0."""
+    for key in ("fetched_at", "checked_at"):
+        v = entry.get(key)
+        if isinstance(v, (int, float)):
+            return float(v)
+    return 0.0
+
+
+def cached_any_host():
+    """(host, entry) of the FRESHEST cached gateway price table, or (None, None).
+
+    `cached(env)` can only answer for the session's OWN gateway: it derives the host from
+    ANTHROPIC_BASE_URL, so a free/local lane (localhost) has no cache row and gets None even when
+    a perfectly good learned table for the real gateway sits in the same file. This accessor
+    exists for that case. The per-session cost-ledger records no host attribution, and every
+    non-zero dollar in it is gateway spend, so the freshest learned table is the right price for
+    it — pricing it at list under-reports by the whole markup (measured 2026-10-23: a $36.33
+    list-price day reported as $36.47 where the gateway's own refusal read $40.0265).
+
+    Same contract as `cached()`: a file read only, never the network, and an OLD entry still
+    counts.
+    """
+    best_host, best = None, None
+    try:
+        cache = read_cache()
+    except Exception:
+        return None, None
+    if not isinstance(cache, dict):
+        return None, None
+    for host, entry in cache.items():
+        if not isinstance(entry, dict) or not entry.get("proxy") or not entry.get("markup"):
+            continue
+        if best is None or _stamp(entry) > _stamp(best):
+            best_host, best = host, entry
+    return best_host, best
+
+
 def price_for(model, entry, official=None):
     """{type: $/MTok} for `model` on the BILLED axis of a proxy `entry`, plus its basis:
     (rates, "proxy table" | "official x markup") or (None, None)."""

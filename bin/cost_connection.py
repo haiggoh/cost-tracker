@@ -127,6 +127,27 @@ def _proxy_entry(env):
         return None
 
 
+def _proxy_entry_any_host():
+    """(host, cached entry) of the freshest learned gateway price table, whatever host it was
+    learned from — or (None, None). See proxy_prices.cached_any_host() for why a free lane needs
+    a host-agnostic read."""
+    try:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        mod = sys.modules.get("proxy_prices")
+        if mod is None:
+            loader = SourceFileLoader("proxy_prices", os.path.join(HERE, "proxy_prices.py"))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            if spec is None:
+                return None, None
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[loader.name] = mod
+            loader.exec_module(mod)
+        return mod.cached_any_host()
+    except Exception:
+        return None, None
+
+
 def _env_float(env, *names):
     for n in names:
         raw = env.get(n)
@@ -208,6 +229,30 @@ def resolve_connection(env=None, payload=None):
             else:
                 out["gap"] = float(gap["factor"])
                 out["gap_n_days"], out["gap_cv"] = gap.get("n_days"), gap.get("cv")
+    elif kind == "local":
+        # 0.16.0. This session's OWN turns cost $0 — but the tally printed from a free lane
+        # covers the whole day, including other sessions' real gateway spend, which the GATEWAY
+        # billed at its own markup. Resolving the fee from THIS endpoint (localhost -> no branch
+        # matched -> fee 1.0) priced that spend at list. Measured 2026-10-23: the day's tally
+        # printed $36.47 from a free lane while the gateway's refusal read $40.0265 and the
+        # statusline $40.11 (36.4656 x 1.10) — the entire gap was the missing markup, not the
+        # ledger's base. So the fee (and the day's cap) come from the learned gateway state, not
+        # from this session's connection.
+        env_fee = _env_float(env, "COST_TRACKER_FEE", "COST_TRACKER_MARKUP")
+        if env_fee:
+            out["fee"], out["fee_source"] = env_fee, "env override"
+        else:
+            host, entry = _proxy_entry_any_host()
+            if entry and entry.get("markup"):
+                out["fee"] = float(entry["markup"])
+                out["fee_source"] = (f"cached gateway price table ({host}), applied to other "
+                                     "sessions' gateway spend")
+        # The cap is the gateway KEY's; a free lane does not draw against it, so this is
+        # reported as context ("of $N cap"), never as this session's own limit.
+        k = read_config().get("key") if isinstance(read_config().get("key"), dict) else None
+        if k and k.get("cap_usd"):
+            out["cap_usd"], out["cap_kind"] = float(k["cap_usd"]), "daily-key"
+            out["cap_period"] = "daily"
     elif kind == "subscription":
         rl = (payload or {}).get("rate_limits") or {}
         out["cap_kind"] = "percent-window"
