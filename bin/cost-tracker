@@ -263,6 +263,53 @@ MARKUP_MIN_DAYS = 5          # below this, one odd day sets the factor
 MARKUP_MAX_CV = 0.25         # above this the ratio is noise, not a rate
 MARKUP_IDENTITY = 1.0
 
+# --- the phantom BASIS --------------------------------------------------------
+# The phantom is Claude Code's own `cost.total_cost_usd` for a free-lane session, so our code
+# never chooses Opus: the basis is whatever model id the free-agents proxy spoofs
+# (`claude-opus-5-5`) prices at on Anthropic's table, and the ledger stores a DOLLAR figure, not
+# tokens. Re-basing it therefore cannot be a re-pricing of stored data — it is a factor applied
+# at display time, and the stored figure is never overwritten.
+#
+# Why the Sonnet factor is exactly 0.5 and not an estimate: on the official table Opus 5.5 is
+# $4/$20 and Sonnet 5.5 is $2/$10, and BOTH define their cache multipliers relative to their own
+# input rate (cache_read 0.05x, cache_write_5m 1.25x, cache_write_1h 2.0x). So every token type
+# on Sonnet 5.5 is exactly half of Opus 5.5 — independent of the token mix, which is what makes
+# the conversion exact rather than mix-dependent.
+PHANTOM_BASIS_OPUS = 1.0
+PHANTOM_BASIS_SONNET = 0.5
+
+
+def phantom_basis_factor():
+    """Factor for rendering the savings axis, from the basis config. `opus` (default) is the
+    stored figure's own basis and changes nothing; `sonnet` re-prices what the same work would
+    have cost on Sonnet 5.5. A bare number is taken as a custom factor."""
+    try:
+        cfg = read_config() or {}
+    except Exception:
+        cfg = {}
+    basis = os.environ.get("COST_TRACKER_PHANTOM_BASIS") \
+        or ((cfg.get("phantom") or {}).get("basis") if isinstance(cfg.get("phantom"), dict) else None) \
+        or "opus"
+    basis = str(basis).strip().lower()
+    if basis in ("sonnet", "sonnet-5.5", "sonnet-5"):
+        return PHANTOM_BASIS_SONNET
+    if basis in ("opus", "opus-5.5", "opus-5", "stored", "as-recorded"):
+        return PHANTOM_BASIS_OPUS
+    try:
+        v = float(basis)
+    except ValueError:
+        return PHANTOM_BASIS_OPUS
+    return v if v > 0 else PHANTOM_BASIS_OPUS
+
+
+def phantom_basis_name():
+    f = phantom_basis_factor()
+    if f == PHANTOM_BASIS_OPUS:
+        return "Opus 5.5 (as recorded)"
+    if f == PHANTOM_BASIS_SONNET:
+        return "Sonnet 5.5 basis"
+    return f"custom ×{f:g}"
+
 
 def _median(xs):
     s = sorted(xs)
@@ -1084,6 +1131,14 @@ def collect(period="today", since=None, fast=False, days=None):
         "local_saved_usd": (savings.get("saved_usd") if savings else None),
         "local_events": (savings.get("events") if savings else None),
         "local_phantom_usd": round(local_phantom_total, 4) if local_phantom_total > 0 else None,
+        # The savings axis re-priced on the configured basis, carried BESIDE the stored figure and
+        # never in place of it: the ledger line keeps its own meaning and the re-basing stays
+        # visible and reversible.
+        "local_saved_basis_usd": (round(savings.get("saved_usd") * phantom_basis_factor(), 4)
+                                  if savings and savings.get("saved_usd") is not None else None),
+        "local_phantom_basis_usd": (round(local_phantom_total * phantom_basis_factor(), 4)
+                                    if local_phantom_total > 0 else None),
+        "phantom_basis": phantom_basis_name(),
         "quarantined": quarantined,
     }
 
@@ -1368,6 +1423,95 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
 
 
 # --- rendering ----------------------------------------------------------------
+
+BAR_WIDTH = 32          # a bar that fits an 80-column terminal beside its label
+BAR_FULL = "█"          # █
+BAR_FILL = "█" * BAR_WIDTH
+
+
+def _bar(frac):
+    """A proportional bar plus its percentage. The percentage is printed separately in the row,
+    so the bar never has to carry a number inside itself — and `frac` is clamped, because a bar
+    longer than the track is a lie about proportion."""
+    frac = 0.0 if frac is None or frac < 0 else (1.0 if frac > 1 else frac)
+    n = int(round(frac * BAR_WIDTH))
+    return BAR_FILL[:n] + "·" * (BAR_WIDTH - n)
+
+
+def _bar_row(label, value, total, colour, width=22):
+    """One labelled bar. The label and the number are ALWAYS printed: identity is never
+    colour-alone (a colourblind or monochrome terminal loses hue, never the row)."""
+    frac = (value / total) if total else 0.0
+    return (colour + _bar(frac) + "\033[0m"
+            + f"  {label:<{width}} {value:>8.2f}  {frac * 100:>5.1f}%")
+
+
+def render_breakdown(data):
+    """The visual section: what the period's spend is made of, and what the free lanes saved.
+
+    Two blocks, one axis each — never a dual axis. SPEND categories sum to the same total the
+    table above prints (the reconciliation is the invariant this view exists to prove, and it is
+    tested). SAVINGS is a DIFFERENT axis and is never added to spend: saved is avoided cost, and
+    summing the two produces a number that means nothing.
+    """
+    spend = [
+        ("cloud sessions", data.get("cloud_usd") or 0.0, "\033[36m"),        # cyan
+        ("no-ledger (SDK/headless)", data.get("estimated_uncovered_usd") or 0.0, "\033[33m"),  # yellow
+        ("classifier (auto-mode)", data.get("estimated_classifier_usd") or 0.0, "\033[35m"),   # magenta
+        ("outside-process spend", data.get("estimated_outside_usd") or 0.0, "\033[2m"),        # dim
+    ]
+    # Summed from the SAME three components the rows above show, so the total the bars reconcile
+    # to is provably those rows — `collect()` exposes no pre-summed estimate total, and inventing
+    # one here would let the two drift apart silently.
+    est_total = sum(v for _, v, _ in spend[1:])
+    spend_total = (data.get("cloud_usd") or 0.0) + est_total
+
+    lines = [f"breakdown — {data.get('period', 'period')} "
+             f"(cloud spend, and savings on the free lanes)",
+             ""]
+    lines.append("  cloud spend")
+    for label, value, colour in spend:
+        if value:
+            lines.append("  " + _bar_row(label, value, spend_total, colour))
+    lines.append("  " + "-" * (BAR_WIDTH + 2 + 22 + 8 + 12))
+    lines.append("  " + " " * BAR_WIDTH + "  "
+                 + f"{'TOTAL (cloud + est.)':<22} {spend_total:>8.2f}  {100.0:>5.1f}%")
+    lines.append("  (the table above prints cloud sessions alone; the estimated rows follow it)")
+
+    # TWO kinds of saving, deliberately separate (user request 2026-10-23): a whole SESSION run
+    # on a free lane, and a DISPATCH issued from a paid session. They come from different
+    # ledgers and mean different things, so they get their own rows rather than one blended
+    # figure — and their sum is what the statusline reports.
+    phantom = data.get("local_phantom_basis_usd")
+    if phantom is None:
+        phantom = data.get("local_phantom_usd") or 0.0
+    dispatched = data.get("local_saved_basis_usd") or 0.0
+    saved_total = phantom + dispatched
+    if saved_total:
+        lines.append("")
+        lines.append(f"  saved on free lanes — {data.get('phantom_basis', 'as recorded')}")
+        rows = [("free-lane sessions (phantom)", phantom, "\033[32m"),
+                ("dispatches from paid sessions", dispatched, "\033[36m")]
+        for label, value, colour in rows:
+            lines.append("  " + _bar_row(label, value, saved_total, colour))
+        lines.append("  " + " " * BAR_WIDTH + "  "
+                     + f"{'TOTAL saved':<22} {saved_total:>8.2f}  {100.0:>5.1f}%")
+        # Whether to quote the stored figure is decided FROM THE DATA, not from the live
+        # environment: a renderer whose output changes with env the caller didn't pass is not
+        # testable, and this one could not be until the decision moved here.
+        stored_phantom = data.get("local_phantom_usd")
+        if stored_phantom is not None and abs(phantom - stored_phantom) > 1e-9:
+            # local_phantom_usd is ALREADY the stored (Opus-basis) figure — no conversion.
+            # Dividing it by the factor double-converted it and printed 2x the recorded number.
+            stored = stored_phantom + (data.get("local_saved_usd") or 0.0)
+            applied = phantom / stored_phantom if stored_phantom else 1.0
+            suffix = "" if abs(applied - PHANTOM_BASIS_SONNET) < 1e-9 \
+                else f" — this view applies ×{applied:g}"
+            lines.append(f"  (recorded on the Opus 5.5 basis: ${stored:.2f}{suffix})")
+    lines.append("")
+    lines.append("  `cost-tracker report --json` prints every figure in this section as data.")
+    return "\n".join(lines)
+
 
 def render_table(data, short_ids=True):
     """The per-session breakdown table (D16). The table IS the audit of the
@@ -1943,6 +2087,13 @@ def main(argv=None):
     rep = sub.add_parser("report", help="per-session breakdown table for a period")
     add_period(rep)
     rep.add_argument("--full-ids", action="store_true", help="print full session UUIDs")
+    rep.add_argument("--breakdown", action="store_true",
+                     help="add the visual section: spend by category and savings on the free "
+                          "lanes, as labelled percentage bars")
+    rep.add_argument("--phantom-basis", metavar="BASIS", dest="phantom_basis",
+                     help="basis for the savings axis: opus (as recorded, default) or sonnet "
+                          "(what the same work would have cost on Sonnet 5.5). Also settable as "
+                          "COST_TRACKER_PHANTOM_BASIS")
 
     st = sub.add_parser("statusline", help="one-line statusline segment (today)")
     st.add_argument("--json", action="store_true")
@@ -2178,6 +2329,12 @@ def main(argv=None):
         return 0
 
     period = getattr(args, "period", "today")
+    # The flag is a VIEW on the same setting the env var and config already read, not a rival
+    # source of truth: setting it here lets phantom_basis_factor() stay the only place the
+    # precedence is decided. A flag value wins for this run and is not persisted.
+    basis_flag = getattr(args, "phantom_basis", None)
+    if basis_flag:
+        os.environ["COST_TRACKER_PHANTOM_BASIS"] = basis_flag
     data = collect(period, since, fast=getattr(args, "fast", False))
 
     if getattr(args, "json", False):
@@ -2195,6 +2352,9 @@ def main(argv=None):
         print(render_doctor(data))
     else:
         print(render_table(data, short_ids=not getattr(args, "full_ids", False)))
+        if getattr(args, "breakdown", False):
+            print()
+            print(render_breakdown(data))
     return 0
 
 

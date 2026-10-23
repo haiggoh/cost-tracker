@@ -34,6 +34,8 @@ per-session table is printed so a reader can audit the label instead of trusting
 | Command | Does |
 |---|---|
 | `cost-tracker report [--today\|--week\|--month\|--since D] [--json] [--full-ids]` | per-session breakdown for a period |
+| `cost-tracker report --breakdown` | the same period as labelled percentage bars: spend by category, and savings on the free lanes |
+| `cost-tracker report --phantom-basis opus\|sonnet` | which price the savings axis is quoted at (default `opus`, as recorded). Also `COST_TRACKER_PHANTOM_BASIS` |
 | `cost-tracker statusline` | `today: cloud $30.12/$40 · local saved $4.80` |
 | `cost-tracker doctor` | quarantined records grouped by (reason, session) + resolved config |
 | `cost-tracker connection [--map-host HOST PROVIDER] [--json]` | how this session connects, and which limit, fee and gap apply |
