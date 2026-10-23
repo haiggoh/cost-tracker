@@ -1049,10 +1049,20 @@ def collect(period="today", since=None, fast=False, days=None):
     # accrual (field 4 minus the field-5 baseline carried in), not the lifetime anchor —
     # a multi-day free session must not re-donate its earlier days to today.
     local_phantom_total = 0.0
+    # The SAME single pass also records the per-session split. It was always available here —
+    # each session's own ledger line carries its phantom in field 4, which is how the statusline
+    # prints `free api session saved $45.61` — it was simply summed away instead of exposed.
+    savings_by_session = {}
+    basis_factor = phantom_basis_factor()
     for rec in per_session_day.values():
         dp = rec.day_phantom
         if rec.axis == "local" and dp is not None:
             local_phantom_total += dp
+            if dp > 0:
+                # Scaled to the configured basis so every row in the block agrees with its total
+                savings_by_session[rec.session_id] = round(dp * basis_factor, 4)
+    savings_by_session = dict(sorted(savings_by_session.items(),
+                                     key=lambda kv: (-kv[1], kv[0])))
     if fast:
         savings = read_savings_fast()
     else:
@@ -1138,6 +1148,10 @@ def collect(period="today", since=None, fast=False, days=None):
                                   if savings and savings.get("saved_usd") is not None else None),
         "local_phantom_basis_usd": (round(local_phantom_total * phantom_basis_factor(), 4)
                                     if local_phantom_total > 0 else None),
+        # Per-session savings: {session_id: day phantom}. A free-lane session's phantom lives in
+        # ITS OWN ledger line (field 4), so this needs no statusline render of its own — the same
+        # source the statusline reads, exposed as data instead of summed away.
+        "savings_by_session": savings_by_session,
         "phantom_basis": phantom_basis_name(),
         "quarantined": quarantined,
     }
@@ -1490,10 +1504,17 @@ def render_breakdown(data):
     if saved_total:
         lines.append("")
         lines.append(f"  saved on free lanes — {data.get('phantom_basis', 'as recorded')}")
-        rows = [("free-lane sessions (phantom)", phantom, "\033[32m"),
-                ("dispatches from paid sessions", dispatched, "\033[36m")]
-        for label, value, colour in rows:
-            lines.append("  " + _bar_row(label, value, saved_total, colour))
+        # One row per free-lane session, biggest first: which session saved how much. The split
+        # comes from each session's own ledger line, so it does not depend on that session having
+        # rendered a statusline — the statusline reads the same field this reads.
+        by_session = data.get("savings_by_session") or {}
+        for sid, value in by_session.items():
+            lines.append("  " + _bar_row(sid[:12], value, saved_total, "\033[32m"))
+        if not by_session:
+            lines.append("  " + _bar_row("free-lane sessions (phantom)", phantom, saved_total,
+                                         "\033[32m"))
+        lines.append("  " + _bar_row("dispatches from paid sessions", dispatched, saved_total,
+                                     "\033[36m"))
         lines.append("  " + " " * BAR_WIDTH + "  "
                      + f"{'TOTAL saved':<22} {saved_total:>8.2f}  {100.0:>5.1f}%")
         # Whether to quote the stored figure is decided FROM THE DATA, not from the live

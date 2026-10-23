@@ -2,6 +2,33 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.17.1] — 2026-10-24
+
+### Corrects 0.17.0 — per-session savings was always available
+
+0.17.0's notes said "per-session savings is not currently recoverable". **That was wrong, and the
+user corrected it with evidence**: their statusline reads `free api session saved $45.61`, and
+three concurrent sessions each showed a different figure, so the sessions are plainly
+distinguishable. They are — the data was sitting in plain sight the whole time.
+
+A free-lane session's phantom lives in **its own** cost-ledger line (field 4), the very field
+`statusline-render.sh` reads to print the per-session figure. `collect()` was already summing those
+per-session phantoms into `local_phantom_total` in a single pass; it simply threw the split away
+instead of exposing it. The 0.17.0 claim came from conflating two different stores:
+
+- the **dispatch** savings ledger (`savings.jsonl`) really does record `"session": None`, which is
+  a genuine gap — but only for dispatches, not for whole free-lane sessions;
+- the **phantom** per session, which is per-session by construction.
+
+`report --breakdown` now prints one row per free-lane session, biggest first, each with its own
+figure, and the split reconciles to the total. A cloud session's spend never enters it.
+
+**A lesson recorded rather than smoothed over:** the first version of this test passed a
+hand-built dict straight to the renderer, so it could not tell whether `collect()` populated the
+split at all — and a mutation deleting that populate line **survived** it. Only a test that writes
+real ledger files catches the wiring. The gap is now covered, and the mutation was verified to
+kill it.
+
 ## [0.17.0] — 2026-10-23
 
 ### Added — `report --breakdown`, and a configurable phantom basis
@@ -34,10 +61,11 @@ byte-identical by default.
 
 ### Not in this release (waypoint `cost-tracker-interactive-menu`, remaining)
 
-- **Per-session savings** — which session saved how much. The savings events in
-  `~/.claude/local-agents/savings.jsonl` record `"session": "None"`, so the per-session split is
-  not recoverable from the ledger as it stands; the writer (`free-agents/bin/savings-ledger.py`)
-  must record a session id first. Cross-repo, so it is staged rather than guessed at.
+- **Per-session savings** — which session saved how much. ~~The savings events record
+  `"session": "None"`, so the split is not recoverable.~~ **Corrected in 0.17.1: per-session
+  PHANTOM savings were always available (each session's own ledger line, field 4) and are now
+  printed. The remaining gap is per-session DISPATCH savings only, which does need the writer
+  (`free-agents/bin/savings-ledger.py`) to record a session id.**
 - **A 30-day rolling window** — `daily_totals(days)` already provides the series; the window is
   a follow-on rendering on top of this breakdown.
 - **Separating our local lane from each other API provider** in the report — needs per-provider
