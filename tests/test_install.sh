@@ -58,10 +58,36 @@ BK="$(ls -d "$H/.claude/backups"/cost-tracker-path-* 2>/dev/null | head -1)"
 is "the foreign PATH link is backed up as a link" "$(readlink "$BK/cost-tracker" 2>/dev/null)" "$TMP/other/cost-tracker"
 
 # the status line now CAPTURES, which is the thing the joyia state broke
+#
+# The lane is PINNED. cost-ledger-capture.sh derives its lane from the environment it inherits
+# (correctly — it runs inside Claude Code's own process, so the endpoint is authoritative), which
+# meant this assertion depended on whoever ran it: on a gateway box the ledger line is
+# `<date> <cum> <baseline>` and field 2 is the cost, while on a free lane the writer zeroes cum
+# and puts the avoided cost in field 4. Unpinned, this suite passed on gateway machines and
+# failed on free-lane ones (measured 2026-10-23, cost-tracker 0.16.0) — the same shape as the
+# inherited-ANTHROPIC_BASE_URL trap tests/conftest.py documents for the Python suite.
+RENDER_CMD="$(jq -r .statusLine.command "$H/.claude/settings.json")"
+# Every -u BEFORE the first VAR=: env stops parsing options at the first assignment, so a
+# trailing `-u X` is taken as the COMMAND and the render silently never runs (this bit us while
+# writing this fix — the array in its natural reading order did exactly that).
+GW_ENV=(-u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY
+        HOME="$H" COST_TRACKER_STATUSLINE=0 ANTHROPIC_BASE_URL="https://gw.example.test")
 OUT="$(printf '%s' '{"session_id":"inst-1","cost":{"total_cost_usd":1.5},"model":{"display_name":"M"},"workspace":{"current_dir":"/tmp"}}' \
-    | HOME="$H" COST_TRACKER_STATUSLINE=0 sh -c "$(jq -r .statusLine.command "$H/.claude/settings.json")" 2>/dev/null)"
-is "a render through the new statusLine writes the ledger" "$(cut -d' ' -f2 "$H/.claude/cost-ledger/inst-1" 2>/dev/null)" "1.5"
+    | env "${GW_ENV[@]}" sh -c "$RENDER_CMD" 2>/dev/null)"
+is "a render through the new statusLine writes the ledger" \
+   "$(cut -d' ' -f2 "$H/.claude/cost-ledger/inst-1" 2>/dev/null)" "1.5"
 is "and renders with the plugin's renderer, not joyia's" "$(printf '%s' "$OUT" | grep -c JOYIA_RENDER)" "0"
+
+# The OTHER lane, asserted rather than assumed: a free render zeroes cum and records the avoided
+# cost in ledger field 4 (0.14.0's phantom axis). Keeps the writer's real contract visible in
+# the suite, and guards the field the unpinned test used to read by accident.
+printf '%s' '{"session_id":"inst-2","cost":{"total_cost_usd":1.5},"model":{"display_name":"M"},"workspace":{"current_dir":"/tmp"}}' \
+    | HOME="$H" COST_TRACKER_STATUSLINE=0 ANTHROPIC_BASE_URL="http://127.0.0.1:4143" \
+      sh -c "$RENDER_CMD" >/dev/null 2>&1
+is "a free-lane render zeroes cum and books the phantom instead" \
+   "$(cut -d' ' -f2 "$H/.claude/cost-ledger/inst-2" 2>/dev/null)" "0"
+is "phantom lands in field 4" \
+   "$(cut -d' ' -f4 "$H/.claude/cost-ledger/inst-2" 2>/dev/null)" "1.5"
 
 HOME="$H" bash "$PLUGIN/install.sh" > "$TMP/again.out" 2>&1
 is "a second run exits 0" "$?" "0"

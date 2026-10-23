@@ -2,6 +2,30 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.16.1] — 2026-10-23
+
+### Fixed — the install suite was lane-dependent
+
+`tests/test_install.sh` failed with `a render through the new statusLine writes the ledger`
+(`expected: 1.5`, actual: `0`) — but only on some machines. The product was right and the test
+was not: `cost-ledger-capture.sh` correctly derives its lane from the environment it inherits
+(it runs inside Claude Code's own process, so the endpoint is authoritative), and the test
+inherited whatever the runner had. On a gateway box the ledger line is `<date> <cum>
+<baseline>` and field 2 is the cost; on a free lane the writer zeroes `cum` and puts the
+avoided cost in field 4. So the suite passed on gateway machines and failed on free-lane ones.
+
+- The lane is now **pinned** for that assertion (`ANTHROPIC_BASE_URL` plus `-u` for the
+  cloud-provider flags), so the result no longer depends on who runs it.
+- The other lane is asserted rather than assumed: a free render zeroes `cum` and books the
+  phantom in field 4. The writer's real contract is now visible in the suite for both lanes.
+- Mutation-checked: removing the pin reproduces the original failure exactly
+  (`expected: 1.5`, actual `0`), and restoring it returns 23/23 on both a free and a gateway
+  endpoint.
+
+Note for whoever touches this next: `env` stops parsing options at the first `VAR=`, so every
+`-u` must precede the assignments — the array in its natural reading order made the render
+silently never run. The suite now runs 23/23 in both lanes.
+
 ## [0.16.0] — 2026-10-23
 
 ### Fixed — a free lane priced the gateway's day at list
