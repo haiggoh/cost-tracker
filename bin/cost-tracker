@@ -1152,6 +1152,16 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
         "zero_sessions": sorted(zero_sessions),
         "reset_anchored_sessions": sorted(reset_sessions),
         "local_saved_usd": (savings.get("saved_usd") if savings else None),
+        # Per-session DISPATCH savings (free-agents `report --json` by_session, 0.43.2). None when
+        # the ledger predates it or cannot be read — never an empty dict, because "no dispatches"
+        # and "not measured" are different claims.
+        "dispatch_by_session": ({sid: round(v * phantom_basis_factor(), 4)
+                                 for sid, v in
+                                 {r["session"]: float(r["saved_usd"])
+                                  for r in (savings.get("by_session") or [])
+                                  if isinstance(r, dict) and r.get("session") is not None
+                                  and r.get("saved_usd") is not None}.items()}
+                                if savings and savings.get("by_session") else None),
         "local_events": (savings.get("events") if savings else None),
         "local_phantom_usd": round(local_phantom_total, 4) if local_phantom_total > 0 else None,
         # The savings axis re-priced on the configured basis, carried BESIDE the stored figure and
@@ -1535,8 +1545,17 @@ def render_breakdown(data):
         if not by_session:
             lines.append("  " + _bar_row("free-lane sessions (phantom)", phantom, saved_total,
                                          "\033[32m"))
-        lines.append("  " + _bar_row("dispatches from paid sessions", dispatched, saved_total,
-                                     "\033[36m"))
+        # Per-session DISPATCH savings, when the ledger provides the split (free-agents 0.43.2).
+        # Absent on an older ledger, in which case the aggregate above is the honest whole story —
+        # and an empty split must not be drawn as "no dispatches", so None falls back and {} does not.
+        dispatch_by_session = data.get("dispatch_by_session")
+        if dispatch_by_session:
+            for sid, value in sorted(dispatch_by_session.items(), key=lambda kv: (-kv[1], kv[0])):
+                lines.append("  " + _bar_row(f"dispatch {sid[:12]}", value, saved_total,
+                                             "\033[36m"))
+        else:
+            lines.append("  " + _bar_row("dispatches from paid sessions", dispatched, saved_total,
+                                         "\033[36m"))
         lines.append("  " + " " * BAR_WIDTH + "  "
                      + f"{'TOTAL saved':<22} {saved_total:>8.2f}  {100.0:>5.1f}%")
         # Whether to quote the stored figure is decided FROM THE DATA, not from the live

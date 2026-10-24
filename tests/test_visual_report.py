@@ -9,6 +9,7 @@ session vs a dispatch from a paid one) stay separate because they come from diff
 The basis is a display-time factor, never a re-pricing: the ledger stores a DOLLAR figure, not
 tokens, and the stored value is always quoted beside the re-based one.
 """
+import json
 import os
 
 from conftest import load_ct
@@ -208,3 +209,97 @@ def test_collect_exposes_the_per_session_split_from_a_real_ledger(tmp_path):
     assert sonnet["savings_by_session"] == split
 
 
+
+
+def test_per_session_dispatch_savings_get_their_own_rows(tmp_path):
+    """Dispatches from a PAID session are a different thing from a whole session on a free lane:
+    they come from a different ledger and answer a different question. They get their own rows,
+    not a blend."""
+    ct, _ledger = load_ct(tmp_path)
+    data = {"period": "today", "cloud_usd": 1.0,
+            "local_phantom_usd": 100.0, "local_saved_usd": 40.0,
+            "local_phantom_basis_usd": 100.0, "local_saved_basis_usd": 40.0,
+            "savings_by_session": {},
+            "dispatch_by_session": {"sess-alpha": 25.0, "sess-beta": 15.0},
+            "phantom_basis": "Opus 5.5 (as recorded)"}
+    out = ct.render_breakdown(data)
+    assert "dispatch sess-alpha" in out and "25.00" in out
+    assert "dispatch sess-beta" in out and "15.00" in out
+    assert "140.00" in out, "the total must include both kinds of saving"
+
+
+def test_an_absent_dispatch_split_falls_back_to_the_aggregate(tmp_path):
+    """An older ledger has no by_session at all. None means 'not measured', which must fall back
+    to the aggregate row — but an EMPTY dict is 'measured, no dispatches', and must not invent
+    per-session rows either."""
+    ct, _ledger = load_ct(tmp_path)
+    base = {"period": "today", "cloud_usd": 1.0, "local_phantom_usd": 0.0,
+            "local_saved_usd": 12.5, "local_phantom_basis_usd": 0.0,
+            "local_saved_basis_usd": 12.5, "savings_by_session": {},
+            "phantom_basis": "Opus 5.5 (as recorded)"}
+    for split, expect_rows in ((None, False), ({}, False), ({"s": 12.5}, True)):
+        data = dict(base, dispatch_by_session=split)
+        out = ct.render_breakdown(data)
+        assert "12.50" in out, f"the dispatch saving must be shown for split={split!r}"
+        has_rows = "dispatch s " in out or "dispatch sess" in out
+        assert has_rows == expect_rows, \
+            f"split={split!r} should {'draw' if expect_rows else 'not draw'} per-session rows"
+
+
+def test_the_dispatch_split_is_scaled_by_the_basis_like_everything_else(tmp_path):
+    """The phantom rows are basis-scaled; the dispatch rows must be too, or a Sonnet view would
+    halve one axis inside a block and leave the other untouched — two bases in one chart."""
+    ct, _ledger = load_ct(tmp_path)
+    data = {"period": "today", "cloud_usd": 1.0,
+            "local_phantom_usd": 100.0, "local_saved_usd": 40.0,
+            "local_phantom_basis_usd": 50.0, "local_saved_basis_usd": 20.0,
+            "savings_by_session": {},
+            "dispatch_by_session": {"sess-alpha": 20.0},
+            "phantom_basis": "Sonnet 5.5 basis"}
+    out = ct.render_breakdown(data)
+    assert "50.00" in out, "the phantom is shown on the configured basis"
+    assert "20.00" in out, "the dispatch split must be scaled to the same basis, not left raw"
+
+
+def _savings_stub(tmp_path, payload):
+    """A COST_TRACKER_SAVINGS_CMD that prints a known report --json payload, so collect() takes
+    its real subprocess path against a fixture instead of the real machine."""
+    stub = tmp_path / "savings-stub.sh"
+    stub.write_text("#!/bin/sh\ncat <<'JSON'\n" + json.dumps(payload) + "\nJSON\n")
+    stub.chmod(0o700)
+    return str(stub)
+
+
+def test_collect_scales_the_dispatch_split_by_the_basis(tmp_path, monkeypatch):
+    """THE WIRING, not the renderer. The rendering tests above hand render_breakdown an
+    already-scaled dict, so they pass whether or not collect() scales anything — a mutation
+    deleting `phantom_basis_factor()` from the split construction SURVIVED them. This one drives
+    the real subprocess path with a fixture and would catch it.
+
+    A Sonnet basis must halve the DISPATCH split as well as the phantom, or one block would show
+    two different bases at once.
+    """
+    payload = {"saved_usd": 40.0, "events": 3,
+               "by_session": [{"session": "sess-alpha", "saved_usd": 25.0, "events": 2},
+                              {"session": "sess-beta", "saved_usd": 15.0, "events": 1}]}
+    for basis, expected in (("opus", 25.0), ("sonnet", 12.5)):
+        # load_ct SETS COST_TRACKER_SAVINGS_CMD itself (default /bin/false), so the stub must be
+        # passed through its own parameter — a monkeypatch is clobbered by the fixture.
+        ct, _ledger = load_ct(tmp_path, savings_cmd=_savings_stub(tmp_path, payload))
+        monkeypatch.setenv("COST_TRACKER_PHANTOM_BASIS", basis)
+        data = ct.collect("today")
+        split = data.get("dispatch_by_session")
+        assert split, f"collect() must expose the split (basis={basis})"
+        assert abs(split["sess-alpha"] - expected) < 1e-9, \
+            f"basis={basis}: sess-alpha should be {expected}, got {split['sess-alpha']}"
+        assert abs(data["local_saved_basis_usd"] - 40.0 * (0.5 if basis == "sonnet" else 1.0)) < 1e-9
+        assert abs(sum(split.values()) - data["local_saved_basis_usd"]) < 1e-9, \
+            "the split must reconcile to the total on the SAME basis"
+
+
+def test_an_older_ledger_without_by_session_stays_none(tmp_path, monkeypatch):
+    """A ledger predating 0.43.2 has no by_session key. None — 'not measured' — must not become an
+    empty dict, which would read as 'measured, no dispatches'."""
+    ct, _ledger = load_ct(
+        tmp_path, savings_cmd=_savings_stub(tmp_path, {"saved_usd": 12.5, "events": 1}))
+    assert ct.collect("today")["dispatch_by_session"] is None
