@@ -145,3 +145,31 @@ def test_days_and_a_period_flag_conflict(tmp_path):
     p = subprocess.run(["python3", os.path.join(root, "bin", "cost-tracker"), "report",
                         "--days", "30", "--json"], capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
+
+
+def test_the_window_bounds_the_savings_read_too(tmp_path):
+    """A rolling window must bound EVERY read it drives, not just the records scan. Before this
+    fix, `--days 30` showed a 30-day phantom beside a 1-day dispatch figure and totalled the two
+    different windows as one number — found by running it, not by reading it."""
+    argv_file = tmp_path / "argv.txt"
+    stub = tmp_path / "savings-argv.sh"
+    # .replace, not %-formatting: the shell body contains % characters and two targets to fill,
+    # and a format string with a mismatched count fails at WRITE time, not at run time.
+    stub.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > @ARGV@\n"
+                    "echo '{\"saved_usd\": 0, \"events\": 0, \"by_session\": []}'\n"
+                    .replace("@ARGV@", str(argv_file)))
+    stub.chmod(0o700)
+    ct, _ledger = load_ct(tmp_path, savings_cmd=str(stub))
+    ct.collect(ndays=7)
+    argv = argv_file.read_text().split()
+    assert any(a.startswith("--since=") for a in argv), \
+        f"a window must reach the savings ledger with a --since bound, got {argv}"
+    got = [a.split("=", 1)[1] for a in argv if a.startswith("--since=")][0]
+    expect = min(ct.period_days("today", None, 7))
+    assert got == expect, f"the savings window must start at the oldest day {expect}, got {got}"
+
+    # And a plain period still uses the period's own flag, unchanged.
+    argv_file.unlink()
+    ct2, _ = load_ct(tmp_path, savings_cmd=str(stub))
+    ct2.collect("today")
+    assert "--today" in argv_file.read_text().split()

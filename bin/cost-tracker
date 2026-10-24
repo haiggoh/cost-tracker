@@ -1079,8 +1079,15 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
     if fast:
         savings = read_savings_fast()
     else:
-        savings = read_savings(PERIODS.get(period, ("", "--today"))[1] if not since
-                              else "--since=" + since)
+        # A rolling window bounds the savings read too, or the block would show a 30-day
+        # phantom beside a 1-day dispatch figure and total two different windows as one number.
+        if ndays:
+            flag = "--since=" + min(days)
+        elif since:
+            flag = "--since=" + since
+        else:
+            flag = PERIODS.get(period, ("", "--today"))[1]
+        savings = read_savings(flag)
 
     cap = cap_usd(auto_learn=not fast)
     cap_source = "unset"
