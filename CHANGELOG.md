@@ -2,6 +2,24 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.18.3] — 2026-10-24 — a rolling window bounds the savings read too
+
+### Fixed — a rolling window bounds the savings read too
+
+`report --days 30` scoped the *records* scan to 30 days but still read the savings ledger for
+**today only**, so the block showed a 30-day phantom beside a 1-day dispatch figure and totalled
+two different windows as one number. Found by running it, not by reading it: the dispatch row read
+`0.00 (0 dispatches)` on a day with three dispatches on record.
+
+The window now bounds every read it drives. With free-agents 0.43.2's history fix, the same
+command now shows the dispatches — the two fixes only work together.
+
+### Verification
+
++1 test in `tests/test_rolling_window.py` (10 in that file): a stub records the argv the savings
+subprocess is given, so the test can assert the window reached it with a `--since` bound equal to
+the oldest day — and that a plain period still uses its own flag. Mutation-checked by disabling the
+window branch.
 ## [0.18.2] — 2026-10-24 — per-session dispatch savings, and the invisible history
 
 ### Corrects 0.17.0/0.17.1 — per-session DISPATCH savings was available too
