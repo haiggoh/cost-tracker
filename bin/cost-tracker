@@ -774,10 +774,18 @@ PERIODS = {
 }
 
 
-def period_days(period, since=None):
+MAX_WINDOW_DAYS = 400      # one row per UTC day; a ceiling stops a typo printing thousands
+
+
+def period_days(period, since=None, ndays=None):
     """The inclusive list of UTC dates a period covers, newest last."""
     today = date.fromisoformat(TODAY)
-    if since:
+    if ndays:
+        # A rolling window ending today, same as --week/--month but user-sized. A window of 1
+        # is exactly "today", and one larger than the history is clamped by the loop below
+        # (it simply yields the days that exist rather than inventing empties).
+        start = today - timedelta(days=max(1, ndays) - 1)
+    elif since:
         start = date.fromisoformat(since)
     elif period == "week":
         start = today - timedelta(days=6)
@@ -1005,19 +1013,24 @@ def estimate_unseen(days, covered_sids, fast=False):
     return out
 
 
-def collect(period="today", since=None, fast=False, days=None):
+def collect(period="today", since=None, fast=False, days=None, ndays=None,
+            want_series=False):
     """Build the report data. Membership is explicit in every field name.
 
     `days` overrides the period with an explicit set of UTC dates — how the calibration
-    harness asks for one past day at a time.
+    harness asks for one past day at a time. `ndays` is the rolling window ending today.
     """
     if days is not None:
         days = set(days)
         label = (sorted(days)[0] if len(days) == 1
                  else f"{min(days)} … {max(days)}")
     else:
-        days = set(period_days(period, since))
-        label = PERIODS.get(period, (period, ""))[0] if not since else f"since {since}"
+        days = set(period_days(period, since, ndays))
+        if ndays:
+            label = f"last {len(days)} day(s)"
+        else:
+            label = (PERIODS.get(period, (period, ""))[0] if not since
+                     else f"since {since}")
     merged, quarantined = _merged_records(fast=fast)
 
     per_session_day = {k: v for k, v in merged.items() if k[1] in days}
@@ -1152,6 +1165,10 @@ def collect(period="today", since=None, fast=False, days=None):
         # ITS OWN ledger line (field 4), so this needs no statusline render of its own — the same
         # source the statusline reads, exposed as data instead of summed away.
         "savings_by_session": savings_by_session,
+        # Per-day series, ONLY when asked for. collect() is the statusline hot path and
+        # daily_totals() takes a second pass over the merged records, so this must never be
+        # computed for a render that will not show it.
+        "daily_series": (daily_totals(sorted(days)) if want_series and len(days) > 1 else None),
         "phantom_basis": phantom_basis_name(),
         "quarantined": quarantined,
     }
@@ -1291,7 +1308,8 @@ def daily_totals(days):
     """
     merged, _quarantined = _merged_records()
     out = {d: {"ours_usd": 0.0, "sessions_counted": 0, "reset_anchored_sessions": 0,
-               "estimated_usd": 0.0, "uncovered_usd": 0.0, "classifier_usd": 0.0}
+               "estimated_usd": 0.0, "uncovered_usd": 0.0, "classifier_usd": 0.0,
+               "phantom_usd": 0.0}
            for d in days}
     covered = defaultdict(set)
     for (sid, day), rec in merged.items():
@@ -1300,12 +1318,16 @@ def daily_totals(days):
             continue
         covered[day].add(sid)
         row["ours_usd"] += rec.day_usd
+        dp = rec.day_phantom
+        if rec.axis == "local" and dp is not None:
+            row["phantom_usd"] += dp
         if rec.valid and rec.axis == "cloud":
             row["sessions_counted"] += 1
         if rec.reset_anchored:
             row["reset_anchored_sessions"] += 1
     for day, row in out.items():
         row["ours_usd"] = round(row["ours_usd"], 4)
+        row["phantom_usd"] = round(row["phantom_usd"], 4)
         # Same estimate collect() adds to billed_usd, so the markup learned from these rows
         # is the markup ON TOP of the estimate — not one that already absorbed it.
         e = estimate_unseen([day], covered[day])
@@ -1531,6 +1553,55 @@ def render_breakdown(data):
             lines.append(f"  (recorded on the Opus 5.5 basis: ${stored:.2f}{suffix})")
     lines.append("")
     lines.append("  `cost-tracker report --json` prints every figure in this section as data.")
+    # The per-day trend, only when the window actually spans days. On a single-day report it
+    # would restate the total and earn its lines by saying nothing new.
+    if data.get("daily_series") and len(data["daily_series"]) > 1:
+        lines.append("")
+        lines.append(render_trend(data))
+    return "\n".join(lines)
+
+
+TREND_WIDTH = 26          # narrower than the category bars: a date label takes its own space
+
+
+def render_trend(data):
+    """One row per day over the window: cloud spend, its percentage of the cap, and what the
+    free lanes saved that day.
+
+    The bars are scaled to the CAP, not to the busiest day — the question a rolling window
+    answers is "how close did each day run to the ceiling", and scaling to the max day would
+    make a uniformly bad month look comfortable. Days with no data are shown as an explicit
+    zero rather than skipped, because a gap in the series is information.
+    """
+    series = data.get("daily_series") or {}
+    cap = data.get("cap_usd")
+    markup = data.get("markup") or MARKUP_IDENTITY
+    lines = [f"trend — {data.get('period', 'period')} "
+             f"({len(series)} UTC day(s), oldest first)", ""]
+    if not series:
+        lines.append("  (no daily series for this window)")
+        return "\n".join(lines)
+    # The scale: the cap when there is one, else the largest billed day. Stated in the header so
+    # the bar lengths are readable rather than assumed.
+    billed_max = max((r["ours_usd"] + r.get("estimated_usd", 0.0)) * markup for r in series.values())
+    scale = cap if cap else (billed_max or 1.0)
+    lines.append(f"  bar length is scaled to ${scale:.2f}"
+                 + ("" if cap else " (the highest day — no cap is known)"))
+    for day in sorted(series):
+        row = series[day]
+        billed = (row["ours_usd"] + row.get("estimated_usd", 0.0)) * markup
+        frac = billed / scale if scale else 0.0
+        # "of cap" only when there IS a cap: with none, the phrase is a dangling qualifier
+        # ("40.23 — of cap") that reads as a missing figure rather than an absent denominator.
+        of_cap = f"  {billed / cap * 100:5.1f}% of cap" if cap else ""
+        saved = row.get("phantom_usd") or 0.0
+        lines.append("  " + _bar(frac) + f"  {day}  {billed:>7.2f}{of_cap}"
+                     + (f"  saved {('$%.2f' % saved):>10}" if saved else ""))
+    lines.append("")
+    total = sum((r["ours_usd"] + r.get("estimated_usd", 0.0)) * markup for r in series.values())
+    days_counted = sum(1 for r in series.values() if r["ours_usd"] or r.get("estimated_usd"))
+    lines.append(f"  {days_counted} of {len(series)} day(s) carry spend; billed total "
+                 f"${total:.2f}")
     return "\n".join(lines)
 
 
@@ -2108,6 +2179,9 @@ def main(argv=None):
     rep = sub.add_parser("report", help="per-session breakdown table for a period")
     add_period(rep)
     rep.add_argument("--full-ids", action="store_true", help="print full session UUIDs")
+    rep.add_argument("--days", type=int, metavar="N", dest="ndays",
+                     help="rolling window of the last N UTC days ending today (e.g. 30). "
+                          "Mutually exclusive with --today/--week/--month/--since")
     rep.add_argument("--breakdown", action="store_true",
                      help="add the visual section: spend by category and savings on the free "
                           "lanes, as labelled percentage bars")
@@ -2191,6 +2265,20 @@ def main(argv=None):
             date.fromisoformat(since)
         except ValueError:
             ap.error("--since needs a YYYY-MM-DD date")
+    # The help says --days is mutually exclusive with the period flags, so it must be ENFORCED.
+    # `period` defaults to "today" via set_defaults, so an explicit --today is indistinguishable
+    # from the default; --days wins that case rather than erroring on an invisible conflict.
+    ndays = getattr(args, "ndays", None)
+    if ndays is not None and (since or getattr(args, "period", "today") != "today"):
+        ap.error("--days N is mutually exclusive with --since and --today/--week/--month")
+    if ndays is not None and ndays < 1:
+        ap.error("--days needs a positive number of days")
+    # A rolling window is bounded by the CALENDAR (period_days has no idea what data exists), so
+    # without a ceiling a typo like `--days 40000` prints forty thousand zero rows. The window is
+    # one row per day by design, so the bound is a usability limit, not a data one.
+    if ndays is not None and ndays > MAX_WINDOW_DAYS:
+        ap.error(f"--days is capped at {MAX_WINDOW_DAYS} (one row per UTC day); "
+                 f"use --since YYYY-MM-DD for a longer span")
 
     if cmd == "calibrate":
         data = calibrate(since_days=args.since_days, tolerance=args.tolerance)
@@ -2356,7 +2444,11 @@ def main(argv=None):
     basis_flag = getattr(args, "phantom_basis", None)
     if basis_flag:
         os.environ["COST_TRACKER_PHANTOM_BASIS"] = basis_flag
-    data = collect(period, since, fast=getattr(args, "fast", False))
+    # The per-day series is a second pass over the merged records, so it is requested only when
+    # the breakdown will actually draw it — never for a plain report, and never for the statusline.
+    data = collect(period, since, fast=getattr(args, "fast", False),
+                   ndays=getattr(args, "ndays", None),
+                   want_series=getattr(args, "breakdown", False))
 
     if getattr(args, "json", False):
         print(json.dumps(data, indent=2, sort_keys=True))
