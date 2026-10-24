@@ -44,10 +44,14 @@ Environment:
 Exit status is 0 on success, 2 on a usage error, and 1 on a refused edit (already-present
 version, or a file with no numbered heading to insert above)."""
 
-HEADING_RE = re.compile(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\](.*)$", re.M)
+HEADING_RE = re.compile(r"^## \[?([0-9]+\.[0-9]+\.[0-9]+)\]?(.*)$", re.M)
 # A prose section such as `## [Unreleased]` is not an anchor: inserting above a non-numbered
 # heading would put a dated release above a bucket that must stay newest.
-NUMBERED_HEADING_RE = re.compile(r"^## \[[0-9]+\.[0-9]+\.[0-9]+\]", re.M)
+#
+# BOTH bracket styles: Keep-a-Changelog permits `## 1.2.3` and `## [1.2.3]`. The bracketed-only
+# form refused to operate on run-to-completion's CHANGELOG (it uses `## 0.6.3`) — the same
+# over-narrow-regex slip this tool exists to remove, inside the tool itself.
+NUMBERED_HEADING_RE = re.compile(r"^## \[?[0-9]+\.[0-9]+\.[0-9]+\]?", re.M)
 
 
 def normalise(version):
