@@ -2,6 +2,51 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.18.0] — 2026-10-24
+
+### Added — the 30-day rolling window
+
+`report --days N` reports the last N UTC days ending today, and `--breakdown` appends a **trend**:
+one row per day with its cloud spend, its percentage of the cap, and what the free lanes saved
+that day.
+
+    2026-10-21    40.13  saved     $13.15
+    2026-10-22    40.18  saved    $325.06
+    2026-10-23    40.16  saved    $790.85
+
+**The bars are scaled to the CAP, not to the busiest day.** A rolling window answers "how close
+did each day run to the ceiling", and scaling to the maximum would make a uniformly bad month
+look comfortable — the wrong lesson from the exact view meant to catch it. With no cap known the
+scale falls back to the highest day and *says so*.
+
+`period_days()` remains a calendar-range function with no knowledge of what data exists, so
+`--days 40000` really would enumerate 40,000 dates. The CLI caps the window at `MAX_WINDOW_DAYS`
+(400, one row per day) rather than the range function pretending to clamp, and `--days` is
+mutually exclusive with `--today/--week/--month/--since` — **enforced**, not just documented.
+
+The per-day series is computed only when `--breakdown` asks for it: `collect()` is the statusline
+hot path and the series is a second pass over the merged records.
+
+### Two things running it found that reading it would not have
+
+- With no cap known, every row read `40.23 — of cap`: the qualifier dangled where the percentage
+  should be, so an absent denominator looked like a missing figure. The phrase is now omitted
+  entirely when there is no cap.
+- The first version of the scale test used days at $20 and $40 against a $40 cap — where the cap
+  and the busiest day **coincide**, so cap-scaling and max-day-scaling rendered identically and a
+  mutation flipping the scale **survived** it. The fixture now uses $10/$15, where the two differ
+  (25%/37.5% vs 67%/100%), and the mutation kills it. A planted positive has to be able to fail.
+
+### Verification
+
+`tests/test_rolling_window.py` (9): the window ends today and holds exactly N days; the label
+states its membership; the trend renders one row per day and names its scale; the bars scale to
+the cap; no dangling `of cap`; a single-day breakdown appends no trend; the CLI refuses `--days`
+against a period flag, a non-positive count, and a count over the cap, while accepting the valid
+combination. Mutation-checked by flipping the scale to max-day scaling.
+
+Full suite: 217 passed (`pytest -n auto`) and all four shell suites pass.
+
 ## [0.17.1] — 2026-10-24
 
 ### Corrects 0.17.0 — per-session savings was always available
