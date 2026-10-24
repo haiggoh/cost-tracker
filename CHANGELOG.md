@@ -2,6 +2,32 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.18.1] — 2026-10-24 — changelog-prepend: the anchor is the script's job
+
+### Added — `changelog-prepend.py`, a barrier for a repeated slip
+
+Adding a release entry needs the PREVIOUS version as the edit anchor, and writing the new one
+there is a slip made **four times in one session** (2026-10-24) — each time the edit tool refused
+to match, so the outcome was protected but the turn was wasted. `bin/changelog-prepend.py`
+removes the step instead of reminding about it: it reads the file, finds the top numbered
+`## [x.y.z]` heading **itself**, and inserts above it. The caller never names the previous version.
+
+    changelog-prepend.py 0.19.0 "A release" --body notes.md
+
+It also refuses a duplicate version rather than silently doubling an entry, keeps an
+`## [Unreleased]` block above the new dated release, normalises a `v`-prefixed tag, preserves the
+file's mode (in-place write, not tmp-plus-mv), and offers `--check` as a release gate. `--help`
+writes nothing and arguments are parsed before any file is opened.
+
+This entry was added by the tool it announces.
+
+### Verification
+
+`tests/test_changelog_prepend.py` (14): the anchor is found by search not position; a duplicate
+version is refused and leaves the file byte-identical; a non-version and a missing file are
+refused; `--help` and `--dry-run` write nothing; `--check` gates; an `Unreleased` block stays
+above; a 600 file stays 600. Mutation-checked by weakening the insert to a blind top-of-file
+insert, which the ordering test catches.
 ## [0.18.0] — 2026-10-24
 
 ### Added — the 30-day rolling window
