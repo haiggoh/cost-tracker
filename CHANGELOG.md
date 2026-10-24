@@ -2,6 +2,48 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.18.2] — 2026-10-24 — per-session dispatch savings, and the invisible history
+
+### Corrects 0.17.0/0.17.1 — per-session DISPATCH savings was available too
+
+Those notes said "the savings events record `"session": "None"`, so the split is not
+recoverable". **That was true only of events recorded before free-agents 0.33.0**, which added
+`--session`. Measured 2026-10-24: every event since then carries a session id, and three distinct
+sessions are on record. The claim is corrected here rather than left to mislead.
+
+Events predating `--session` group under `unknown` — stated, not folded into a wrong bucket.
+
+### Added — per-session dispatch savings in the breakdown
+
+`report --breakdown` now shows which session's dispatches saved how much (free-agents
+`report --json` `by_session`, 0.43.2), beside the per-free-lane-session phantom rows. Two kinds
+of saving, two kinds of row, as before.
+
+The split is scaled by the configured basis like everything else — a Sonnet view halves both
+axes or it is not one axis.
+
+### Fixed alongside — the savings ledger's history was invisible
+
+free-agents `3da0899` moved the ledger from `~/.claude/local-agents/` to `~/.claude/free-agents/`
+and took the history with it: new events went to the new file while the old one still held
+everything before, so every report read an empty file and **understated savings forever**
+(35 events stranded; `report --since 2026-01-01` returning 0). Fixed in free-agents 0.43.2, which
+reads both locations and merges them, appending to the live one only.
+
+### Also noted while fixing it
+
+Nothing ever regenerates `rollup.json` — there is no caller for `savings-ledger.py rollup` — so
+`read_savings_fast()`, the documented "no subprocess" path, has **never once run in production**
+and always returns `None`. The subprocess path is the live one. Left as-is (harmless, and its
+staleness check is correct), but the "fast path" comment overstates what ships.
+
+### Verification
+
++2 wiring tests in `tests/test_visual_report.py` (15 in that file): they drive the real
+subprocess path through a fixture stub rather than handing the renderer a pre-scaled dict, and
+assert the split is basis-scaled and reconciles. **The mutation that dropped the basis factor
+survived the renderer-only tests and is caught only here** — the same renderer-vs-wiring gap that
+hid the earlier phantom bug, closed a second time.
 ## [0.18.1] — 2026-10-24 — changelog-prepend: the anchor is the script's job
 
 ### Added — `changelog-prepend.py`, a barrier for a repeated slip
