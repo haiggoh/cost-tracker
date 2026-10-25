@@ -2,6 +2,20 @@
 
 All notable changes to cost-tracker are documented here.
 
+## [0.18.4] — 2026-10-25 — the statusline shows when the last turn ended
+
+### Added — the turn-end timestamp segment
+
+Claude Code's end-of-turn "Crunched for 13m 33s" and the collapsed thinking block carry a
+DURATION but never the wall-clock time the turn finished (user ask, 2026-10-25). That line is
+harness-internal, so the renderer now derives the finish time itself: the timestamp of the
+session transcript's last assistant record (from the payload's documented `transcript_path`),
+converted to local time, rendered as a dim `ended HH:MM:SS` on line 1.
+
+Mid-turn it shows the latest streamed block — the honest live equivalent. The segment is
+dropped when the payload has no `transcript_path`, the file is missing, or its tail holds no
+assistant record; every failure loses only the segment, and the renderer still exits 0.
+
 ## [0.18.3] — 2026-10-24 — a rolling window bounds the savings read too
 
 ### Fixed — a rolling window bounds the savings read too

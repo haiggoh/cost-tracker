@@ -51,6 +51,11 @@ Reads the statusLine JSON payload on stdin and prints up to three lines:
     free api session saved $<session_phantom> · today: $<daily_saved> saved with free agents
     (no JoyIA mark, no cloud spend, no cap, no local RAM/tok/s telemetry)
 
+  Any variant may also carry a dim "ended <HH:MM:SS>" segment on line 1: the LOCAL time
+  of the session transcript's last assistant record — when the last turn finished.
+  Derived from the payload's transcript_path; absent when that is missing or the
+  transcript has no assistant record.
+
   <dir basename> · <branch> · <worktree> · +<added>/-<removed>
 
 Usage:
@@ -118,16 +123,17 @@ if command -v jq >/dev/null 2>&1; then
     , (.rate_limits.five_hour.used_percentage // null | pct)
     , (.rate_limits.seven_day.used_percentage // null | pct)
     , (.session_id                  // ""       | s)
+    , (.transcript_path             // ""       | s)
     ] | join("")
   ' 2>/dev/null || true)
 fi
 
 MODEL=Claude; EFFORT=; CWD=; CTX_CUR=; CTX_PCT=
-COST=; ADD=0; DEL=0; FIVEH=; SEVEND=; SID=
+COST=; ADD=0; DEL=0; FIVEH=; SEVEND=; SID=; TP=
 if [ -n "$FIELDS" ]; then
   # shellcheck disable=SC2162
   IFS="$(printf '\037')" read MODEL EFFORT CWD CTX_CUR CTX_PCT \
-                COST ADD DEL FIVEH SEVEND SID <<EOF
+                COST ADD DEL FIVEH SEVEND SID TP <<EOF
 $FIELDS
 EOF
 fi
@@ -395,6 +401,28 @@ elif [ "$SESSION_KIND" = "free_api" ]; then
         fi
     fi
 fi
+
+# --- the TURN-END segment (0.18.4) ---------------------------------------------
+# Claude Code's end-of-turn "Crunched for 13m 33s" and the collapsed thinking block
+# carry a DURATION but not the wall-clock time the turn finished (user ask,
+# 2026-10-25). That UI is harness-internal, so the time is derived here from the
+# session transcript: the timestamp of its last assistant record, converted to local
+# time. Mid-turn it shows the latest streamed block — the honest live equivalent.
+# Absent transcript, or no assistant record in the tail, renders nothing. A transcript
+# timestamp is UTC ISO ("...T22:44:03.907Z"); the fractional seconds are folded into a
+# +0000 offset so ONE BSD `date -f` call converts to local. Any failure loses only
+# this segment; the renderer still exits 0.
+ENDED=
+if [ -n "$TP" ] && [ -f "$TP" ]; then
+    LAST_TS=$(tail -n 40 "$TP" 2>/dev/null | jq -r 'select(.type=="assistant" and .timestamp) | .timestamp' 2>/dev/null | tail -1)
+    case "$LAST_TS" in
+        ????-??-??T??:??:??.*Z|????-??-??T??:??:??Z)
+            TS_NORM=$(printf '%s' "$LAST_TS" | sed -E 's/(\.[0-9]+)?Z$/+0000/')
+            ENDED=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$TS_NORM" '+%H:%M:%S' 2>/dev/null) || ENDED=
+            ;;
+    esac
+fi
+[ -n "$ENDED" ] && LINE1="${LINE1}${SEP}${DIM}ended ${ENDED}${RESET}"
 
 # --- the TODAY segment (cost-tracker) ----------------------------------------
 # Two dollar figures on one line MUST each name their axis, or this reproduces the

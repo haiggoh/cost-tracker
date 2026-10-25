@@ -474,6 +474,40 @@ rm -rf "$PTMP"
 
 rm -rf "$FTMP"
 
+# --- the TURN-END timestamp segment (0.18.4) ----------------------------------
+# The user's 2026-10-25 ask: Claude Code's end-of-turn "Crunched for 13m 33s" and the
+# collapsed thinking block carry a DURATION but never WHEN the turn finished. That line
+# is harness-internal and not modifiable, so the renderer derives the finish time from
+# the session transcript (its last assistant record) and renders a dim
+# "ended HH:MM:SS" on line 1. Everything below pins that contract.
+TTMP="$(mktemp -d)"
+TTRANS="$TTMP/transcript.jsonl"
+printf '%s\n' \
+  '{"type":"user","timestamp":"2026-10-24T10:00:00.000Z"}' \
+  '{"type":"assistant","timestamp":"2026-10-24T22:44:03.907Z"}' \
+  '{"type":"last-prompt","lastPrompt":"wrap"}' > "$TTRANS"
+TEND_EXPECT=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' '2026-10-24T22:44:03+0000' '+%H:%M:%S' 2>/dev/null)
+TPAY="{\"transcript_path\":\"$TTRANS\",\"workspace\":{\"current_dir\":\"/tmp/t-end\"}}"
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render "$TPAY")"
+has   "the turn-end time renders from the transcript's last assistant record" "$OUT" "ended $TEND_EXPECT"
+
+TNOASST="$TTMP/noassistant.jsonl"
+printf '%s\n' \
+  '{"type":"user","timestamp":"2026-10-24T10:00:00.000Z"}' \
+  '{"type":"last-prompt","lastPrompt":"still there?"}' > "$TNOASST"
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render "{\"transcript_path\":\"$TNOASST\",\"workspace\":{\"current_dir\":\"/tmp/t-end\"}}")"
+hasnt "a transcript with no assistant record renders no turn-end segment" "$OUT" "ended "
+
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render '{"transcript_path":"/nonexistent/x.jsonl","workspace":{"current_dir":"/tmp/t-end"}}')"
+rc=$?
+is "a missing transcript file still exits 0" "$rc" "0"
+hasnt "a missing transcript file renders no turn-end segment" "$OUT" "ended "
+
+OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render '{"model":{"display_name":"Opus 5"},"workspace":{"current_dir":"/tmp/t-end"}}')"
+hasnt "an absent transcript_path renders no turn-end segment" "$OUT" "ended "
+
+rm -rf "$TTMP"
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
