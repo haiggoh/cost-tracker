@@ -5,6 +5,7 @@ close did each day run to the ceiling", so the bars are scaled to the CAP, not t
 day: scaled to the max, a uniformly bad month looks comfortable, which is the exact wrong lesson
 to draw from the view. That is pinned below by a case where the two differ.
 """
+import json
 import os
 from datetime import date, timedelta
 
@@ -134,17 +135,27 @@ def test_days_and_a_period_flag_conflict(tmp_path):
     import subprocess
     # Exercise the CLI directly; the validation lives in main(), so a unit call cannot see it.
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # The child inherits os.environ, so pin the sandbox BEFORE spawning it. Unpinned, the valid
+    # call below scanned this machine's real 30-day ledger and transcripts: 0.8s or 235s depending
+    # on cache state, and the real billed figure in its output. HOME goes to an empty dir too, so
+    # any path load_ct does not pin lands in nothing rather than the real ~/.claude.
+    load_ct(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home))
     for extra in (["--days", "30", "--week"], ["--days", "30", "--since", "2026-10-01"],
                   ["--days", "0"], ["--days", "99999"]):
         p = subprocess.run(["python3", os.path.join(root, "bin", "cost-tracker"), "report"] + extra,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=env)
         assert p.returncode == 2, f"{extra} must be refused, got {p.returncode}"
         assert ("mutually exclusive" in p.stderr or "positive" in p.stderr
                 or "capped at" in p.stderr), p.stderr
     # And the valid combination must still work
     p = subprocess.run(["python3", os.path.join(root, "bin", "cost-tracker"), "report",
-                        "--days", "30", "--json"], capture_output=True, text=True)
+                        "--days", "30", "--json"], capture_output=True, text=True, env=env)
     assert p.returncode == 0, p.stderr
+    # An empty sandbox bills nothing; a real figure here means the pin above leaked.
+    assert json.loads(p.stdout)["billed_usd"] == 0, p.stdout[:300]
 
 
 def test_the_window_bounds_the_savings_read_too(tmp_path):
