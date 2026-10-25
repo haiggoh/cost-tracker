@@ -145,6 +145,9 @@ STAMP_PATH = os.environ.get("BUDGET_TALLY_STAMP", os.path.expanduser("~/.claude/
 # Authoritative per-session cost ledger written by the statusLine wrapper
 # ~/.claude/scripts/cost-ledger-capture.sh (see memory: cost-ledger-capture).
 LEDGER_DIR = os.environ.get("BUDGET_TALLY_LEDGER_DIR", os.path.expanduser("~/.claude/cost-ledger"))
+# The reconstructed lines' own axis. Separate from LEDGER_DIR on purpose: everything that reads
+# LEDGER_DIR treats what it finds as the authoritative .cost.total_cost_usd.
+RECON_DIR = os.environ.get("COST_LEDGER_RECON_DIR", os.path.expanduser("~/.claude/cost-ledger-reconstructed"))
 # "Today" is UTC, matching the gateway's cap-reset clock (not local time) — record
 # timestamps in transcripts are UTC (`...Z`), so this keeps the tally window aligned
 # with what's actually being priced instead of drifting by the local UTC offset.
@@ -659,6 +662,41 @@ def _dedupe_rewind_pairs(out):
                 out[parent] = 0.0
 
 
+def read_reconstructed_today():
+    """Permanent reconstructed lines: {session_id: usd} dated TODAY.
+
+    Written by hooks/session-end-reconcile.py for sessions whose statusLine never rendered, so the
+    authoritative ledger has no line for them. They live in their OWN directory precisely so no
+    reader of ~/.claude/cost-ledger can mistake them for a .cost.total_cost_usd.
+
+    They are preferred over re-deriving from the transcript for the same reason the ledger is:
+    a permanent record survives the transcript's deletion or rotation, and a derived figure does
+    not. They are NOT authoritative — the label in the reported wording is the whole point of
+    keeping them separate."""
+    out = {}
+    try:
+        names = os.listdir(RECON_DIR)
+    except OSError:
+        return out
+    for name in names:
+        if name.endswith(".tmp"):
+            continue
+        try:
+            with open(os.path.join(RECON_DIR, name), errors="ignore") as fh:
+                parts = fh.read().split()
+        except OSError:
+            continue
+        # Two fields, deliberately not the ledger's 3/5: "<utc-date> <reconstructed-cost>". A line
+        # that does not parse is ignored rather than guessed at.
+        if len(parts) != 2 or parts[0] != TODAY:
+            continue
+        try:
+            out[name] = float(parts[1])
+        except ValueError:
+            continue
+    return out
+
+
 def _ledger_cum(sid):
     """Return the latest cumulative cost for `sid` from its ledger file, or None."""
     path = os.path.join(LEDGER_DIR, sid)
@@ -1016,6 +1054,7 @@ SIDE_SPENDERS = (
 )
 _SIDE_LABEL = {s["id"]: s["label"] for s in SIDE_SPENDERS}
 LAST_BY_SOURCE = {}   # set by compute(); read by format_line
+LAST_RECON_LINES = {}   # set by compute(); permanent reconstructed lines, read by format_line
 
 
 def _remember_dirs():
@@ -1241,7 +1280,15 @@ def compute():
     paths = files_modified_today()
     # Reconstruct spend ONLY for sessions the ledger doesn't already cover
     # authoritatively — avoids double-counting a session both ways.
-    uncovered = [p for p in paths if _session_id_of(p) not in ledger]
+    # A session with a PERMANENT reconstructed line is covered too, and by the better source: the
+    # line survives its transcript's deletion or rotation and re-deriving does not.
+    recon_lines = read_reconstructed_today()
+    # Drop any session the LEDGER already covers authoritatively. A session can hold both (it
+    # rendered once, then a later SessionEnd hook ran anyway): keeping its reconstructed line would
+    # double-count it AND let the wording name a session whose cost is already authoritative.
+    recon_lines = {sid: v for sid, v in recon_lines.items() if sid not in ledger}
+    uncovered = [p for p in paths
+                 if _session_id_of(p) not in ledger and _session_id_of(p) not in recon_lines]
     # LOCAL-lane sessions are skipped: their transcripts carry spoofed cloud ids for free
     # compute. Before this, a local session with no ledger entry for today reconstructed at
     # Opus rates ($20.80 of invented spend on 2026-09-26).
@@ -1258,6 +1305,13 @@ def compute():
     global LAST_BY_SOURCE
     LAST_BY_SOURCE = _outside_sources(TODAY, uncovered, local)
     recon_total += outside_usd(LAST_BY_SOURCE)
+
+    # The permanent reconstructed lines: real spend from sessions that never rendered, recorded by
+    # the SessionEnd hook rather than re-derived here. Labelled, never authoritative.
+    global LAST_RECON_LINES
+    LAST_RECON_LINES = recon_lines
+    recon_lines_total = sum(recon_lines.values())
+    recon_total += recon_lines_total
 
     total = ledger_total + recon_total
     priced_any = recon_priced or bool(ledger)
@@ -1327,6 +1381,24 @@ def is_free_session():
                            "https://localhost", "https://127.0.0.1"))
 
 
+def _basis_wording(ledger_total, recon_total, recon_lines):
+    """How today's figure was arrived at, naming the permanent-recorded slice when there is one.
+
+    The slice is named whenever it exists, not only when an authoritative ledger does too: a day
+    with no ledger at all is exactly the day the reconstructed axis carries everything, so hiding
+    the label there would mislabel the whole figure as derived-this-moment."""
+    perm = sum(recon_lines.values())
+    perm_note = ""
+    if perm > 0:
+        perm_note = (f", ${perm:.2f} permanent-recorded from {len(recon_lines)} "
+                     "session(s) that never rendered")
+    if ledger_total > 0 and recon_total > 0:
+        return f"${ledger_total:.2f} authoritative + ${recon_total:.2f} reconstructed{perm_note}"
+    if ledger_total > 0:
+        return f"${ledger_total:.2f} authoritative"
+    return f"${recon_total:.2f} reconstructed{perm_note}"
+
+
 def _format_free_lane(total, unknown_models, ledger_total, recon_total):
     """A free lane prints the GATEWAY's day, and says whose money it is.
 
@@ -1346,12 +1418,7 @@ def _format_free_lane(total, unknown_models, ledger_total, recon_total):
         note = f" (unpriced model(s) excluded: {', '.join(sorted(unknown_models))})"
     billed = total * MARKUP
     fee = f" at fee ×{MARKUP:.2f}" if MARKUP != 1.0 else ""
-    if ledger_total > 0 and recon_total > 0:
-        basis = f"${ledger_total:.2f} authoritative + ${recon_total:.2f} reconstructed"
-    elif ledger_total > 0:
-        basis = f"${ledger_total:.2f} authoritative"
-    else:
-        basis = f"${recon_total:.2f} reconstructed"
+    basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES)
     side = side_spend_note(LAST_BY_SOURCE)
     cap = ""
     if CAP_USD:
@@ -1371,12 +1438,7 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
         session_scope = f"{session_scope}, this session ≈ ${current_session_total:.2f}"
     # Report the basis honestly: authoritative ledger vs token reconstruction
     # (reconstruction over-counts, so flag when any is mixed in).
-    if ledger_total > 0 and recon_total > 0:
-        basis = f"${ledger_total:.2f} authoritative + ${recon_total:.2f} reconstructed"
-    elif ledger_total > 0:
-        basis = "authoritative statusline cost-ledger"
-    else:
-        basis = "reconstructed from token usage"
+    basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES)
     kind = CONNECTION.get("kind") or ""
     if not CAP_USD:
         # No dollar cap applies to this connection (subscription windows, a Console key's

@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.19.0] — 2026-10-25 — a session that never rendered gets a permanent cost record
+
+### Added — a session that never rendered gets a PERMANENT cost record
+
+The cost ledger is written by the statusLine render, so a headless session (`claude -p`,
+the SDK, a background task, an agent run) recorded **nothing** — no spend line, and no
+phantom-savings line either, since that axis reads the ledger. The user's requirement
+(2026-10-24): "these recordings should not depend on a statusline render; the statusline
+and permanent record should both be informed by the same source."
+
+`hooks/session-end-reconcile.py` (declared in `hooks/hooks.json`, so it ships with the
+plugin and needs no `settings.json` hand-edit) writes
+
+    ~/.claude/cost-ledger-reconstructed/<session_id>   ->   "<utc-date> <cost>"
+
+for a session with no ledger line, reconstructed from the transcript the payload carries.
+**Its own directory is the load-bearing decision**: every reader of `~/.claude/cost-ledger`
+treats what it finds there as the authoritative `.cost.total_cost_usd`, so a reconstructed
+figure must never be able to sit beside them and be mistaken for one. The two-field shape
+is deliberately different from the ledger's 3/5, so a format-expecting parser cannot
+silently reinterpret it.
+
+`budget-tally` now reads that axis and **prefers it over re-deriving from the transcript**
+— a permanent record survives the transcript's deletion or rotation, and always labelling
+it as ours. A session holding both an authoritative line and a reconstructed one is
+counted once (the authoritative one), and the wording never names a session the ledger
+already covers. The reported line gains a named slice:
+`$1.53 permanent-recorded from 1 session(s) that never rendered`.
+
+Measured first, as the plan required: reconstruction now agrees with the ledger to
+**0.99–1.00x across eight days** (worst −1.4%), so the old ~4x cache-token over-count
+that made this design unacceptable is stale — it was fixed 2026-07-21 by reading the
+authoritative ledger instead of reconstructing. The gap it leaves is real but small: on
+2026-10-24, **6 sessions with no ledger entry and $2.45 of reconstructed spend**, now
+individually identified. The hook fails OPEN on every path — malformed stdin, a missing
+transcript, an unwritable directory — because it must never be the reason a session
+cannot exit.
+
+16 new tests over scratch paths, both directions, and mutation-checked: disabling the
+"rendered sessions are never touched" guard turns exactly the right test red, and so does
+disabling the no-double-count filter.
+
 All notable changes to cost-tracker are documented here.
 
 ## [0.18.4] — 2026-10-25 — the statusline shows when the last turn ended
