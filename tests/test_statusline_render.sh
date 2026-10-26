@@ -507,6 +507,73 @@ OUT="$(ANTHROPIC_BASE_URL=https://api.anthropic.com render '{"model":{"display_n
 hasnt "an absent transcript_path renders no turn-end segment" "$OUT" "ended "
 
 rm -rf "$TTMP"
+# ---------------------------------------------------------------------------
+# The free-agents helper lookup must prefer the INSTALLED copy over a developer
+# workspace checkout, and must never touch a workspace at all: a branch switch in
+# ~/ClaudeWorkspace/free-agents would otherwise change what the LIVE statusline
+# runs, which is exactly what the live-wiring plan exists to stop.
+printf '\n== free-agents helper resolution ==\n'
+
+# A fake machine: a workspace checkout AND an installed (registry-recorded) copy,
+# each with an identity stub echoing a different marker.
+# An earlier section EXPORTED COST_FREE_AGENTS_BIN for its own stub; without this
+# unset every render below would resolve through that stub and this section would
+# measure the override, not the order it is here to test.
+unset COST_FREE_AGENTS_BIN
+unset FREE_AGENTS_PLUGIN
+FHOME=$(mktemp -d)
+WS="$FHOME/ClaudeWorkspace/free-agents/bin"
+FINST="$FHOME/inst/cache/haiggoh/free-agents/0.20.0"
+mkdir -p "$WS" "$FINST/bin" "$FINST/.claude-plugin" "$FHOME/.claude/plugins/cache/haiggoh"
+printf '#!/bin/sh\ntouch %s\necho %s\n' "$FHOME/FROM-WS" '{"session_kind":"local","unknown_fallback":false}' \
+    > "$WS/la-session-identity.sh"
+printf '#!/bin/sh\ntouch %s\necho %s\n' "$FHOME/FROM-INSTALLED" '{"session_kind":"local","unknown_fallback":false}' \
+    > "$FINST/bin/la-session-identity.sh"
+chmod +x "$WS/la-session-identity.sh" "$FINST/bin/la-session-identity.sh"
+printf '%s\n' '{"name":"free-agents","version":"0.20.0"}' > "$FINST/.claude-plugin/plugin.json"
+# the registry records the INSTALLED copy; the workspace checkout is not in it
+printf '%s' '{"plugins":{"free-agents@haiggoh":[{"scope":"user","installPath":"'"$FINST"'"}]}}' \
+    > "$FHOME/.claude/plugins/installed_plugins.json"
+
+# The stubs record WHICH COPY RAN by their side effect, so the observation is direct
+# and does not depend on how the rendered line spells the session kind.
+RENDER_AT() { # RENDER_AT <home> [extra env assignments...]
+    local _h="$1"; shift
+    printf '%s' '{"session_id":"s","cost":{"total_cost_usd":1.5},"model":{"display_name":"M"},"workspace":{"current_dir":"/tmp"}}' \
+        | env "$@" HOME="$_h" sh "$RENDER" >/dev/null 2>&1
+}
+
+RENDER_AT "$FHOME"
+is "the installed copy runs, not the workspace checkout" \
+   "$([ -f "$FHOME/FROM-INSTALLED" ] && echo installed || echo notrun)" "installed"
+is "the workspace stub is NOT used" \
+   "$([ -f "$FHOME/FROM-WS" ] && echo ws || echo notrun)" "notrun"
+
+# --- the override, and failing loudly when it is set but wrong ------------------
+rm -f "$FHOME/FROM-WS" "$FHOME/FROM-INSTALLED"
+RENDER_AT "$FHOME" COST_FREE_AGENTS_BIN="$WS"
+is "an explicit override still wins" \
+   "$([ -f "$FHOME/FROM-WS" ] && echo ws || echo notrun)" "ws"
+
+rm -f "$FHOME/FROM-WS" "$FHOME/FROM-INSTALLED"
+# An override that is set but wrong must fail LOUDLY: silently falling back would run
+# a different copy than the operator asked for, which is the failure mode this whole
+# plan exists to prevent. Nothing runs -- not the installed copy, not the workspace.
+BAD_ERR="$(printf '%s' '{"session_id":"s","cost":{"total_cost_usd":1},"model":{"display_name":"M"},"workspace":{"current_dir":"/tmp"}}' \
+    | env COST_FREE_AGENTS_BIN="$FHOME/nope" HOME="$FHOME" sh "$RENDER" 2>&1 >/dev/null)"
+is "an invalid override fails loudly (stderr names the var)" \
+   "$(printf '%s' "$BAD_ERR" | grep -c 'COST_FREE_AGENTS_BIN')" "1"
+is "an invalid override runs nothing at all" \
+   "$([ -f "$FHOME/FROM-INSTALLED" ] || [ -f "$FHOME/FROM-WS" ] && echo ran || echo notrun)" "notrun"
+
+# --- nothing installed anywhere: the segment is omitted, silently ---------------
+EMPTY=$(mktemp -d)
+rm -f "$FHOME/FROM-INSTALLED" "$FHOME/FROM-WS"   # no marker may survive from above
+RENDER_AT "$EMPTY"
+is "with no plugin installed nothing is run at all" \
+   "$([ -f "$FHOME/FROM-INSTALLED" ] || [ -f "$FHOME/FROM-WS" ] && echo ran || echo notrun)" "notrun"
+
+rm -rf "$FHOME" "$EMPTY"
 
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"

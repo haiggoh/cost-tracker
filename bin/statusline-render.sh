@@ -174,29 +174,93 @@ fi
 # RAM and tok/s while the LIVE statusline silently omitted all three and displayed the
 # spoofed model ("Opus 5") -- the difference between the two environments WAS the bug.
 #
-# Resolution order: an explicit override ($COST_FREE_AGENTS_BIN), then the developer
-# checkout (so a local fix is what gets exercised), then the highest-versioned installed
-# plugin cache, then PATH as a last courtesy. Version sort is numeric-aware so 0.17.10
-# beats 0.17.9 -- a plain lexical sort picks 0.17.9 and would pin an older copy as soon
-# as a .10 exists. The checkout paths are developer-local conventions ($HOME/ClaudeWorkspace/...);
-# on a fresh install where the repo is elsewhere the cache path is the fallback.
+# Resolution order (the live-wiring plan's §Spec): an explicit override
+# ($COST_FREE_AGENTS_BIN, which fails loudly when set but wrong), then
+# $FREE_AGENTS_PLUGIN/bin, then the installPath that installed_plugins.json records
+# for free-agents@haiggoh, then the highest-versioned plugin cache -- then nothing,
+# and the segment is omitted. There is deliberately NO workspace probe: a branch
+# switch in ~/ClaudeWorkspace/free-agents must not change what the live statusline
+# runs, and there is no PATH fallback either (it finds the file under the Bash tool
+# and not in a live statusline, which is the environment difference that WAS the bug).
+# The registry read is cached on its mtime, so the hot path forks python only when
+# the recorded install actually changes.
 _fa_find() {
     _fa_name="$1"
-    if [ -n "${COST_FREE_AGENTS_BIN:-}" ] && [ -x "$COST_FREE_AGENTS_BIN/$_fa_name" ]; then
-        printf '%s' "$COST_FREE_AGENTS_BIN/$_fa_name"; return 0
+
+    # 1. the explicit override. Set but wrong is a hard failure: a typo must not
+    #    silently resolve somewhere else.
+    if [ -n "${COST_FREE_AGENTS_BIN:-}" ]; then
+        if [ -x "$COST_FREE_AGENTS_BIN/$_fa_name" ]; then
+            printf '%s' "$COST_FREE_AGENTS_BIN/$_fa_name"; return 0
+        fi
+        printf 'statusline-render: COST_FREE_AGENTS_BIN=%s holds no executable %s\n' \
+            "$COST_FREE_AGENTS_BIN" "$_fa_name" >&2
+        return 1
     fi
-    for _fa_dir in "$HOME/ClaudeWorkspace/local-agents/bin" "$HOME/ClaudeWorkspace/free-agents/bin"; do
-        if [ -x "$_fa_dir/$_fa_name" ]; then printf '%s' "$_fa_dir/$_fa_name"; return 0; fi
-    done
-    _fa_cache="$HOME/.claude/plugins/cache/haiggoh/free-agents"
+
+    # 2. the plugin override var, for symmetry with the other plugins
+    if [ -n "${FREE_AGENTS_PLUGIN:-}" ] && [ -x "$FREE_AGENTS_PLUGIN/bin/$_fa_name" ]; then
+        printf '%s' "$FREE_AGENTS_PLUGIN/bin/$_fa_name"; return 0
+    fi
+
+    # 3. the installPath the plugin manager recorded
+    _fa_plugins="${CLAUDE_PLUGINS_DIR:-$HOME/.claude/plugins}"
+    _fa_reg="$_fa_plugins/installed_plugins.json"
+    _fa_cache_dir="${HAIGGOH_SHIM_CACHE:-$HOME/.cache/haiggoh-shims}"
+    _fa_cache_file="$_fa_cache_dir/free-agents"
+    # content checksum, not mtime: a registry rewritten twice in the same second has
+    # the same mtime (macOS granularity), so a mtime-keyed cache serves the stale answer
+    _fa_mtime=""
+    [ -f "$_fa_reg" ] && _fa_mtime=$(cksum < "$_fa_reg" 2>/dev/null | cut -d" " -f1)
+    if [ -n "$_fa_mtime" ] && [ "$_fa_mtime" != "0" ] && [ -f "$_fa_cache_file" ]; then
+        read -r _c_mtime _c_dir < "$_fa_cache_file" 2>/dev/null || _c_mtime=""
+        if [ "${_c_mtime:-}" = "$_fa_mtime" ] && [ -n "${_c_dir:-}" ] \
+           && [ -x "$_c_dir/bin/$_fa_name" ]; then
+            printf '%s' "$_c_dir/bin/$_fa_name"; return 0
+        fi
+    fi
+    if [ -f "$_fa_reg" ]; then
+        _fa_dir=$(_REG="$_fa_reg" _NAME="free-agents@haiggoh" python3 -c '
+import json, os, sys
+try:
+    with open(os.environ["_REG"]) as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(1)
+plugins = data.get("plugins") if isinstance(data, dict) else None
+entries = plugins.get(os.environ["_NAME"]) if isinstance(plugins, dict) else None
+if not isinstance(entries, list):
+    sys.exit(1)
+for entry in entries:
+    if not isinstance(entry, dict):
+        continue
+    path = entry.get("installPath")
+    if not isinstance(path, str) or not path:
+        continue
+    if os.path.isfile(os.path.join(path, ".claude-plugin", "plugin.json")):
+        print(path)
+        sys.exit(0)
+sys.exit(1)
+' 2>/dev/null)
+        if [ -n "$_fa_dir" ] && [ -x "$_fa_dir/bin/$_fa_name" ]; then
+            # refresh the cache for the next warm render; failure here is never fatal
+            [ -d "$_fa_cache_dir" ] || mkdir -p "$_fa_cache_dir" 2>/dev/null
+            printf '%s %s\n' "$_fa_mtime" "$_fa_dir" > "$_fa_cache_file" 2>/dev/null
+            printf '%s' "$_fa_dir/bin/$_fa_name"; return 0
+        fi
+    fi
+
+    # 4. the highest-versioned cache dir. Version sort is numeric-aware so 0.17.10
+    #    beats 0.17.9 -- a plain lexical sort picks 0.17.9 and pins an older copy.
+    _fa_cache="$_fa_plugins/cache/haiggoh/free-agents"
     if [ -d "$_fa_cache" ]; then
         _fa_hit=$(ls -1 "$_fa_cache" 2>/dev/null | sort -t. -k1,1n -k2,2n -k3,3n | while read -r _fa_ver; do
             [ -x "$_fa_cache/$_fa_ver/bin/$_fa_name" ] && printf '%s\n' "$_fa_cache/$_fa_ver/bin/$_fa_name"
         done | tail -1)
         if [ -n "$_fa_hit" ]; then printf '%s' "$_fa_hit"; return 0; fi
     fi
-    # Last resort: PATH. Works under the Bash tool; will not find it in a live statusline.
-    if command -v "$_fa_name" >/dev/null 2>&1; then command -v "$_fa_name"; return 0; fi
+
+    # 5. nothing: the caller omits the segment
     return 1
 }
 

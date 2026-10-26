@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.20.0] — 2026-10-26 — entry points resolve per call, so an update needs no re-wiring
+
+### Added — the version is resolved, not frozen at install time
+
+Every entry point this plugin owns now resolves **where the installed copy is** at each
+invocation, in one documented order: the `COST_TRACKER_PLUGIN` override (which fails
+loudly when set but wrong), then the `installPath` that `installed_plugins.json` records
+for `cost-tracker@haiggoh`, then the highest-versioned cache directory, then exit 1.
+Nothing found is now an explicit failure with one stderr line instead of a silent
+fallback to whatever directory the script happened to live in.
+
+- **`bin/cost-tracker-resolve.sh`** implements that order and answers `--which`.
+- **`install/shim-template.sh`** (new) is the one shim body, parameterised by plugin
+  name, override var and relative target. `install/wire-statusline.sh` now writes
+  shims instead of symlinks for the three `~/.claude/scripts` entry points, and points
+  `settings.json` `statusLine.command` at the **versionless** `scripts/` path. A plugin
+  update therefore takes effect with no re-wiring, and a branch switch in a workspace
+  checkout changes nothing live.
+- A shim answers `--which` with the target it would exec, so "which copy am I running"
+  is answerable from the entry point itself.
+- A plain file this plugin did not write at an entry point is **refused** (exit 1)
+  unless `--force`; a symlink or an existing shim is replaced, with a timestamped
+  backup and its mode preserved.
+- Arguments are forwarded, not parsed — intercepting `--help` would break any target
+  that takes its own. The one exception is the first-argument `--which`.
+- **`bin/statusline-render.sh`** resolves the free-agents helpers in the same order and
+  no longer probes `~/ClaudeWorkspace/*`: a developer checkout can no longer change
+  what the live statusline runs, and the PATH fallback (which found the files under the
+  Bash tool and not in a live statusline — the environment difference that *was* the
+  bug) is gone.
+- The resolution cache is keyed on the registry's **content checksum**, not its mtime:
+  a registry rewritten twice inside the same second has an identical mtime on macOS, so
+  a mtime-keyed cache serves the stale answer (measured).
+
+### Fixed
+
+- `install/wire-statusline.sh` defaulted `PLUGIN` only in its `else` branch, so the new
+  resolver's exit-1 contract left the variable unset and `set -u` killed the installer
+  with "PLUGIN ist nicht gesetzt" before it could wire anything. It now defaults to its
+  own checkout first.
+
+Tests: `tests/test_resolve.sh` (23 cases), `tests/test_wire_statusline.sh` 44 → 79
+including the `test_update_without_rewire` discriminant, `tests/test_statusline_render.sh`
+→ 103 including `prefers_installed_over_workspace`, `tests/test_install.sh` 23. Full
+suite green: pytest 253, budget-ledger 85, version-consistency ✓. Every new safety
+property is mutation-checked (an inert registry step, a cache that ignores the registry,
+and a forced tier that bypasses its guard each turn the new assertions red).
+
 ## [0.19.0] — 2026-10-25 — a session that never rendered gets a permanent cost record
 
 ### Added — a session that never rendered gets a PERMANENT cost record

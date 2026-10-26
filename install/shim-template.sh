@@ -44,14 +44,11 @@ CACHE_FILE="$CACHE_ROOT/$PLUGIN_NAME"
 die() { printf '%s: %s\n' "$PLUGIN_NAME" "$1" >&2; exit 1; }
 
 # --- helpers ---------------------------------------------------------------------
-# A file's mtime, without assuming the platform: darwin's `stat -f %m` and GNU's
-# `stat -c %Y` are different flags for the same number, and only one works anywhere.
-_mtime() {
-    [ -f "$1" ] || return 0
-    _m=$(stat -f %m "$1" 2>/dev/null) && { printf '%s' "$_m"; return 0; }
-    _m=$(stat -c %Y "$1" 2>/dev/null) && { printf '%s' "$_m"; return 0; }
-    return 0
-}
+# A file's content checksum. Deliberately NOT the mtime: a registry rewritten twice
+# inside the same second has an identical mtime on macOS (1-second granularity), so a
+# mtime-keyed cache would keep serving the first answer -- measured as a real failure.
+# A checksum sees any change, and costs one tiny fork instead of a python one.
+_reg_key() { [ -f "$1" ] && cksum < "$1" 2>/dev/null | cut -d" " -f1; }
 
 # highest version among "$1"/*, dirs that hold .claude-plugin/plugin.json only
 _best_cache_dir() {
@@ -103,7 +100,7 @@ _resolve() {
     fi
 
     # (b) the cached answer, valid only while the registry has not moved
-    _reg_mtime=$(_mtime "$REGISTRY")
+    _reg_mtime=$(_reg_key "$REGISTRY")
     if [ -n "$_reg_mtime" ] && [ -f "$CACHE_FILE" ]; then
         _cached_mtime=$(awk 'NR==1{print $1}' "$CACHE_FILE" 2>/dev/null)
         _cached_dir=$(awk 'NR==1{print $2}' "$CACHE_FILE" 2>/dev/null)
