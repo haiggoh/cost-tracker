@@ -69,7 +69,7 @@ is "a bare run repoints statusLine at the versionless scripts path" \
 is "other statusLine keys survive" "$(jq -r .statusLine.padding "$TMP/home/.claude/settings.json")" "0"
 is "unrelated settings survive" "$(jq -r .model "$TMP/home/.claude/settings.json")" "x"
 is "settings.json keeps mode 600" "$(ls -l "$TMP/home/.claude/settings.json" | cut -c1-10)" "-rw-------"
-for f in cost-ledger-capture.sh statusline-render.sh budget-tally.py; do
+for f in cost-ledger-capture.sh statusline-render.sh budget-tally.py cost-tracker; do
     is "apply writes a SHIM (not a symlink) for $f" \
        "$([ -L "$TMP/home/.claude/scripts/$f" ] && echo symlink || echo regular)" "regular"
     is "the $f shim carries the haiggoh-shim header" \
@@ -204,7 +204,7 @@ HOME="$SHOME" CLAUDE_PLUGINS_DIR="$PDIR" bash "$PLUGIN/install/wire-statusline.s
 is "shim install exits 0" "$?" "0"
 is "statusLine points at the VERSIONLESS scripts path" \
    "$(jq -r .statusLine.command "$SHOME/.claude/settings.json")" "sh $SHOME/.claude/scripts/cost-ledger-capture.sh"
-for f in cost-ledger-capture.sh statusline-render.sh budget-tally.py; do
+for f in cost-ledger-capture.sh statusline-render.sh budget-tally.py cost-tracker; do
     is "$f is a shim, not a symlink" \
        "$([ -L "$SHOME/.claude/scripts/$f" ] && echo symlink || echo regular)" "regular"
     is "the $f shim carries the haiggoh-shim header" \

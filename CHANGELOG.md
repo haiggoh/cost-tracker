@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.20.1] — 2026-10-26 — the installer now covers ALL FOUR entry points
+
+### Fixed
+
+- `install/wire-statusline.sh` wired only three of the four `~/.claude/scripts` entry
+  points. The fourth — `cost-tracker`, the CLI itself — was a **hand-made symlink**, so
+  it kept pointing at a version directory in the checkout and would have kept doing so
+  through a plugin update, which is the exact staleness this release exists to remove.
+  The Phase 0 inventory named it ("T2 must add the fourth") and the live inventory
+  confirmed it: four cost-tracker entry points, three covered.
+- The tests now enumerate all four, so a fifth cannot be missed the same way.
+
+### Note
+
+Nothing else changed from 0.20.0. The live cut-over (T9) rewires all four at once.
+
 ## [0.20.0] — 2026-10-26 — entry points resolve per call, so an update needs no re-wiring
 
 ### Added — the version is resolved, not frozen at install time

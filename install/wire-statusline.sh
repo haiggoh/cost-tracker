@@ -14,12 +14,13 @@
 #      display still looked healthy while nothing was captured, and this script said
 #      "already wired" because it only ever looked at the symlinks. The settings target
 #      is now the first thing checked, not something assumed.
-#   2. three files under ~/.claude/scripts/ become symlinks into this plugin. The
+#   2. four files under ~/.claude/scripts/ become shims into this plugin. The
 #      statusline no longer goes through them, but the budget-tally hooks and older
 #      manual invocations still do, so they stay wired:
 #        ~/.claude/scripts/cost-ledger-capture.sh -> <plugin>/bin/cost-ledger-capture.sh
 #        ~/.claude/scripts/statusline-render.sh   -> <plugin>/bin/statusline-render.sh
 #        ~/.claude/scripts/budget-tally.py        -> <plugin>/bin/budget-tally.py
+#        ~/.claude/scripts/cost-tracker           -> <plugin>/bin/cost-tracker
 #
 # SAFETY: every replaced file is copied to a timestamped backup dir FIRST, with its
 # mode preserved; settings.json is rewritten IN PLACE (cat into the same inode) so a
@@ -98,7 +99,7 @@ BACKUP="$HOME/.claude/backups/cost-tracker-wire-$STAMP"
 # update lands without re-wiring and settings.json never names a stale version.
 WANT_CMD="sh $SCRIPTS/cost-ledger-capture.sh"
 
-FILES="cost-ledger-capture.sh statusline-render.sh budget-tally.py"
+FILES="cost-ledger-capture.sh statusline-render.sh budget-tally.py cost-tracker"
 SHIM_TEMPLATE="$PLUGIN/install/shim-template.sh"
 
 # Render this file's shim body for one target. The header line is how a later run

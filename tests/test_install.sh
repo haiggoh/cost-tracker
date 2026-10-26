@@ -35,7 +35,7 @@ printf '%s\n' '{"name":"cost-tracker","version":"0.19.0"}' \
 # release archive contains.
 CT="$H/.claude/plugins/cache/haiggoh/cost-tracker/0.19.0"
 mkdir -p "$CT/bin" "$CT/install"
-for f in cost-ledger-capture.sh statusline-render.sh budget-tally.py; do
+for f in cost-ledger-capture.sh statusline-render.sh budget-tally.py cost-tracker; do
     cp "$PLUGIN/bin/$f" "$CT/bin/"
 done
 cp "$PLUGIN/install/shim-template.sh" "$PLUGIN/install/wire-statusline.sh" "$CT/install/"
