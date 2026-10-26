@@ -173,6 +173,54 @@ if [ -f "$SETTINGS_LOCAL" ]; then
     fi
 fi
 
+# --- 1b. hooks that run a shim through python3 ---------------------------------
+# budget-tally.py is a #!/bin/sh SHIM, not a python file. Before the shims it was a
+# symlink to python, and users registered it as `python3 ~/.claude/scripts/budget-
+# tally.py` in their own Stop/SessionStart hooks. Replacing the symlink without
+# touching those hooks turns every turn's end into a python SyntaxError on shell code
+# (2026-10-26) — non-blocking, so it looks like the session stopped on an error while
+# the budget tally silently never runs. The shim is executable and execs its python
+# target itself, so the repair is only to drop the `python3 ` prefix.
+#
+# Matches only an invocation of THIS scripts dir's budget-tally.py (as ~, $HOME,
+# ${HOME} or the absolute path), at the start of a command or after ; & |. A python3
+# hook on another script, or a command that merely mentions budget-tally, is not ours.
+SCRIPTS_RE="$(printf '%s' "$SCRIPTS" | /usr/bin/sed 's/[][\.*^$(){}?+|/]/\\&/g')"
+HOOK_RE='(?<pre>^|[;&|]\s*)python3?\s+(?<path>(?:~/\.claude/scripts|\$HOME/\.claude/scripts|\$\{HOME\}/\.claude/scripts|'"$SCRIPTS_RE"')/budget-tally\.py)(?=\s|$|[;&|])'
+# "<event><TAB><command>" per broken hook in file $1; nothing when the file is absent,
+# unreadable as JSON, or has none.
+broken_hooks() {
+    [ -f "$1" ] || return 0
+    jq -r --arg re "$HOOK_RE" '(.hooks // {}) | to_entries[]? | .key as $ev
+        | (.value // [])[]? | (.hooks // [])[]? | (.command // empty)
+        | select(type == "string" and test($re)) | "\($ev)\t\(.)"' "$1" 2>/dev/null
+}
+NEED_HOOKS=0
+HOOKS_FOUND="$(broken_hooks "$SETTINGS")"
+if [ -n "$HOOKS_FOUND" ]; then
+    NEED_HOOKS=1
+    while IFS="$(printf '\t')" read -r ev cmd; do
+        say "  BROKEN HOOK     settings.json ($ev): $cmd"
+    done <<EOF
+$HOOKS_FOUND
+EOF
+    say "                  python3 cannot run the shim (it is /bin/sh) — the hook errors on every"
+    say "                  run. -> drop the python3 prefix; the shim execs python itself"
+else
+    say "  already wired   settings.json hooks (no python3-prefixed shim calls)"
+fi
+# settings.local.json outranks settings.json and is the user's override layer:
+# reported, never edited — the same policy as its statusLine above.
+LOCAL_HOOKS="$(broken_hooks "$SETTINGS_LOCAL")"
+if [ -n "$LOCAL_HOOKS" ]; then
+    while IFS="$(printf '\t')" read -r ev cmd; do
+        say "  BROKEN HOOK     settings.local.json ($ev): $cmd"
+    done <<EOF
+$LOCAL_HOOKS
+EOF
+    say "                  (not edited — drop the python3 prefix yourself)"
+fi
+
 # --- 2. the ~/.claude/scripts shims --------------------------------------------
 # A shim is a generated file, not a symlink: it resolves its plugin dir per call, so
 # it keeps working across a plugin update. A pre-existing symlink is a wiring this
@@ -209,7 +257,7 @@ if [ -n "$FOREIGN" ] && [ "$FORCE" != "1" ]; then
     exit 1
 fi
 
-if [ "$NEED_SETTINGS" = "0" ] && [ "$NEED_LINKS" = "0" ]; then
+if [ "$NEED_SETTINGS" = "0" ] && [ "$NEED_LINKS" = "0" ] && [ "$NEED_HOOKS" = "0" ]; then
     say ""
     say "Nothing to do — the chain already resolves into this plugin."
     exit 0
@@ -267,7 +315,7 @@ if [ "$NEED_LINKS" = "1" ]; then
     done
 fi
 
-if [ "$NEED_SETTINGS" = "1" ]; then
+if [ "$NEED_SETTINGS" = "1" ] || [ "$NEED_HOOKS" = "1" ]; then
     if [ -f "$SETTINGS" ]; then
         SETTINGS_EXISTED=1
         cp -p "$SETTINGS" "$BACKUP/settings.json" || { say "backup failed for settings.json"; rollback; exit 1; }
@@ -275,16 +323,30 @@ if [ "$NEED_SETTINGS" = "1" ]; then
     else
         SRC=/dev/null
     fi
-    # Keep any other statusLine keys (padding, type) the user already has.
+    # Two independent edits to one document, applied as two stages so each is skipped
+    # when it has nothing to do. Stage 1 keeps any other statusLine keys (padding,
+    # type) the user already has. Stage 2 rewrites only the matched prefix of only the
+    # matched hook commands; every sibling key (timeout, statusMessage, matcher) and
+    # every other hook is carried through untouched.
     NEW="$( { [ "$SRC" = /dev/null ] && echo '{}' || cat "$SRC"; } \
-        | jq --arg cmd "$WANT_CMD" '.statusLine = ((.statusLine // {}) + {type: "command", command: $cmd})')" \
+        | if [ "$NEED_SETTINGS" = "1" ]; then
+              jq --arg cmd "$WANT_CMD" '.statusLine = ((.statusLine // {}) + {type: "command", command: $cmd})'
+          else cat; fi \
+        | if [ "$NEED_HOOKS" = "1" ]; then
+              jq --arg re "$HOOK_RE" '.hooks |= with_entries(.value |= map(
+                  if (.hooks | type) == "array" then .hooks |= map(
+                      if (.command | type) == "string"
+                      then .command |= gsub($re; "\(.pre)\(.path)") else . end)
+                  else . end))'
+          else cat; fi)" \
         || { say "could not compute the new settings.json"; rollback; exit 1; }
     # cat-into-place, not mv: mv installs a NEW inode at the default umask and would
     # widen a 600 settings.json to 644.
     [ "$SETTINGS_EXISTED" = "0" ] && ( umask 077; : > "$SETTINGS" )
     printf '%s\n' "$NEW" > "$SETTINGS" || { say "could not write settings.json"; rollback; exit 1; }
     SETTINGS_CHANGED=1
-    say "  wired  settings.json statusLine"
+    [ "$NEED_SETTINGS" = "1" ] && say "  wired  settings.json statusLine"
+    [ "$NEED_HOOKS" = "1" ] && say "  repaired  settings.json hooks (dropped the python3 prefix from the shim calls)"
 fi
 
 # --- verify by OUTCOME, not by absence of error -------------------------------
@@ -324,9 +386,33 @@ if [ -f "$HIST" ] && grep -q "$SENTINEL" "$HIST"; then
     rm -f "$HIST.wiretmp"
 fi
 
-if [ "$RC" != "0" ] || [ -z "$OUT" ] || [ "$CAPTURED" != "yes" ]; then
+# Hooks: the same outcome rule. "No python3 prefix left" is only the absence of the
+# known-bad shape, so ALSO run each budget-tally hook's executable through the shim's
+# own harmless query (--which) and require it to resolve to a real file. The hook's
+# real arguments are not replayed: the tally hook writes state, a verification must not.
+HOOKS_OK=yes
+HOOKS_WHY=""
+if [ -n "$(broken_hooks "$SETTINGS")" ]; then
+    HOOKS_OK=no; HOOKS_WHY="a python3-prefixed shim call remains"
+fi
+for hc in $(jq -r '(.hooks // {}) | .[]? | .[]? | (.hooks // [])[]? | (.command // empty)
+                    | select(type == "string" and test("scripts/budget-tally\\.py"))
+                    | split(" ")[0]' "$SETTINGS" 2>/dev/null); do
+    case "$hc" in
+        "~/"*) hc="$HOME/${hc#"~/"}" ;;
+        '$HOME/'*) hc="$HOME/${hc#'$HOME/'}" ;;
+        '${HOME}/'*) hc="$HOME/${hc#'${HOME}/'}" ;;
+    esac
+    case "$hc" in */scripts/budget-tally.py) ;; *) continue ;; esac   # echo/mention, not an invocation
+    WHICH="$(COST_TRACKER_PLUGIN="$PLUGIN" "$hc" --which 2>/dev/null)"
+    if [ ! -x "$hc" ] || [ -z "$WHICH" ] || [ ! -f "$WHICH" ]; then
+        HOOKS_OK=no; HOOKS_WHY="$hc does not resolve to a runnable plugin target"
+    fi
+done
+
+if [ "$RC" != "0" ] || [ -z "$OUT" ] || [ "$CAPTURED" != "yes" ] || [ "$HOOKS_OK" != "yes" ]; then
     say ""
-    say "VERIFY FAILED (rc=$RC, output empty=$([ -z "$OUT" ] && echo yes || echo no), ledger written=$CAPTURED) — ROLLING BACK."
+    say "VERIFY FAILED (rc=$RC, output empty=$([ -z "$OUT" ] && echo yes || echo no), ledger written=$CAPTURED, hooks ok=$HOOKS_OK${HOOKS_WHY:+: $HOOKS_WHY}) — ROLLING BACK."
     rollback
     exit 1
 fi

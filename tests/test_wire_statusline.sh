@@ -28,8 +28,23 @@ printf '#!/bin/sh\necho OLD_LIVE_COPY\n' > "$PRIOR/budget-tally.py"
 chmod 600 "$PRIOR/budget-tally.py"
 ln -s "$PRIOR/budget-tally.py" "$TMP/home/.claude/scripts/budget-tally.py"
 # The exact 2026-09-23 break: statusLine calls the RENDERER, bypassing capture.
-printf '%s\n' '{"model":"x","statusLine":{"type":"command","command":"sh /somewhere/statusline-render.sh","padding":0}}' \
-    > "$TMP/home/.claude/settings.json"
+# The 2026-10-26 break rides along in the SAME fixture, because that is how it
+# shipped: the user's own hooks run `python3 <scripts>/budget-tally.py`, which worked
+# while that path was a symlink to a python file and became a SyntaxError the moment
+# the installer replaced the symlink with a #!/bin/sh shim. Both spellings real users
+# have (`~` and an absolute path) are present, plus two hooks that must NOT be touched:
+# a python3 hook on some other script, and a budget-tally mention that is not an invocation.
+cat > "$TMP/home/.claude/settings.json" <<EOF
+{"model":"x",
+ "statusLine":{"type":"command","command":"sh /somewhere/statusline-render.sh","padding":0},
+ "hooks":{
+  "Stop":[{"hooks":[
+    {"type":"command","command":"python3 ~/.claude/scripts/budget-tally.py --check","timeout":10},
+    {"type":"command","command":"python3 /elsewhere/other-tool.py --check"}]}],
+  "SessionStart":[{"hooks":[
+    {"type":"command","command":"python3 $TMP/home/.claude/scripts/budget-tally.py","timeout":10,"statusMessage":"Tallying"},
+    {"type":"command","command":"echo python3 budget-tally.py is mentioned, not run"}]}]}}
+EOF
 chmod 600 "$TMP/home/.claude/settings.json"
 # The statusLine target is the VERSIONLESS scripts path: the entry points there are
 # shims that resolve per call, so settings.json never names a version directory.
@@ -58,6 +73,12 @@ is "dry run leaves the prior symlink alone" \
    "$([ -L "$TMP/home/.claude/scripts/budget-tally.py" ] && echo symlink || echo plainfile)" "symlink"
 is "dry run says DRY RUN" \
    "$(grep -c 'DRY RUN' "$TMP/dry.out")" "1"
+# hcmd EVENT INDEX [FILE] -> the command string of the INDEXth hook in EVENT's first group
+hcmd() { jq -r ".hooks.$1[0].hooks[$2].command" "${3:-$TMP/home/.claude/settings.json}"; }
+is "dry run names the python3-prefixed budget-tally hooks" \
+   "$(grep -c 'BROKEN HOOK' "$TMP/dry.out")" "2"
+is "dry run leaves the broken Stop hook as it found it" \
+   "$(hcmd Stop 0)" "python3 ~/.claude/scripts/budget-tally.py --check"
 is "dry run creates no backup dir" \
    "$(ls -d "$TMP/home/.claude/backups"/cost-tracker-wire-* 2>/dev/null | wc -l | tr -d ' ')" "0"
 
@@ -85,6 +106,29 @@ is "the backup keeps the original mode (600, not the umask default)" \
 is "settings.json is backed up before the edit" \
    "$(jq -r .statusLine.command "$BK/settings.json" 2>/dev/null)" "sh /somewhere/statusline-render.sh"
 is "apply reports VERIFIED" "$(grep -c 'VERIFIED' "$TMP/apply.out")" "1"
+
+# --- hooks that run a shim through python3 are repaired -----------------------
+# Pin that the fixture really reproduces the break: the shim is /bin/sh, and python3
+# refuses it. Without this a future shim that happened to parse as python would turn
+# every assertion below into a test of nothing.
+python3 "$TMP/home/.claude/scripts/budget-tally.py" --check >/dev/null 2>&1
+is "the fixture reproduces the bug: python3 cannot run the shim" "$([ $? -ne 0 ] && echo broken || echo works)" "broken"
+is "the ~ spelling loses its python3 prefix, flags kept" \
+   "$(hcmd Stop 0)" "~/.claude/scripts/budget-tally.py --check"
+is "the absolute spelling loses its python3 prefix" \
+   "$(hcmd SessionStart 0)" "$TMP/home/.claude/scripts/budget-tally.py"
+is "a python3 hook on another script is left alone" \
+   "$(hcmd Stop 1)" "python3 /elsewhere/other-tool.py --check"
+is "a command that only MENTIONS budget-tally is left alone" \
+   "$(hcmd SessionStart 1)" "echo python3 budget-tally.py is mentioned, not run"
+is "hook siblings (timeout, statusMessage) survive the edit" \
+   "$(jq -r '.hooks.Stop[0].hooks[0].timeout, .hooks.SessionStart[0].hooks[0].statusMessage' "$TMP/home/.claude/settings.json" | tr '\n' ' ')" "10 Tallying "
+is "apply backed settings.json up with the broken hooks intact" \
+   "$(jq -r '.hooks.Stop[0].hooks[0].command' "$BK/settings.json")" "python3 ~/.claude/scripts/budget-tally.py --check"
+# The OUTCOME: the repaired command is what Claude Code will run, so run it. The shim
+# resolves its plugin through the override, exactly as the installer's own check does.
+HOME="$TMP/home" COST_TRACKER_PLUGIN="$PLUGIN" sh -c "$(hcmd Stop 0)" >/dev/null 2>&1
+is "the repaired Stop hook command runs and exits 0" "$?" "0"
 
 # --- the verification render must not leave a fictional session behind -------
 is "no sentinel ledger file remains" \
@@ -120,6 +164,30 @@ echo '{"statusLine":{"type":"command","command":"sh /override.sh"}}' > "$TMP/hom
 HOME="$TMP/home" bash "$PLUGIN/install/wire-statusline.sh" --dry-run > "$TMP/local.out" 2>&1
 is "a settings.local.json statusLine override is warned about" "$(grep -c 'OVERRIDES' "$TMP/local.out")" "1"
 is "settings.local.json is not edited" "$(jq -r .statusLine.command "$TMP/home/.claude/settings.local.json")" "sh /override.sh"
+rm -f "$TMP/home/.claude/settings.local.json"
+
+# --- a user already on the shims, hooks still broken, is repaired too --------
+# This is the machine that reported it: statusLine and all four shims were already
+# wired by a 0.20.x installer, so "Nothing to do" was the old answer — while every
+# turn ended in a Stop hook SyntaxError. The hooks alone must trigger a repair.
+jq '.hooks.Stop[0].hooks[0].command = "python3 ~/.claude/scripts/budget-tally.py --check"' \
+    "$TMP/home/.claude/settings.json" > "$TMP/s.json" && cat "$TMP/s.json" > "$TMP/home/.claude/settings.json"
+HOME="$TMP/home" bash "$PLUGIN/install/wire-statusline.sh" --dry-run > "$TMP/hooks-only.out" 2>&1
+is "re-broken hooks alone are NOT reported as wired" "$(grep -c 'Nothing to do' "$TMP/hooks-only.out")" "0"
+is "re-broken hooks alone are named" "$(grep -c 'BROKEN HOOK' "$TMP/hooks-only.out")" "1"
+HOME="$TMP/home" bash "$PLUGIN/install/wire-statusline.sh" > "$TMP/hooks-fix.out" 2>&1
+is "a re-run repairs hooks when nothing else is wrong" "$(hcmd Stop 0)" "~/.claude/scripts/budget-tally.py --check"
+is "that repair still ends VERIFIED" "$(grep -c 'VERIFIED' "$TMP/hooks-fix.out")" "1"
+is "settings.json keeps mode 600 after a hooks-only repair" \
+   "$(ls -l "$TMP/home/.claude/settings.json" | cut -c1-10)" "-rw-------"
+
+# --- settings.local.json hooks: warn, never edit (it is the user's override layer) ---
+echo '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"python3 ~/.claude/scripts/budget-tally.py --check"}]}]}}' \
+    > "$TMP/home/.claude/settings.local.json"
+HOME="$TMP/home" bash "$PLUGIN/install/wire-statusline.sh" > "$TMP/local-hooks.out" 2>&1
+is "a broken hook in settings.local.json is warned about" "$(grep -c 'settings.local.json.*BROKEN HOOK\|BROKEN HOOK.*settings.local.json' "$TMP/local-hooks.out")" "1"
+is "settings.local.json hooks are not edited" \
+   "$(hcmd Stop 0 "$TMP/home/.claude/settings.local.json")" "python3 ~/.claude/scripts/budget-tally.py --check"
 rm -f "$TMP/home/.claude/settings.local.json"
 
 # --- the capture wrapper renders through its SIBLING, not ~/.claude/scripts ---

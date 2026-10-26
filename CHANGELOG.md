@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.20.2] — 2026-10-26 — the installer no longer leaves `python3 <shim>` hooks behind
+
+### Fixed
+
+- 0.20.0 replaced the `~/.claude/scripts/budget-tally.py` symlink with a `#!/bin/sh`
+  shim, but users' own `Stop` / `SessionStart` hooks run it as
+  `python3 ~/.claude/scripts/budget-tally.py`. Python then parses shell code and fails
+  (`SyntaxError`, line 68) on **every** hook run: a non-blocking "Stop hook error"
+  after each turn, and a budget tally that silently never ran. The installer verified
+  only the statusLine, so nothing caught it.
+- `install/wire-statusline.sh` now finds those hooks in `settings.json` (all events;
+  the `~`, `$HOME`, `${HOME}` and absolute spellings), drops the `python3 ` prefix and
+  keeps every flag and sibling key. A python3 hook on another script, or a command
+  that only mentions budget-tally, is left alone. A user already on the shims with
+  broken hooks is no longer told "Nothing to do".
+- `settings.local.json` hooks are reported, never edited (the same policy as its
+  statusLine override).
+- The post-wire check now covers the hooks too: none may still be python3-prefixed,
+  and each budget-tally hook's executable must resolve through the shim's `--which`
+  to a real plugin file — otherwise the whole run rolls back.
+
+### Tests
+
+- The wiring fixture's `settings.json` now carries the broken hooks as they shipped
+  (both spellings, plus two decoys that must not be touched), and pins that the fixture
+  really reproduces the break (`python3 <shim>` fails). 85 → 102 assertions.
+
 ## [0.20.1] — 2026-10-26 — the installer now covers ALL FOUR entry points
 
 ### Fixed
