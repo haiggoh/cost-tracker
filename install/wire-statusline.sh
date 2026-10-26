@@ -72,15 +72,17 @@ for arg in "$@"; do
 done
 
 HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Resolve where this plugin is installed:
+# Resolve where this plugin is installed, in the resolver's order:
 #   1. $COST_TRACKER_PLUGIN override (developer/sysadmin pin)
-#   2. the highest-versioned entry in the plugin cache (no hardcoded version)
-#   3. this checkout (when run directly from the source repo)
+#   2. the installPath recorded in installed_plugins.json
+#   3. the highest-versioned entry in the plugin cache (no hardcoded version)
+# Default to THIS checkout first: the resolver exits 1 when none of those resolve
+# (a fresh clone has no registry entry), and an unset $PLUGIN under `set -u` would
+# kill this script before it could wire anything.
+PLUGIN="$(cd -P "$HERE/.." && pwd)"
 RESOLVER="$HERE/../bin/cost-tracker-resolve.sh"
 if [ -x "$RESOLVER" ]; then
     RESOLVED="$(bash "$RESOLVER" 2>/dev/null)" && PLUGIN="$RESOLVED"
-else
-    PLUGIN="$(cd -P "$HERE/.." && pwd)"
 fi
 SCRIPTS="$HOME/.claude/scripts"
 SETTINGS="$HOME/.claude/settings.json"
