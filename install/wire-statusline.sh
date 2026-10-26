@@ -98,6 +98,13 @@ BACKUP="$HOME/.claude/backups/cost-tracker-wire-$STAMP"
 # entry points there are shims that resolve their plugin dir per call, so a plugin
 # update lands without re-wiring and settings.json never names a stale version.
 WANT_CMD="sh $SCRIPTS/cost-ledger-capture.sh"
+# Claude Code runs the command through a shell, so a $HOME with a space (or any shell
+# metacharacter) splits the path and the statusLine exits 127. Quote only then: for
+# every ordinary path the command stays byte-identical, so no existing install is
+# reported as changed.
+case "$SCRIPTS" in
+    *[!A-Za-z0-9_./-]*) WANT_CMD="sh \"$SCRIPTS/cost-ledger-capture.sh\"" ;;
+esac
 
 FILES="cost-ledger-capture.sh statusline-render.sh budget-tally.py cost-tracker"
 SHIM_TEMPLATE="$PLUGIN/install/shim-template.sh"
@@ -185,8 +192,12 @@ fi
 # Matches only an invocation of THIS scripts dir's budget-tally.py (as ~, $HOME,
 # ${HOME} or the absolute path), at the start of a command or after ; & |. A python3
 # hook on another script, or a command that merely mentions budget-tally, is not ours.
+# The path may be QUOTED ("…" or '…'): a user whose $HOME holds a space had no other
+# way to write a working hook, so the quotes are part of the path and are kept as-is.
 SCRIPTS_RE="$(printf '%s' "$SCRIPTS" | /usr/bin/sed 's/[][\.*^$(){}?+|/]/\\&/g')"
-HOOK_RE='(?<pre>^|[;&|]\s*)python3?\s+(?<path>(?:~/\.claude/scripts|\$HOME/\.claude/scripts|\$\{HOME\}/\.claude/scripts|'"$SCRIPTS_RE"')/budget-tally\.py)(?=\s|$|[;&|])'
+SHIM_RE='(?:~/\.claude/scripts|\$HOME/\.claude/scripts|\$\{HOME\}/\.claude/scripts|'"$SCRIPTS_RE"')/budget-tally\.py'
+SHIM_TOKEN_RE='(?:"'"$SHIM_RE"'"|'"'$SHIM_RE'"'|'"$SHIM_RE"')'
+HOOK_RE='(?<pre>^|[;&|]\s*)python3?\s+(?<path>'"$SHIM_TOKEN_RE"')(?=\s|$|[;&|])'
 # "<event><TAB><command>" per broken hook in file $1; nothing when the file is absent,
 # unreadable as JSON, or has none.
 broken_hooks() {
@@ -395,20 +406,24 @@ HOOKS_WHY=""
 if [ -n "$(broken_hooks "$SETTINGS")" ]; then
     HOOKS_OK=no; HOOKS_WHY="a python3-prefixed shim call remains"
 fi
-for hc in $(jq -r '(.hooks // {}) | .[]? | .[]? | (.hooks // [])[]? | (.command // empty)
-                    | select(type == "string" and test("scripts/budget-tally\\.py"))
-                    | split(" ")[0]' "$SETTINGS" 2>/dev/null); do
+# One shim path per LINE, taken with the same token regex the repair used — never by
+# splitting the command on spaces, which cut a spaced $HOME in half and skipped it.
+while IFS= read -r hc; do
+    [ -n "$hc" ] || continue
+    case "$hc" in \"*\"|\'*\') hc="${hc#?}"; hc="${hc%?}" ;; esac
     case "$hc" in
         "~/"*) hc="$HOME/${hc#"~/"}" ;;
         '$HOME/'*) hc="$HOME/${hc#'$HOME/'}" ;;
         '${HOME}/'*) hc="$HOME/${hc#'${HOME}/'}" ;;
     esac
-    case "$hc" in */scripts/budget-tally.py) ;; *) continue ;; esac   # echo/mention, not an invocation
     WHICH="$(COST_TRACKER_PLUGIN="$PLUGIN" "$hc" --which 2>/dev/null)"
     if [ ! -x "$hc" ] || [ -z "$WHICH" ] || [ ! -f "$WHICH" ]; then
         HOOKS_OK=no; HOOKS_WHY="$hc does not resolve to a runnable plugin target"
     fi
-done
+done <<EOF
+$(jq -r --arg re "$SHIM_TOKEN_RE" '(.hooks // {}) | .[]? | .[]? | (.hooks // [])[]? | (.command // empty)
+        | select(type == "string") | match($re; "g") | .string' "$SETTINGS" 2>/dev/null)
+EOF
 
 if [ "$RC" != "0" ] || [ -z "$OUT" ] || [ "$CAPTURED" != "yes" ] || [ "$HOOKS_OK" != "yes" ]; then
     say ""

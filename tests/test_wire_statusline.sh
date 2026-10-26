@@ -236,6 +236,49 @@ is "renders-but-captures-nothing fails verification" "$([ $? -ne 0 ] && echo non
 is "and says the ledger was not written" "$(grep -c 'ledger written=no' "$TMP/rb2.out")" "1"
 is "and restores settings.json" "$(jq -r .statusLine.command "$TMP/home4/.claude/settings.json")" "sh /prior.sh"
 
+# A chain that renders AND captures, but whose hook target does not resolve: the hook
+# repair lands, then the hook half of the verification must fail and undo ALL of it.
+# Without this case the hook check could be a no-op and every other test would pass.
+FAKE3="$TMP/fakeplugin3"
+mkdir -p "$FAKE3/bin" "$FAKE3/install" "$FAKE3/.claude-plugin"
+cp "$PLUGIN/install/wire-statusline.sh" "$PLUGIN/install/shim-template.sh" "$FAKE3/install/"
+cp "$PLUGIN/.claude-plugin/plugin.json" "$FAKE3/.claude-plugin/"
+find "$PLUGIN/bin" -maxdepth 1 -type f ! -name budget-tally.py -exec cp {} "$FAKE3/bin/" \;
+mkdir -p "$TMP/home5/.claude"
+echo '{"statusLine":{"type":"command","command":"sh /prior.sh"},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"python3 ~/.claude/scripts/budget-tally.py --check"}]}]}}' \
+    > "$TMP/home5/.claude/settings.json"
+HOME="$TMP/home5" bash "$FAKE3/install/wire-statusline.sh" > "$TMP/rb3.out" 2>&1
+is "an unresolvable hook target fails verification" "$([ $? -ne 0 ] && echo nonzero || echo zero)" "nonzero"
+is "and names the hooks as the failing half" "$(grep -c 'hooks ok=no' "$TMP/rb3.out")" "1"
+is "and the hook repair is rolled back with the rest" \
+   "$(hcmd Stop 0 "$TMP/home5/.claude/settings.json")" "python3 ~/.claude/scripts/budget-tally.py --check"
+is "and the statusLine is rolled back too" "$(jq -r .statusLine.command "$TMP/home5/.claude/settings.json")" "sh /prior.sh"
+
+# A $HOME with a SPACE in it. Such a user can only have written the hook with the path
+# QUOTED (unquoted, sh splits it and the hook never worked), so the quoted spellings
+# are the real-world shape: "$HOME/…" literally, and the absolute path in quotes.
+SP="$TMP/sp ace/home"
+mkdir -p "$SP/.claude"
+jq -n --arg abs "python3 \"$SP/.claude/scripts/budget-tally.py\"" '{hooks:{
+   Stop:[{hooks:[{type:"command",command:"python3 \"$HOME/.claude/scripts/budget-tally.py\" --check"}]}],
+   SessionStart:[{hooks:[{type:"command",command:$abs}]}]}}' > "$SP/.claude/settings.json"
+HOME="$SP" bash "$PLUGIN/install/wire-statusline.sh" > "$TMP/space.out" 2>&1
+is "a spaced HOME wires and verifies" "$?" "0"
+is "a spaced HOME names both quoted hooks as broken" "$(grep -c 'BROKEN HOOK' "$TMP/space.out")" "2"
+is "the quoted \$HOME spelling loses only its python3 prefix" \
+   "$(hcmd Stop 0 "$SP/.claude/settings.json")" "\"\$HOME/.claude/scripts/budget-tally.py\" --check"
+is "the quoted absolute spelling loses only its python3 prefix" \
+   "$(hcmd SessionStart 0 "$SP/.claude/settings.json")" "\"$SP/.claude/scripts/budget-tally.py\""
+HOME="$SP" COST_TRACKER_PLUGIN="$PLUGIN" sh -c "$(hcmd SessionStart 0 "$SP/.claude/settings.json") --which" > "$TMP/space-which.out" 2>&1
+is "the repaired spaced hook resolves through the shim" "$(cat "$TMP/space-which.out")" "$PLUGIN/bin/budget-tally.py"
+# The installer's own success rule: it rendered something AND wrote the ledger entry.
+SPOUT="$(printf '%s' '{"session_id":"sp1","cost":{"total_cost_usd":0},"model":{"display_name":"M"},"workspace":{"current_dir":"/tmp"}}' \
+      | HOME="$SP" COST_TRACKER_PLUGIN="$PLUGIN" sh -c "$(jq -r .statusLine.command "$SP/.claude/settings.json")" 2>/dev/null)"
+is "the spaced statusLine renders through sh" "$([ -n "$SPOUT" ] && echo rendered || echo empty)" "rendered"
+is "the spaced statusLine writes its ledger entry" "$([ -f "$SP/.claude/cost-ledger/sp1" ] && echo yes || echo no)" "yes"
+is "an ordinary HOME keeps the UNQUOTED statusLine (no spurious rewrite)" \
+   "$(jq -r .statusLine.command "$TMP/home/.claude/settings.json")" "$WANT"
+
 # ---------------------------------------------------------------------------
 printf '\n== shims, not symlinks: an update lands with no re-wiring ==\n'
 
@@ -255,7 +298,9 @@ mkver() { # mkver <version>
     # resolves its renderer relative to itself, so a partial bin/ would fail
     # verification for the wrong reason.
     cp "$PLUGIN/install/shim-template.sh" "$PDIR/cache/haiggoh/cost-tracker/$1/install/"
-    cp "$PLUGIN/bin/"* "$PDIR/cache/haiggoh/cost-tracker/$1/bin/"
+    # FILES only: a dev checkout's bin/ also holds __pycache__/, which a plugin cache
+    # never ships and which plain `cp bin/*` reports as an error on every run.
+    find "$PLUGIN/bin" -maxdepth 1 -type f -exec cp {} "$PDIR/cache/haiggoh/cost-tracker/$1/bin/" \;
     chmod +x "$PDIR/cache/haiggoh/cost-tracker/$1/bin/"*
 }
 

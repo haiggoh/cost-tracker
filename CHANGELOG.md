@@ -20,12 +20,25 @@
 - The post-wire check now covers the hooks too: none may still be python3-prefixed,
   and each budget-tally hook's executable must resolve through the shim's `--which`
   to a real plugin file — otherwise the whole run rolls back.
+- **A `$HOME` with a space could not be wired at all.** The statusLine command was
+  written unquoted (`sh /Users/a b/…`), so it exited 127 and the installer rolled back
+  every time. It is now quoted when — and only when — the path needs it, so an ordinary
+  install's command stays byte-identical and is not rewritten. The hook repair also
+  accepts a quoted shim path (`python3 "$HOME/…/budget-tally.py"`), the only way such a
+  user could have written a working hook, and the hook check no longer splits commands
+  on spaces (which had cut a spaced path in half and skipped it).
 
 ### Tests
 
 - The wiring fixture's `settings.json` now carries the broken hooks as they shipped
   (both spellings, plus two decoys that must not be touched), and pins that the fixture
-  really reproduces the break (`python3 <shim>` fails). 85 → 102 assertions.
+  really reproduces the break (`python3 <shim>` fails).
+- The hook half of the verification has its own rollback case (a plugin copy with no
+  `budget-tally.py`); mutation-checked — disabling the check fails all four assertions.
+- A spaced-`$HOME` case: both quoted hook spellings repaired, the hook resolves, the
+  statusLine renders and captures, and an ordinary HOME keeps the unquoted command.
+- The fake plugin cache copies `bin/` FILES only, so a dev checkout's `__pycache__/`
+  no longer prints `cp: … is a directory` on every run. 85 → 114 assertions.
 
 ## [0.20.1] — 2026-10-26 — the installer now covers ALL FOUR entry points
 
