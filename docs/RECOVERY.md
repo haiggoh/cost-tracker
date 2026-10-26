@@ -45,8 +45,19 @@ It took two sessions and still ended on the wrong target:
   Privileges don't help, and `chmod 644` needlessly widens a `600` file (it did). Run
   `install.sh` from a session whose sandbox allows writes to `~/.claude`, or type
   `! bash install.sh` in the prompt so it runs outside the tool sandbox.
-- **Checking the wrong thing.** The `~/.claude/scripts` symlinks were correct the whole
+- **Checking the wrong thing.** The `~/.claude/scripts` entries were correct the whole
   time. The old `wire-statusline.sh` checked only those and said "already wired". Since
-  0.7.8 it checks `settings.json` first.
+  0.7.8 it checks `settings.json` first. Since the shim release, "correct" means the
+  entry points carry the `# haiggoh-shim v1` header line (line 2 — line 1 is the
+  shebang) and `settings.json` names the versionless `scripts/` path; a symlink into a
+  version directory is now STALE wiring, not correct wiring, because it freezes the
+  version that entry point runs. `~/.claude/scripts/<name> --which` prints which copy
+  it resolves to.
+
+- **Rollback.** Every replaced file is copied to
+  `~/.claude/backups/cost-tracker-wire-<timestamp>/` with its mode preserved, and
+  `settings.json` is edited in place so a `600` file stays `600`. To undo a wiring:
+  restore the files from the newest backup (a symlink comes back as its target's
+  content), or re-run the installer from the release you want.
 - **`/statusline` doesn't help.** Its setup agent builds a status line from your shell
   `PS1`, which would overwrite the cost-tracker line rather than restore it.

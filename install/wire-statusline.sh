@@ -45,6 +45,8 @@ everything already points here it changes nothing.
 Options:
   --dry-run    report what is wrong and what would change; write nothing
   --apply      accepted for compatibility; same as no arguments
+  --force      replace a FOREIGN file at a scripts/ path (one this plugin did not
+               write). Without it such a file is refused, not overwritten.
   -h, --help   show this help and exit
 
 Environment:
@@ -60,13 +62,15 @@ EOF
 }
 
 APPLY=1
+FORCE=0
 for arg in "$@"; do
     case "$arg" in
         -h|--help) usage; exit 0 ;;
         --dry-run|-n) APPLY=0 ;;
         --apply) APPLY=1 ;;
+        --force) FORCE=1 ;;
         *) printf 'wire-statusline.sh: unknown argument: %s\n' "$arg" >&2
-           printf 'usage: wire-statusline.sh [--dry-run] [--help]\n' >&2
+           printf 'usage: wire-statusline.sh [--dry-run] [--force] [--help]\n' >&2
            exit 2 ;;
     esac
 done
@@ -89,9 +93,26 @@ SETTINGS="$HOME/.claude/settings.json"
 SETTINGS_LOCAL="$HOME/.claude/settings.local.json"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP="$HOME/.claude/backups/cost-tracker-wire-$STAMP"
-WANT_CMD="sh $PLUGIN/bin/cost-ledger-capture.sh"
+# The statusLine target is the VERSIONLESS scripts path, never a version dir: the
+# entry points there are shims that resolve their plugin dir per call, so a plugin
+# update lands without re-wiring and settings.json never names a stale version.
+WANT_CMD="sh $SCRIPTS/cost-ledger-capture.sh"
 
 FILES="cost-ledger-capture.sh statusline-render.sh budget-tally.py"
+SHIM_TEMPLATE="$PLUGIN/install/shim-template.sh"
+
+# Render this file's shim body for one target. The header line is how a later run
+# recognises its own work, so it must stay exactly this shape.
+render_shim() {
+    /usr/bin/sed -e 's|@PLUGIN@|cost-tracker|g' \
+                 -e 's|@OVERRIDE@|COST_TRACKER_PLUGIN|g' \
+                 -e "s|@REL@|bin/$1|g" "$SHIM_TEMPLATE"
+}
+is_our_shim() {  # $1 = the live path
+    # The header is the SECOND line: line 1 is the shebang, which must stay there
+    # for the shim to be executable.
+    [ -f "$1" ] && head -n 3 "$1" 2>/dev/null | /usr/bin/grep -q '^# haiggoh-shim v1 plugin=cost-tracker target='
+}
 
 say() { printf '%s\n' "$*"; }
 
@@ -151,26 +172,41 @@ if [ -f "$SETTINGS_LOCAL" ]; then
     fi
 fi
 
-# --- 2. the ~/.claude/scripts symlinks ------------------------------------------
+# --- 2. the ~/.claude/scripts shims --------------------------------------------
+# A shim is a generated file, not a symlink: it resolves its plugin dir per call, so
+# it keeps working across a plugin update. A pre-existing symlink is a wiring this
+# plugin (or an older version of it) made, so it is replaced and backed up like any
+# other change; a plain file is not, and is refused unless --force says otherwise.
 NEED_LINKS=0
+FOREIGN=""
 for f in $FILES; do
     live="$SCRIPTS/$f"
     mine="$PLUGIN/bin/$f"
-    if [ -L "$live" ] && [ "$(readlink "$live")" = "$mine" ]; then
-        say "  already wired   scripts/$f"
+    if is_our_shim "$live"; then
+        say "  already wired   scripts/$f (shim)"
         continue
     fi
     NEED_LINKS=1
-    if [ ! -e "$live" ]; then
-        say "  MISSING live    scripts/$f (will be created as a symlink)"
-    elif cmp -s "$live" "$mine"; then
-        say "  identical       scripts/$f (plain file -> symlink, no content change)"
-    else
-        say "  DIFFERS         scripts/$f — the live copy is not what this plugin ships:"
-        diff -u "$live" "$mine" | sed -n '1,12p' | sed 's/^/      /'
+    if [ -L "$live" ]; then
+        say "  REPLACE symlink scripts/$f -> $(readlink "$live")"
+    elif [ -e "$live" ]; then
+        say "  FOREIGN         scripts/$f is a plain file this plugin did not write:"
+        diff -u "$live" "$mine" | sed -n '1,8p' | sed 's/^/      /'
         say "      (full diff: diff -u $live $mine)"
+        FOREIGN="$FOREIGN $f"
+    else
+        say "  MISSING live    scripts/$f (will be created as a shim)"
     fi
 done
+
+if [ -n "$FOREIGN" ] && [ "$FORCE" != "1" ]; then
+    say ""
+    say "REFUSING: scripts/ has files this plugin did not write:$FOREIGN"
+    say "Overwriting a file someone else owns is not this script's call to make."
+    say "Re-run with --force to back each one up (timestamped) and replace it with a"
+    say "shim, or move them aside first."
+    exit 1
+fi
 
 if [ "$NEED_SETTINGS" = "0" ] && [ "$NEED_LINKS" = "0" ]; then
     say ""
@@ -213,15 +249,20 @@ if [ "$NEED_LINKS" = "1" ]; then
     for f in $FILES; do
         live="$SCRIPTS/$f"
         mine="$PLUGIN/bin/$f"
-        [ -L "$live" ] && [ "$(readlink "$live")" = "$mine" ] && continue
+        # Already our shim for this exact target: nothing to write.
+        is_our_shim "$live" && continue
         if [ -e "$live" ] || [ -L "$live" ]; then
             # -p keeps mode and timestamps: one of these is a 600 file on some setups,
             # and a backup that widens permissions is its own incident.
             cp -p "$live" "$BACKUP/$f" || { say "backup failed for $f"; rollback; exit 1; }
         fi
-        ln -sfn "$mine" "$live" || { say "symlink failed for $f"; rollback; exit 1; }
+        # Write the shim, do not symlink it: a symlink would freeze the version this
+        # entry point runs, which is the whole failure the shim exists to prevent.
+        render_shim "$f" > "$live.new" || { say "could not render the shim for $f"; rm -f "$live.new"; rollback; exit 1; }
+        chmod 755 "$live.new"
+        mv "$live.new" "$live" || { say "could not install the shim for $f"; rm -f "$live.new"; rollback; exit 1; }
         CHANGED="$CHANGED $f"
-        say "  wired  scripts/$f"
+        say "  wired  scripts/$f (shim)"
     done
 fi
 
@@ -253,7 +294,12 @@ SENTINEL="wire-check-0000-0000-0000-000000000000"
 SAMPLE='{"session_id":"'"$SENTINEL"'","cost":{"total_cost_usd":0},'
 SAMPLE="$SAMPLE"'"model":{"display_name":"WireCheck"},"workspace":{"current_dir":"'"$HOME"'"}}'
 RUN_CMD="$(jq -r '.statusLine.command // empty' "$SETTINGS" 2>/dev/null)"
-OUT="$(printf '%s' "$SAMPLE" | sh -c "$RUN_CMD" 2>/dev/null)"
+# The shim resolves per call, so the verification runs it exactly as Claude Code
+# will — with the plugin this installer resolved handed to it as the override. That
+# keeps the check meaningful on a machine whose registry is missing or malformed
+# (where an unseeded shim would correctly find nothing and the check would fail for
+# the wrong reason). The shim's own registry resolution is pinned by its own tests.
+OUT="$(printf '%s' "$SAMPLE" | COST_TRACKER_PLUGIN="$PLUGIN" sh -c "$RUN_CMD" 2>/dev/null)"
 RC=$?
 CAPTURED=no
 [ -f "$HOME/.claude/cost-ledger/$SENTINEL" ] && CAPTURED=yes

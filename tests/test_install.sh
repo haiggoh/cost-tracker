@@ -18,7 +18,27 @@ is()  { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$3" "$2"; }
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 H="$TMP/home"
-mkdir -p "$H/.claude/scripts" "$H/.claude/cost-ledger" "$H/.local/bin" "$TMP/other"
+mkdir -p "$H/.claude/scripts" "$H/.claude/cost-ledger" "$H/.local/bin" "$TMP/other" \
+         "$H/.claude/plugins/cache/haiggoh/cost-tracker/0.19.0" \
+         "$H/.claude/plugins/cache/haiggoh/cost-tracker/0.19.0/.claude-plugin"
+# The fixture HOME must look like a machine where this plugin IS installed: with no
+# registry the scripts/ shim finds nothing and the statusline renders BLANK, which is
+# the disaster mode the plan's Review Focus #2 names — not a wiring defect.
+printf '%s' \
+    '{"plugins":{"cost-tracker@haiggoh":[{"scope":"user","installPath":"'"$H/.claude/plugins/cache/haiggoh/cost-tracker/0.19.0"'"}]}}' \
+    > "$H/.claude/plugins/installed_plugins.json"
+printf '%s\n' '{"name":"cost-tracker","version":"0.19.0"}' \
+    > "$H/.claude/plugins/cache/haiggoh/cost-tracker/0.19.0/.claude-plugin/plugin.json"
+# The installPath names that copy, so the shim execs FROM it and install.sh runs ITS
+# installer: it must carry the real bin/ (the capture wrapper resolves its renderer
+# relative to itself), the shim template, and the installer itself — exactly what a
+# release archive contains.
+CT="$H/.claude/plugins/cache/haiggoh/cost-tracker/0.19.0"
+mkdir -p "$CT/bin" "$CT/install"
+for f in cost-ledger-capture.sh statusline-render.sh budget-tally.py; do
+    cp "$PLUGIN/bin/$f" "$CT/bin/"
+done
+cp "$PLUGIN/install/shim-template.sh" "$PLUGIN/install/wire-statusline.sh" "$CT/install/"
 # --- the post-`joyia agent --setup` state ------------------------------------
 printf '#!/bin/sh\ncat >/dev/null; echo JOYIA_RENDER\n' > "$H/.claude/joyia-statusline.sh"
 printf '%s\n' '{"model":"sonnet[1m]","statusLine":{"type":"command","command":"sh '"$H"'/.claude/joyia-statusline.sh","padding":0}}' \
@@ -48,12 +68,16 @@ is "dry run leaves the PATH link alone" "$(readlink "$H/.local/bin/cost-tracker"
 
 HOME="$H" bash "$PLUGIN/install.sh" > "$TMP/run.out" 2>&1
 is "a bare run exits 0" "$?" "0"
-is "statusLine now calls the plugin's capture wrapper" \
-   "$(jq -r .statusLine.command "$H/.claude/settings.json")" "sh $PLUGIN/bin/cost-ledger-capture.sh"
+is "statusLine now calls the capture wrapper through the scripts shim" \
+   "$(jq -r .statusLine.command "$H/.claude/settings.json")" "sh $H/.claude/scripts/cost-ledger-capture.sh"
 is "settings.json stays 600" "$(ls -l "$H/.claude/settings.json" | cut -c1-10)" "-rw-------"
 is "unrelated settings survive" "$(jq -r .model "$H/.claude/settings.json")" "sonnet[1m]"
 is "joyia-statusline.sh is left untouched" "$(sed -n 2p "$H/.claude/joyia-statusline.sh")" "cat >/dev/null; echo JOYIA_RENDER"
-is "cost-tracker on PATH is this plugin" "$(readlink "$H/.local/bin/cost-tracker")" "$PLUGIN/bin/cost-tracker"
+# The PATH entry resolves through the registry to the INSTALLED copy, not to the
+# checkout the installer happened to run from: that is what makes a branch switch in
+# a workspace checkout change nothing live.
+is "cost-tracker on PATH is the resolved installed copy" \
+   "$(readlink "$H/.local/bin/cost-tracker")" "$CT/bin/cost-tracker"
 BK="$(ls -d "$H/.claude/backups"/cost-tracker-path-* 2>/dev/null | head -1)"
 is "the foreign PATH link is backed up as a link" "$(readlink "$BK/cost-tracker" 2>/dev/null)" "$TMP/other/cost-tracker"
 

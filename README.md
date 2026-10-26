@@ -148,9 +148,20 @@ The statusLine step on its own is `install/wire-statusline.sh` (same flags).
 
 A session may have only one status line, so this plugin never claims it: it ships
 the wrapper pattern and the machine wires it in. Wiring points `settings.json`
-`statusLine.command` straight at this checkout's `bin/cost-ledger-capture.sh`, and
-symlinks the `~/.claude/scripts` helpers the budget hooks use. Re-run it whenever
-another tool rewrites the status line: it detects a bypassed or foreign target.
+`statusLine.command` at `~/.claude/scripts/cost-ledger-capture.sh` — a **versionless
+path** — and turns the `~/.claude/scripts` helpers into **shims**: small generated
+files that resolve which plugin copy to run on every invocation. So a plugin update
+takes effect with no re-wiring, and a branch switch in a workspace checkout changes
+nothing live. Re-run it whenever another tool rewrites the status line: it detects a
+bypassed or foreign target.
+
+**Developer mode** is the override, and it is visible and reversible: set
+`COST_TRACKER_PLUGIN` to a checkout and every shim (and the statusline) runs that
+copy instead. It must contain `.claude-plugin/plugin.json`; a typo fails loudly
+rather than silently resolving somewhere else. `CLAUDE_PLUGINS_DIR` moves the whole
+lookup tree (registry, cache) and exists mainly for tests.
+
+Ask any shim where it resolved: `~/.claude/scripts/budget-tally.py --which`.
 
 Set `COST_TRACKER_CAP_USD=40` (or `BUDGET_TALLY_CAP_USD`) for a cap.
 

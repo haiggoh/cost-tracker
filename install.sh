@@ -56,10 +56,13 @@ for arg in "$@"; do
     esac
 done
 
-# Resolve where this plugin is installed:
+# Resolve where this plugin is installed, in the resolver's order:
 #   1. $COST_TRACKER_PLUGIN override (developer/sysadmin pin)
-#   2. the highest-versioned entry in the plugin cache (no hardcoded version)
-#   3. this checkout (when run directly from the source repo)
+#   2. the installPath recorded in installed_plugins.json
+#   3. the highest-versioned entry in the plugin cache (no hardcoded version)
+# Default to THIS checkout first: the resolver exits 1 when none of those resolve
+# (a fresh clone has no registry entry), and an unset $ROOT under `set -u` would
+# kill this script before it could install anything.
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVER="$ROOT/bin/cost-tracker-resolve.sh"
 if [ -x "$RESOLVER" ]; then
