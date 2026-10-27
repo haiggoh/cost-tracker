@@ -296,29 +296,21 @@ if [ "$USE_LEGACY_FALLBACK" = "1" ]; then
     SESSION_KIND="unknown"
     SESSION_EMOJI="❓"
     PROVIDER_DISPLAY="Unknown"
-    THEME_IDENTIFIER="unknown"
-    SPINNER_PROFILE="unknown"
     case "${ANTHROPIC_BASE_URL:-}" in
         http://localhost:800[0-9]|http://localhost:8010|http://127.0.0.1:800[0-9]|http://127.0.0.1:8010)
             SESSION_KIND="local"
             SESSION_EMOJI="🦾"
             PROVIDER_DISPLAY="Local (unknown backend)"
-            THEME_IDENTIFIER="local-sky"
-            SPINNER_PROFILE="local-unknown"
             ;;
         http://localhost:414[1-9]|http://localhost:415[01]|http://127.0.0.1:414[1-9]|http://127.0.0.1:415[01])
             SESSION_KIND="free_api"
             SESSION_EMOJI="🌐"
             PROVIDER_DISPLAY="Free API (NVIDIA Nemotron)"
-            THEME_IDENTIFIER="free-lime"
-            SPINNER_PROFILE="free-api"
             ;;
         https://api.anthropic.com*|*anthropic.com*|*llmgw*)
             SESSION_KIND="cloud"
             SESSION_EMOJI="☁️"
             PROVIDER_DISPLAY="Anthropic (cloud)"
-            THEME_IDENTIFIER="cloud-default"
-            SPINNER_PROFILE="cloud"
             ;;
     esac
     # Preserve MODEL from input for backward compat
@@ -352,8 +344,6 @@ else
         EFFORT=$(printf '%s' "$IDENTITY_JSON" | jq -r '.effort // "medium"')
     fi
     THINKING_MODE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.thinking_mode // "unknown"')
-    THEME_IDENTIFIER=$(printf '%s' "$IDENTITY_JSON" | jq -r '.theme_identifier // "unknown"')
-    SPINNER_PROFILE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.spinner_profile_id // "unknown"')
     EVIDENCE=$(printf '%s' "$IDENTITY_JSON" | jq -r '.evidence // "fallback"')
     UNKNOWN_FALLBACK=$(printf '%s' "$IDENTITY_JSON" | jq -r '.unknown_fallback // false')
 fi

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.20.3] — 2026-10-27 — the statusline drops two identity fields it never used
+
+### Removed
+
+- `bin/statusline-render.sh` set `THEME_IDENTIFIER` and `SPINNER_PROFILE` in both identity
+  branches (legacy endpoint detection and the free-agents resolver) and never read them —
+  leftovers of the first session-theme attempt (free-agents 0.17.x), whose theme now ships as a
+  custom theme file. The resolver branch saves two `jq` spawns per render. No output change:
+  `tests/test_statusline_render.sh` output is identical before and after (103 passed).
+
 ## [0.20.2] — 2026-10-26 — the installer no longer leaves `python3 <shim>` hooks behind
 
 ### Fixed
