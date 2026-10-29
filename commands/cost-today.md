@@ -4,6 +4,8 @@ description: Show today's Claude Code spend per session, on labelled axes, with 
 
 Run `cost-tracker report --today` and show the user the table verbatim.
 
+Lead your reply with `💸 cost-today:` — the mark says which plugin produced the table.
+
 Then, in at most three sentences:
 
 1. State the **today** figure with its membership (the table's `membership:` line

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.20.4] — 2026-10-28 — 💸 the mark leads the credit moments
+
+### Changed
+- Branding: the daily-cap WARNING line now leads with 💸 — its credit moment, the instant the
+  budget genuinely needs attention (user decision 2026-10-28). The routine tally line, the
+  free-lane line and the statusline stay unbranded; the SessionEnd reconstruct diagnostic also
+  carries the mark, and /cost-today replies lead with 💸 cost-today:.
+
 ## [0.20.3] — 2026-10-27 — the statusline drops two identity fields it never used
 
 ### Removed

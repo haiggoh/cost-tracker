@@ -1,4 +1,4 @@
-# cost-tracker
+# 💸 cost-tracker
 
 Reports Claude Code spend on **three explicitly labelled axes** — session lifetime,
 today across all sessions, and free local inference — from the authoritative

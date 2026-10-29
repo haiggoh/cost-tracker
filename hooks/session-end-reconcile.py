@@ -135,7 +135,7 @@ def reconcile(payload, out=None):
     except OSError as exc:
         return "could not write %s (%s)" % (sid[:8], exc.__class__.__name__)
 
-    print("cost-tracker: %s never rendered — reconstructed $%.4f to %s"
+    print("💸 cost-tracker: %s never rendered — reconstructed $%.4f to %s"
           % (sid[:8], cost, dest), file=out)
     return "reconstructed $%.4f for %s" % (cost, sid[:8])
 

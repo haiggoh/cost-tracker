@@ -181,3 +181,9 @@ A session has one status line, so this plugin never claims it. It ships the wrap
 pattern; `install/wire-statusline.sh` (dry-run by default) points a machine's
 `~/.claude/scripts/` copies at the plugin, backs up what it replaces, and rolls
 back if the chain stops rendering.
+
+## Branding (💸)
+
+The daily-cap warning leads with 💸 (this plugin's credit moment); routine, free-lane and
+statusline lines stay unbranded. When working under this skill or replying to /cost-today,
+lead with 💸 cost-tracker:.
