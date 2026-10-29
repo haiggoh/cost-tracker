@@ -34,14 +34,29 @@ def btc(tmp_path, monkeypatch):
 def test_warn_line_leads_with_the_brand_mark(btc):
     line = btc.format_line(36.0, 0.9, 4.0, [], "today across all sessions",
                            0.0, 36.0, 0.0, warn=True)
-    assert line.startswith("💸 ⚠️ WARNING — ")
+    # Exact prefix through the computed figure — a rewording of the header fails this.
+    assert line.startswith("💸 ⚠️ WARNING — 90% of daily cap used: ")
     assert "% of daily cap used" in line
 
 
 def test_routine_line_stays_unbranded(btc):
     line = btc.format_line(4.0, 0.1, 36.0, [], "today across all sessions",
                            0.0, 4.0, 0.0, warn=True)
-    assert line.startswith("budget-tally: ") and "💸" not in line
+    # Exact stable prefix (the dollar figure depends on the shipped fee, so it is not pinned).
+    assert line.startswith("budget-tally: today's spend (today across all sessions) ≈ $")
+    assert "💸" not in line
+
+
+def test_statusline_wrapper_carries_no_mark():
+    """User decision 2026-10-28: the identity mark never appears in the statusline.
+
+    A source-level pin, so the constraint fails loudly if anyone ever prefixes the
+    wrapper's output rather than relying on a reviewer remembering the decision.
+    """
+    wrapper = os.path.join(os.path.dirname(__file__), "..", "bin", "statusline-render.sh")
+    assert os.path.isfile(wrapper), "statusline wrapper missing — the pin must not pass vacuously"
+    text = open(wrapper, encoding="utf-8", errors="replace").read()
+    assert "💸" not in text
 
 
 def test_free_lane_line_stays_unbranded(btc):

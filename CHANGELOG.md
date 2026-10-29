@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.20.5] — 2026-10-29 — review follow-up: one string, stronger pins
+
+### Changed
+- The /cost-today attribution and the SKILL.md branding line now prescribe the same exact
+  string (`💸 cost-tracker:`), removing the cost-today-vs-cost-tracker disagreement the
+  independent final review (DeepSeek V4.1 Flash dispatch) flagged.
+- Tests tightened: the warn-line pin runs through the computed figure, the routine pin through
+  its exact stable prefix, and a new source-level pin asserts the statusline wrapper carries
+  no mark at all (user decision 2026-10-28). All three mutation-checked.
+
 ## [0.20.4] — 2026-10-28 — 💸 the mark leads the credit moments
 
 ### Changed
