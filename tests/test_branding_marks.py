@@ -1,7 +1,9 @@
 """tests/test_branding_marks.py — the 💸 identity mark leads the credit moments.
 
-Credit moments per the 2026-10-28 branding spec: the daily-cap WARNING line carries the mark;
-the routine (non-warning) tally line and the free-lane line stay unbranded, and the statusline
+Credit moments per the 2026-10-28 branding spec, amended 2026-10-30: the daily-cap WARNING
+line keeps its plain ⚠️ form — at the moment the budget actually runs out the whimsical 💸
+would read as mocking the user (tone amendment), so the warn line is pinned 💸-free; the
+routine (non-warning) tally line and the free-lane line stay unbranded, and the statusline
 is out of scope entirely (user decision 2026-10-28: never brand the statusline).
 All scratch env — no real ledger, cap or clock.
 """
@@ -31,12 +33,15 @@ def btc(tmp_path, monkeypatch):
     return mod
 
 
-def test_warn_line_leads_with_the_brand_mark(btc):
+def test_warn_line_keeps_the_sober_warning(btc):
     line = btc.format_line(36.0, 0.9, 4.0, [], "today across all sessions",
                            0.0, 36.0, 0.0, warn=True)
     # Exact prefix through the computed figure — a rewording of the header fails this.
-    assert line.startswith("💸 ⚠️ WARNING — 90% of daily cap used: ")
+    # Tone amendment 2026-10-30: no 💸 at the running-out moment — the plain ⚠️ is the
+    # whole message; the mark belongs to cost-tracker's other credit moments.
+    assert line.startswith("⚠️ WARNING — 90% of daily cap used: ")
     assert "% of daily cap used" in line
+    assert "💸" not in line
 
 
 def test_routine_line_stays_unbranded(btc):

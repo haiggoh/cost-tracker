@@ -1452,7 +1452,7 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
         fee_note = f", fee ×{MARKUP:.2f}" if MARKUP != 1.0 else ""
         return (f"budget-tally: today's spend ({session_scope}) ≈ ${total * MARKUP:.2f} "
                 f"({what}{fee_note}; {basis}{side_spend_note(LAST_BY_SOURCE)}){note}")
-    prefix = f"💸 ⚠️ WARNING — {pct * 100:.0f}% of daily cap used: " if warn and pct >= WARN_PCT else "budget-tally: "
+    prefix = f"⚠️ WARNING — {pct * 100:.0f}% of daily cap used: " if warn and pct >= WARN_PCT else "budget-tally: "
     # Both figures on the GATEWAY axis when a fee applies: the user is measured against the
     # gateway's cap and its refusal message quotes that number. The FEE is published and
     # deterministic; the GAP is measured and unexplained, so it is named separately and its

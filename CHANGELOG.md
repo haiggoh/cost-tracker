@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.20.6] — 2026-10-30 — tone amendment: the ⚠️ warning stands alone
+
+### Changed
+- The daily-cap WARNING line drops the 💸 mark: at the moment the budget actually runs out,
+  the whimsical flying-dollar emoji reads as mocking the user (user amendment 2026-10-30).
+  The plain `⚠️ WARNING — N% of daily cap used:` is the whole message there. 💸 stays on the
+  plugin's other credit moments (reconcile diagnostics, /cost-today attribution, manifest,
+  README) — the statusline remains out of scope, unchanged.
+- test_branding_marks.py: the warn pin is now `⚠️ WARNING …` exact AND pins 💸's absence on
+  that line; the docstring records the tone rule.
+
 ## [0.20.5] — 2026-10-29 — review follow-up: one string, stronger pins
 
 ### Changed
