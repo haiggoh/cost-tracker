@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.20.7] — 2026-10-31
+
+### Changed
+- The plugin description (plugin.json, and the marketplace listing it feeds) is rewritten to describe
+  the plugin's full current capabilities.
+
 ## [0.20.6] — 2026-10-30 — tone amendment: the ⚠️ warning stands alone
 
 ### Changed

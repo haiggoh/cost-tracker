@@ -12,5 +12,6 @@
   "_comment_tests": "The pytest default alone never ran tests/test_*.sh (6 suites, 348 checks). test_cmd runs pytest AND every shell suite as concurrent GNU parallel jobs; exit = number of failed jobs, and pytest exits 5 when it collects nothing, so an empty suite still fails (2026-10-28).",
   "test_cmd": "{ echo \"$HOME/.local/bin/pytest -q tests -p no:cacheprovider -n 8\"; for t in tests/test_*.sh; do echo \"bash $t\"; done; } | parallel --will-cite -j 12",
 
-  "refresh_plugin": "cost-tracker"
+  "refresh_plugin": "cost-tracker",
+  "require_default_branch_checkout": true
 }
