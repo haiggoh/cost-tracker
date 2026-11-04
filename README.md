@@ -36,6 +36,16 @@ per-session table is printed so a reader can audit the label instead of trusting
 | `cost-tracker report [--today\|--week\|--month\|--since D] [--json] [--full-ids]` | per-session breakdown for a period |
 | `cost-tracker report --breakdown` | the same period as labelled percentage bars: spend by category, and savings on the free lanes (one row per free-lane session) |
 | `cost-tracker report --days N [--breakdown]` | the last N UTC days ending today, with a per-day trend (bars scaled to the cap, not the busiest day) |
+| `cost-tracker menu` | the interactive selector for the routine subcommands (report, cap, connection, fee, calibrate, doctor) |
+
+### Interactive menu
+
+A bare `cost-tracker` on an interactive terminal opens the menu — a numbered selector for
+the six routine subcommands. It ECHOES every command it runs as a pasteable
+`$ cost-tracker …` line, so using the menu teaches the real CLI; it never touches the
+ledger except through those ordinary commands. It only opens when both stdin and stdout
+are a terminal — piped, scripted and hook invocations behave exactly as before — and
+`COST_TRACKER_NO_MENU=1` (or `true`/`yes`) forces the plain CLI everywhere.
 
 ## Writing a release entry
 

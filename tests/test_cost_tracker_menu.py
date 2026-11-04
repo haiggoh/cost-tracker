@@ -340,3 +340,13 @@ def test_argparse_error_path_unchanged(tmp_path):
     err_lines = r.stderr.splitlines()
     assert err_lines[0].startswith("usage: cost-tracker"), r.stderr
     assert err_lines[-1] == "cost-tracker: error: unrecognized arguments: --bogus", r.stderr
+
+
+def test_help_lists_the_menu_subcommand(tmp_path):
+    """`menu` must be discoverable from --help alone: the selector only helps people who can
+    find it. argparse auto-lists it from the add_parser call; this pin keeps a future
+    argparse/registry refactor from dropping it silently."""
+    r = subprocess.run(_bare_argv() + ["--help"], capture_output=True, text=True,
+                       env=_sandbox_env(tmp_path), timeout=30)
+    assert r.returncode == 0
+    assert ",menu}" in r.stdout, r.stdout
