@@ -148,6 +148,15 @@ def test_eof_backs_out_cleanly(monkeypatch):
     assert rc == 0
 
 
+def test_eof_mid_action_backs_out_without_dispatch(monkeypatch):
+    """^D inside an action's own prompt (report's period) backs out of the ACTION — no argv is
+    composed or dispatched. Pins the inner Cancelled handler: a mutation removing it would let
+    a half-built action escape the loop while the rest of the suite stays green."""
+    calls, rc = drive(monkeypatch, ["report"])
+    assert calls == []
+    assert rc == 0
+
+
 def test_unknown_pick_reprompts(monkeypatch, capsys):
     calls, rc = drive(monkeypatch, ["banana", "q"])
     assert calls == []
