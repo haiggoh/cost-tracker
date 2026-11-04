@@ -42,7 +42,7 @@ Environment overrides (all optional):
   COST_TRACKER_ESTIMATES    0 = ledger only; no no-ledger / classifier estimate
   COST_TRACKER_CLASSIFIER_USD_PER_CALL  estimated $ per auto-mode classifier call (0 = off)
   COST_TRACKER_NO_SPAWN     1 = the statusline never forks a background estimate refresh
-  COST_TRACKER_NO_MENU      1 = never open the interactive menu (bare or `menu`)
+  COST_TRACKER_NO_MENU      1/true/yes = never open the interactive menu (bare or `menu`)
 """
 import argparse
 import glob
@@ -2231,7 +2231,8 @@ def main(argv=None):
         epilog="Environment variables (all optional): COST_TRACKER_CAP_USD, COST_TRACKER_FEE "
                "(alias COST_TRACKER_MARKUP), COST_TRACKER_APPLY_GAP, COST_TRACKER_PROVIDERS, "
                "COST_TRACKER_CONFIG_DIR, COST_TRACKER_LEDGER_DIR, COST_TRACKER_HISTORY, "
-               "COST_TRACKER_PROJECTS_DIR, COST_TRACKER_STATUSLINE. See README 'Environment'.")
+               "COST_TRACKER_PROJECTS_DIR, COST_TRACKER_STATUSLINE, COST_TRACKER_NO_MENU. "
+               "See README 'Environment'.")
     sub = ap.add_subparsers(dest="cmd")
 
     def add_period(p):

@@ -350,3 +350,59 @@ def test_help_lists_the_menu_subcommand(tmp_path):
                        env=_sandbox_env(tmp_path), timeout=30)
     assert r.returncode == 0
     assert ",menu}" in r.stdout, r.stdout
+
+
+def test_systemexit_confined_to_the_action(monkeypatch, capsys):
+    """dispatch=main can exit (argparse rejects an argv). The confinement must end the ACTION,
+    not the session: the loop continues and q still quits cleanly. Pins the seam the Fakes
+    could not — the per-action SystemExit capture."""
+    class Exits:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, argv):
+            self.calls.append(list(argv))
+            raise SystemExit(2)
+
+    seq = ["cap", "q"]
+    monkeypatch.setattr("builtins.input", lambda _p="": seq.pop(0))
+    ex = Exits()
+    rc = menu.run(dispatch=ex)
+    assert ex.calls == [["cap"]]
+    assert rc == 0
+    assert "command exited 2" in capsys.readouterr().out
+
+
+def test_dispatch_return_value_surfaced(monkeypatch, capsys):
+    """A subcommand that signals failure by RETURNING non-zero must not read as menu-success:
+    run() surfaces the exit code the same way it surfaces SystemExit."""
+    class Returns:
+        def __call__(self, argv):
+            return 3
+
+    seq = ["cap", "q"]
+    monkeypatch.setattr("builtins.input", lambda _p="": seq.pop(0))
+    rc = menu.run(dispatch=Returns())
+    assert rc == 0
+    assert "command exited 3" in capsys.readouterr().out
+
+
+def test_every_action_argv_leads_with_a_real_subcommand(monkeypatch):
+    """dispatch=main re-enters the CLI, so every argv a builder composes must lead with a real
+    subcommand name — anything else would fall into the bare-TTY gate and re-enter the menu
+    (the no-re-entry invariant the Task 3 review flagged as load-bearing)."""
+    seq = [""]  # the report builder's period prompt: default
+    monkeypatch.setattr("builtins.input", lambda _p="": seq.pop(0))
+    for _name, _desc, fn in menu.ACTIONS:
+        argv = fn()
+        assert argv[0] in {"report", "cap", "connection", "fee", "calibrate", "doctor"}, argv
+
+
+def test_report_action_runs_through_the_real_cli(tmp_path):
+    """The one end-to-end drive of the seam the unit Fakes cannot cover: menu -> report ->
+    period -> the REAL main() executes the report in the sandboxed child; the echoed line
+    reaches the terminal and the loop returns for the next action."""
+    out, rc = _under_pty(_bare_argv(), b"report\r\rq\r", _sandbox_env(tmp_path))
+    assert rc == 0, out
+    assert "$ cost-tracker report today" in out, out
+    assert "press return for the menu" in out, out

@@ -163,10 +163,15 @@ def run(dispatch, echo=True):
         if echo:
             print(f"\n  $ cost-tracker {' '.join(_quote(a) for a in argv)}\n")
         try:
-            dispatch(argv)
+            rc_val = dispatch(argv)
         except SystemExit as e:
             # The CLI exits rather than returns on a rejected argument; that must end the
             # ACTION, not the session.
             if e.code:
                 print(f"  (command exited {e.code} — nothing further in this action ran)")
+        else:
+            # A subcommand that signals failure by RETURNING non-zero must not read as
+            # menu-success either.
+            if rc_val:
+                print(f"  (command exited {rc_val} — nothing further in this action ran)")
         print("  — press return for the menu, or type the next action.")

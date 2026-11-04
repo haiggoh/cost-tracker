@@ -12,7 +12,9 @@
 - The menu only opens when both stdin and stdout are a terminal — piped, scripted and
   hook invocations behave exactly as before (pinned byte-parity) — and
   `COST_TRACKER_NO_MENU=1` (or `true`/`yes`, case-insensitive) forces the plain CLI
-  everywhere. `^D`/`^C` back out of an action, never half-run one.
+  everywhere. `^D` (and `^C` at the menu's own prompts) backs out of an action, never
+  half-runs one — a ^C during a dispatched command ends the process, as it would without
+  the menu.
 
 ## [0.20.7] — 2026-10-31
 
