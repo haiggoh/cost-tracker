@@ -80,3 +80,76 @@ def test_header_is_the_branded_block(capsys):
         "   Today's spend, the cap, and how this session connects — one place for the money questions\n"
         + "=" * 72 + "\n"
     )
+
+
+# --------------------------------------------------------------------------- the action loop
+
+
+class Fake:
+    """Stands in for the CLI dispatch; records argvs so a keystroke sequence can be asserted
+    as the command it composes."""
+
+    def __init__(self, rc=0):
+        self.calls = []
+        self.rc = rc
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        return self.rc
+
+
+def drive(monkeypatch, keys, echo=True):
+    """Run the selector over a scripted keystroke list. An exhausted script raises EOFError,
+    which the selector must treat as 'back out' — so a script that forgets to quit still ends
+    the test instead of hanging it."""
+    seq = list(keys)
+
+    def fake_input(_prompt=""):
+        if not seq:
+            raise EOFError()
+        return seq.pop(0)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    fake = Fake()
+    rc = menu.run(dispatch=fake, echo=echo)
+    return fake.calls, rc
+
+
+def test_actions_are_exactly_the_six_routine_commands():
+    """Only the routine read-shaped subcommands. The machine surface (statusline) and the
+    pre-0.12/informational ones (markup, prices) are never offered."""
+    names = [name for name, _desc, _fn in menu.ACTIONS]
+    assert set(names) == {"report", "cap", "connection", "fee", "calibrate", "doctor"}
+
+
+def test_report_action_composes_report_argv(monkeypatch):
+    """The report action prompts for a period (default today) and hands the REAL CLI argv to
+    dispatch — the menu composes, it never reimplements."""
+    calls, rc = drive(monkeypatch, ["report", "", "q"])
+    assert calls == [["report", "today"]]
+    assert rc == 0
+
+
+def test_echo_prints_the_command(monkeypatch, capsys):
+    """The echoed line teaches the CLI: what ran is printed as a pasteable command."""
+    drive(monkeypatch, ["cap", "q"])
+    assert "$ cost-tracker cap" in capsys.readouterr().out
+
+
+def test_echo_absent_when_disabled(monkeypatch, capsys):
+    drive(monkeypatch, ["cap", "q"], echo=False)
+    assert "$ cost-tracker" not in capsys.readouterr().out
+
+
+def test_eof_backs_out_cleanly(monkeypatch):
+    """^D means back out — never a partial dispatch, never a crash."""
+    calls, rc = drive(monkeypatch, [])
+    assert calls == []
+    assert rc == 0
+
+
+def test_unknown_pick_reprompts(monkeypatch, capsys):
+    calls, rc = drive(monkeypatch, ["banana", "q"])
+    assert calls == []
+    assert "no action 'banana'" in capsys.readouterr().out
+    assert rc == 0
