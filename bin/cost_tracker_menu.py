@@ -30,7 +30,7 @@ def available(stream_in=None, stream_out=None, env=None):
     env = os.environ if env is None else env
     stream_in = sys.stdin if stream_in is None else stream_in
     stream_out = sys.stdout if stream_out is None else stream_out
-    if env.get("COST_TRACKER_NO_MENU", "").strip() not in ("", "0", "false", "no"):
+    if env.get("COST_TRACKER_NO_MENU", "").strip().lower() not in ("", "0", "false", "no"):
         return False
     try:
         return bool(stream_in.isatty() and stream_out.isatty())

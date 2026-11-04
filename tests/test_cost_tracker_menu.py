@@ -57,11 +57,14 @@ def test_available_false_when_only_one_stream_is_a_tty():
 
 @pytest.mark.parametrize("val,expected", [
     ("1", False), ("true", False), ("yes", False),
+    ("TRUE", False), (" YES ", False),
     ("", True), ("0", True), ("false", True), ("no", True),
+    ("FALSE", True), ("No", True),
 ])
 def test_available_false_when_env_opt_out(val, expected):
     """COST_TRACKER_NO_MENU is the explicit opt-out for an interactive terminal that still wants
-    the old plain behaviour."""
+    the old plain behaviour. Matched after strip+lower: a user who set FALSE or No asked FOR the
+    menu, and mixed case must not silently opt them out (review fix round 1)."""
     assert menu.available(Tty(), Tty(), env={"COST_TRACKER_NO_MENU": val}) is expected
 
 
