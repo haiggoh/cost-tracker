@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.20.8] — 2026-11-04
+
+### Added — 💸 interactive menu (menu-restyle batch, user spec 2026-11-03)
+
+- `cost-tracker menu` (and a bare `cost-tracker` on an interactive terminal) opens a
+  csl-branded selector — 💸 Cost Tracker header — for the six routine subcommands
+  (report, cap, connection, fee, calibrate, doctor). Every command is echoed as a
+  pasteable `$ cost-tracker …` line before it runs; the menu never touches the ledger
+  except through those ordinary commands.
+- The menu only opens when both stdin and stdout are a terminal — piped, scripted and
+  hook invocations behave exactly as before (pinned byte-parity) — and
+  `COST_TRACKER_NO_MENU=1` (or `true`/`yes`, case-insensitive) forces the plain CLI
+  everywhere. `^D`/`^C` back out of an action, never half-run one.
+
 ## [0.20.7] — 2026-10-31
 
 ### Changed
