@@ -1,6 +1,6 @@
 {
   "name": "cost-tracker",
-  "version": "0.20.8",
+  "version": "0.20.9",
   "description": "💸 Reports Claude Code spend on three labelled axes — per-session lifetime, today across all sessions, free local-lane savings — from the statusline cost ledger. Period reports (today/week/month/since), per-day trend, category breakdowns, a statusline wrapper, learned caps and gateway fees. Calibrates daily total against the gateway's refusal figure; quarantines invalid records with diagnostics.",
   "author": {
     "name": "Heiko Brantsch"

@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.20.9] — 2026-11-05
+
+- The negative half of the rc-surfacing pin: a dispatch returning 0 prints no "command exited" line (the over-eager `if True:` mutation now fails). No production change — tests only.
+
 ## [0.20.8] — 2026-11-04
 
 ### Added — 💸 interactive menu (menu-restyle batch, user spec 2026-11-03)

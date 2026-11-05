@@ -387,6 +387,21 @@ def test_dispatch_return_value_surfaced(monkeypatch, capsys):
     assert "command exited 3" in capsys.readouterr().out
 
 
+def test_dispatch_zero_return_prints_nothing(monkeypatch, capsys):
+    """The normal case — a dispatch that returns 0 must NOT read as a failure: no
+    'command exited' line. The negative half of the rc-surfacing pin: an over-eager
+    `if True:` mutation would print for every action and fail here."""
+    class Ok:
+        def __call__(self, argv):
+            return 0
+
+    seq = ["cap", "q"]
+    monkeypatch.setattr("builtins.input", lambda _p="": seq.pop(0))
+    rc = menu.run(dispatch=Ok())
+    assert rc == 0
+    assert "command exited" not in capsys.readouterr().out
+
+
 def test_every_action_argv_leads_with_a_real_subcommand(monkeypatch):
     """dispatch=main re-enters the CLI, so every argv a builder composes must lead with a real
     subcommand name — anything else would fall into the bare-TTY gate and re-enter the menu
