@@ -1,6 +1,6 @@
 ---
 name: cost-tracker
-description: "Use when reporting, reconciling, or reasoning about Claude Code API spend — today's cost, a session's cost, whether a budget cap is close, what local offload saved, or why two spend figures disagree. Also use before writing any dollar figure about token spend into a message, a note, or a status line, and when the cost ledger looks wrong (a total that exceeds the cap, a session counted twice, a figure that dropped). ALSO use whenever the daily budget cap has changed, was raised or lowered, or the user says the cap is wrong / out of date — that is a `cost-tracker cap --learn`, which re-reads the cap from the gateway's own refusal message. ALSO use when spend looks systematically LOW against a budget, when a gateway or LiteLLM account bills more than the reported figure, or the user asks why the cap is hit earlier than the total suggests — that is `cost-tracker markup`. Do NOT use for non-spend statusline work or for gateway auth problems."
+description: "Use when reporting, reconciling, or reasoning about Claude Code API spend — today's cost, a session's cost, whether a budget cap is close, what local offload saved, or why two spend figures disagree. Also use before writing any dollar figure about token spend into a message, a note, or a status line, and when the cost ledger looks wrong (a total that exceeds the cap, a session counted twice, a figure that dropped). ALSO use whenever the daily budget cap has changed, was raised or lowered, or the user says the cap is wrong / out of date — that is a `cost-tracker cap --learn`, which re-reads the cap from the gateway's own refusal message. ALSO use when spend looks systematically LOW against a budget, when a gateway or LiteLLM account bills more than the reported figure, or the user asks why the cap is hit earlier than the total suggests — that is the fee/gap pair: `cost-tracker fee` shows the published factor, `cost-tracker calibrate --learn-gap` measures an unexplained one. Do NOT use for non-spend statusline work or for gateway auth problems."
 ---
 
 # cost-tracker
@@ -41,7 +41,7 @@ user. Run the command instead:**
 ```bash
 cost-tracker statusline    # one line, correct
 cost-tracker report        # the full table, correct
-cost-tracker today         # today's spend, correct
+cost-tracker report --today  # today's spend, correct
 ```
 
 Every one of these applies the markup for you. **Whatever they print is the number
@@ -86,7 +86,7 @@ cost-tracker report --week   --json      # 7 days; --month, --since YYYY-MM-DD
 cost-tracker statusline                  # today: cloud $30.12/$40 · local saved $4.80
 cost-tracker doctor                      # quarantined records + resolved config
 cost-tracker calibrate                   # our daily totals vs the gateway's own figure
-cost-tracker markup                      # gateway markup + provenance (1.0 on a normal account)
+cost-tracker fee                         # the published gateway fee and its source (1 = list price)
 ```
 
 The table **is** the audit of the label — a reader can total the period column
@@ -147,11 +147,12 @@ the shape of that trap.
   SUPERSEDED. The fee/gap steps below apply only to a gateway that publishes no table. Never
   assume "list price + a reseller's published fee": that assumption once hid a flat ×1.10
   regional-endpoint price behind a ×1.05 fee and a ×1.047 "unknown gap".
-- Run `cost-tracker markup` to see whether a factor is recorded on this machine. If one is,
+- Run `cost-tracker fee` to see whether a factor is recorded on this machine. If one is,
   `statusline` and `budget-tally` already report against the **effective** cap and you can
   quote the percentage as-is.
-- If `calibrate` shows a steady ratio and no markup is recorded yet, run
-  `cost-tracker calibrate --learn-markup`. It refuses unless ≥5 calibrated days agree
+- If `calibrate` shows a steady ratio and no gap is recorded yet, run
+  `cost-tracker calibrate --learn-gap` (the pre-0.12 alias `--learn-markup` still works). It refuses
+  unless ≥5 calibrated days agree
   closely enough to be one rate — a refusal is a result, not a failure.
 - **On a normal Anthropic account none of this applies**, the factor is `1.0`, and no markup
   can ever be learned (it takes a gateway refusal message, which never occurs). Do not go

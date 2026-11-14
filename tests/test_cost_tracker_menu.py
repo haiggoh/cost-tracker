@@ -130,10 +130,26 @@ def test_actions_are_exactly_the_six_routine_commands():
 
 
 def test_report_action_composes_report_argv(monkeypatch):
-    """The report action prompts for a period (default today) and hands the REAL CLI argv to
-    dispatch — the menu composes, it never reimplements."""
+    """The report action prompts for a period word and composes the FLAG the report parser
+    actually accepts. The parser has NO positional period, so the first cut's
+    ["report", "today"] died with 'unrecognized arguments: today' and EVERY menu report
+    action failed (P0 2026-11-13) — the menu composes, it never reimplements, and the argv
+    it composes must parse."""
     calls, rc = drive(monkeypatch, ["report", "", "q"])
-    assert calls == [["report", "today"]]
+    assert calls == [["report", "--today"]]
+    assert rc == 0
+    calls, _rc = drive(monkeypatch, ["report", "week", "q"])
+    assert calls == [["report", "--week"]]
+    calls, _rc = drive(monkeypatch, ["report", "month", "q"])
+    assert calls == [["report", "--month"]]
+
+
+def test_report_action_unknown_period_never_dispatches(monkeypatch, capsys):
+    """A typo at the period prompt must not build a broken argv: the action aborts with the
+    accepted words, nothing is dispatched."""
+    calls, rc = drive(monkeypatch, ["report", "banana", "q"])
+    assert calls == []
+    assert "today|week|month" in capsys.readouterr().out
     assert rc == 0
 
 
@@ -415,9 +431,14 @@ def test_every_action_argv_leads_with_a_real_subcommand(monkeypatch):
 
 def test_report_action_runs_through_the_real_cli(tmp_path):
     """The one end-to-end drive of the seam the unit Fakes cannot cover: menu -> report ->
-    period -> the REAL main() executes the report in the sandboxed child; the echoed line
-    reaches the terminal and the loop returns for the next action."""
+    period -> the REAL main() executes the report in the sandboxed child. The assertions are
+    on the OUTCOME, not the echo: the report table actually prints and no 'command exited'
+    line appears. The first cut asserted only the echoed string '$ cost-tracker report
+    today' — a command that does not even parse — so the broken action read as green
+    (P0 2026-11-13: an echo-only assertion pins surface appearance, never the result)."""
     out, rc = _under_pty(_bare_argv(), b"report\r\rq\r", _sandbox_env(tmp_path))
     assert rc == 0, out
-    assert "$ cost-tracker report today" in out, out
+    assert "$ cost-tracker report --today" in out, out
+    assert "TOTAL cloud" in out, out                      # the report table printed
+    assert "command exited" not in out, out               # the dispatched argv parsed clean
     assert "press return for the menu" in out, out

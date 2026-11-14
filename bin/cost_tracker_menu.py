@@ -66,9 +66,23 @@ def _in(prompt):
 # --------------------------------------------------------------------------- actions
 
 
+_PERIOD_FLAGS = (("today", "--today"), ("week", "--week"), ("month", "--month"))
+
+
 def _a_report():
-    period = _in("  period [today]: ")
-    return ["report", period or "today"]
+    """The period prompt names the PERIOD WORDS and composes the FLAG the report parser
+    accepts. The parser has no positional period: the first cut returned
+    ["report", "today"], argparse died with 'unrecognized arguments: today', and every
+    menu report action failed (P0 2026-11-13). An unknown word aborts the action rather
+    than building an argv that cannot parse."""
+    raw = _in("  period [today|week|month] (return = today): ").lower()
+    if not raw:
+        return ["report", "--today"]
+    for word, flag in _PERIOD_FLAGS:
+        if raw == word:
+            return ["report", flag]
+    print(f"  (unknown period '{raw}' — today|week|month)")
+    raise Cancelled() from None
 
 
 def _a_cap():

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.20.10] — 2026-11-13
+
+### Fixed (desktop-migration FLEET Phase 1 P0: menu/argv/skill contradictions)
+
+- **The menu's report action works again.** It composed `["report", "today"]` — a positional
+  period the report parser has never accepted — so EVERY menu report died with
+  `unrecognized arguments: today` (argparse exit 2), while the suite stayed green: the unit
+  test pinned the broken argv and the end-to-end pty test asserted only the echoed command
+  string, never the outcome. The action now maps the period word to the flag the parser
+  takes (`report --today/--week/--month`), an unknown word aborts the action with the
+  accepted words instead of building an unparseable argv, and the echo teaches a command
+  that actually pastes. The end-to-end test now asserts the OUTCOME (the table prints, no
+  "command exited" line).
+- **The skill no longer teaches commands that do not exist.** SKILL.md's quick block listed
+  `cost-tracker today` (invalid choice — probed), and three more spots used the pre-0.12
+  vocabulary (`markup`, `--learn-markup`) as if current. Now: `report --today`, `fee`,
+  `calibrate --learn-gap` (the pre-0.12 alias noted once). New `tests/test_skill_consistency.py`
+  guards it mechanically: every backticked `cost-tracker <sub>` in SKILL.md and
+  commands/cost-today.md must be a real subcommand (extracted from the CLI's own --help),
+  and no taught surface may use the positional period form.
+- Installer/shim surfaces checked and clean: shim-template.sh forwards all arguments (its
+  documented contract), wire-statusline.sh untouched; the CLI's own provenance strings and
+  README already used the current vocabulary.
+
 ## [0.20.9] — 2026-11-05
 
 - The negative half of the rc-surfacing pin: a dispatch returning 0 prints no "command exited" line (the over-eager `if True:` mutation now fails). No production change — tests only.
