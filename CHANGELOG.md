@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.20.11] — 2026-11-14
+
+### Changed — statusline line 1 shows the model's human name in free sessions (user)
+
+- Line 1 showed the resolver's raw `actual_model_id` (`mistral-large-4-1t-a52b`). It now shows
+  `actual_model_display`, which free-agents 0.58.2+ sets from the model registries ("Mistral
+  Large 4 (Le Chonk)", "Labs-Diffusion 3B 4-bit"). Against an older free-agents the display is
+  still `<alias> → <id>`; then — and when it is empty or `unknown` — line 1 keeps the id, so
+  updating only one of the two plugins never makes the statusline worse.
+  `tests/test_statusline_render.sh` pins both (stub resolver; the two new-name checks failed
+  before the change).
+
 ## [0.20.10] — 2026-11-13
 
 ### Fixed (desktop-migration FLEET Phase 1 P0: menu/argv/skill contradictions)

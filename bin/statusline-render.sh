@@ -388,8 +388,15 @@ RED=$(printf '\033[31m');   MAGENTA=$(printf '\033[35m')
 BLUE=$(printf '\033[34m')
 SEP="${DIM} · ${RESET}"
 
-# Line 1: model identity (uses resolver's actual_model_id for truthful display)
+# Line 1: model identity. 0.20.11 (user 2026-11-14): the resolver's human display name
+# (free-agents 0.58.2+ sets it from the model registries, e.g. "Mistral Large 4 (Le Chonk)")
+# instead of the raw id. An older resolver's display is "<alias> → <id>"; then, and when the
+# display is empty/unknown, keep the id — updating one plugin alone never reads worse.
 MODEL_LABEL="${ACTUAL_MODEL_ID}"
+case "$ACTUAL_MODEL_DISPLAY" in
+    ''|unknown|*' → '*) ;;
+    *) MODEL_LABEL="$ACTUAL_MODEL_DISPLAY" ;;
+esac
 if [ "$SESSION_KIND" = "cloud" ]; then
     LINE1="${BOLD}${BLUE}JoyIA${RESET}${SEP}${BOLD}${MODEL_LABEL}${RESET}"
 else

@@ -575,6 +575,28 @@ is "with no plugin installed nothing is run at all" \
 
 rm -rf "$FHOME" "$EMPTY"
 
+# --- line 1 shows the resolver's human display name (0.20.11, user 2026-11-14) ---
+# free-agents 0.58.2 sets actual_model_display to the registry name; line 1 shows it, not the
+# raw provider id. An OLDER resolver's display is "<alias> → <id>" — then line 1 keeps the id,
+# so updating only one of the two plugins never makes the statusline worse.
+DISP_BIN="$(mktemp -d)"
+_disp_stub() {
+  printf '%s\n' '#!/bin/sh' \
+    "printf '%s' '{\"schema_version\":1,\"session_kind\":\"free_api\",\"session_emoji\":\"x\",\"actual_model_id\":\"mistralai/mistral-large-4-1t-a52b\",\"actual_model_display\":\"$1\",\"provider_display\":\"Free API (NVIDIA)\",\"unknown_fallback\":false}'" \
+    > "$DISP_BIN/la-session-identity.sh"
+  chmod +x "$DISP_BIN/la-session-identity.sh"
+}
+DISP_PAYLOAD='{"model":{"display_name":"Opus 5.5"},"workspace":{"current_dir":"/tmp"}}'
+_disp_stub "Mistral Large 4 (Le Chonk)"
+L1="$(COST_FREE_AGENTS_BIN="$DISP_BIN" ANTHROPIC_BASE_URL=http://localhost:4141 render "$DISP_PAYLOAD" | sed -n 1p)"
+has   "line 1 shows the resolver's display name"      "$L1" "Mistral Large 4 (Le Chonk)"
+hasnt "…and not the raw provider id"                  "$L1" "mistral-large-4-1t-a52b"
+_disp_stub "nvidia-mistral-large4 → mistralai/mistral-large-4-1t-a52b"
+L1="$(COST_FREE_AGENTS_BIN="$DISP_BIN" ANTHROPIC_BASE_URL=http://localhost:4141 render "$DISP_PAYLOAD" | sed -n 1p)"
+has   "an old-style '<alias> → <id>' display falls back to the id" "$L1" "mistralai/mistral-large-4-1t-a52b"
+hasnt "…without the arrow label"                      "$L1" "→"
+rm -rf "$DISP_BIN"
+
 echo
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
