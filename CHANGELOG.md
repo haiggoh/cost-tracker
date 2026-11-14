@@ -23,6 +23,15 @@
 - Installer/shim surfaces checked and clean: shim-template.sh forwards all arguments (its
   documented contract), wire-statusline.sh untouched; the CLI's own provenance strings and
   README already used the current vocabulary.
+- **Cross-family review round (Gemini 3.8 Flash) fixes:** the consistency guard now scans
+  FENCED CODE BLOCKS, not just inline backticks — the first cut required a leading backtick,
+  which excluded the very fence where the original `cost-tracker today` bug lived (proven
+  both ways: a planted fenced invalid command passed the old guard and fails the new one);
+  the troubleshooting step points at `connection` (limit, fee, gap) rather than `fee`
+  (published fee only — on a gap-only machine `fee` prints 1.0 and misreads as "no factor");
+  the gap vocabulary replaces the last "markup" wording on the normal-account line; the
+  period prompt accepts the flag form it echoes (`--week` == `week`); the --help choices
+  regex tolerates digits, hyphens and wrapping.
 
 ## [0.20.9] — 2026-11-05
 

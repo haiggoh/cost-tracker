@@ -75,7 +75,8 @@ def _a_report():
     ["report", "today"], argparse died with 'unrecognized arguments: today', and every
     menu report action failed (P0 2026-11-13). An unknown word aborts the action rather
     than building an argv that cannot parse."""
-    raw = _in("  period [today|week|month] (return = today): ").lower()
+    # The echo teaches the flag form, so accept it too: "--week" is the same answer as "week".
+    raw = _in("  period [today|week|month] (return = today): ").lower().lstrip("-")
     if not raw:
         return ["report", "--today"]
     for word, flag in _PERIOD_FLAGS:

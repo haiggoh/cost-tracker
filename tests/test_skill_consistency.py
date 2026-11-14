@@ -7,6 +7,12 @@ does not accept. The guard extracts the subcommand set from the CLI's OWN --help
 renders it, so there is one source of truth) and rejects any `cost-tracker <word>` mention
 in the taught surfaces that is not in it. It also pins the period form: `report` takes NO
 positional period, so the taught surfaces must use --today/--week/--month.
+
+Mentions are scanned in CODE positions: inline backtick spans AND fenced code blocks. The
+first cut required a leading backtick, which excluded fenced blocks entirely — and the fence
+is exactly where the original `cost-tracker today` bug lived (proven: a planted fenced
+invalid command passed that guard, review finding 1). Plain prose ("...cost-tracker reads
+that figure") is not a taught command and stays out of scope.
 """
 import os
 import pathlib
@@ -18,7 +24,27 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CLI = ROOT / "bin" / "cost-tracker"
 TAUGHT = [ROOT / "skills" / "cost-tracker" / "SKILL.md", ROOT / "commands" / "cost-today.md"]
 
-MENTION_RE = re.compile(r"`cost-tracker ([a-z][a-z0-9-]*)[\s`]")
+MENTION_RE = re.compile(r"\bcost-tracker ([a-z][a-z0-9-]*)")
+
+
+def _taught_mentions(text):
+    """cost-tracker subcommand words in code positions: fenced blocks and inline spans."""
+    out = []
+    fence = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if fence is None:
+            if stripped.startswith("```"):
+                fence = stripped[:3]
+                continue
+            for span in re.finditer(r"`([^`]*)`", line):
+                out.extend(MENTION_RE.findall(span.group(1)))
+        else:
+            if stripped.startswith(fence):
+                fence = None
+                continue
+            out.extend(MENTION_RE.findall(line))
+    return out
 
 
 def _subcommands():
@@ -33,7 +59,7 @@ def _subcommands():
     r = subprocess.run([sys.executable, str(CLI), "--help"], capture_output=True, text=True,
                        env=env, timeout=30)
     assert r.returncode == 0, r.stderr
-    m = re.search(r"\{([a-z][a-z,]*)\}", r.stdout)
+    m = re.search(r"\{([a-z0-9_,.-]+)\}", r.stdout)
     assert m, r.stdout
     return set(m.group(1).split(","))
 
@@ -43,9 +69,9 @@ def test_every_taught_subcommand_exists():
     assert {"report", "menu", "cap"} <= subs   # the probe is sane before it gates
     bad = []
     for f in TAUGHT:
-        for m in MENTION_RE.finditer(f.read_text()):
-            if m.group(1) not in subs:
-                bad.append(f"{f.name}: cost-tracker {m.group(1)}")
+        for name in _taught_mentions(f.read_text()):
+            if name not in subs:
+                bad.append(f"{f.name}: cost-tracker {name}")
     assert not bad, f"taught commands that do not exist: {bad}"
 
 

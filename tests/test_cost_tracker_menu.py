@@ -153,6 +153,14 @@ def test_report_action_unknown_period_never_dispatches(monkeypatch, capsys):
     assert rc == 0
 
 
+def test_report_action_accepts_the_flag_form(monkeypatch):
+    """The echo teaches `cost-tracker report --week`, so a user typing the flag form at the
+    prompt must get the same action, not an abort (review finding 5)."""
+    calls, rc = drive(monkeypatch, ["report", "--week", "q"])
+    assert calls == [["report", "--week"]]
+    assert rc == 0
+
+
 def test_echo_prints_the_command(monkeypatch, capsys):
     """The echoed line teaches the CLI: what ran is printed as a pasteable command."""
     drive(monkeypatch, ["cap", "q"])

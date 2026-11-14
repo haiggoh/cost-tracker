@@ -147,14 +147,14 @@ the shape of that trap.
   SUPERSEDED. The fee/gap steps below apply only to a gateway that publishes no table. Never
   assume "list price + a reseller's published fee": that assumption once hid a flat ×1.10
   regional-endpoint price behind a ×1.05 fee and a ×1.047 "unknown gap".
-- Run `cost-tracker fee` to see whether a factor is recorded on this machine. If one is,
-  `statusline` and `budget-tally` already report against the **effective** cap and you can
-  quote the percentage as-is.
+- Run `cost-tracker connection` to see which fee and gap apply on this machine. If a factor
+  is recorded, `statusline` and `budget-tally` already report against the **effective** cap
+  and you can quote the percentage as-is.
 - If `calibrate` shows a steady ratio and no gap is recorded yet, run
   `cost-tracker calibrate --learn-gap` (the pre-0.12 alias `--learn-markup` still works). It refuses
   unless ≥5 calibrated days agree
   closely enough to be one rate — a refusal is a result, not a failure.
-- **On a normal Anthropic account none of this applies**, the factor is `1.0`, and no markup
+- **On a normal Anthropic account none of this applies**, the factor is `1.0`, and no gap
   can ever be learned (it takes a gateway refusal message, which never occurs). Do not go
   hunting for a missing 20% there.
 - **Still never close a gap by scaling or clamping OUR figure.** The markup is a separate,
