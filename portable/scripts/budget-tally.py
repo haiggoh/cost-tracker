@@ -1,0 +1,1629 @@
+#!/usr/bin/env python3
+"""budget-tally.py — SessionStart + Stop hook.
+
+Purpose: tally today's actual Claude Code API spend against the llmgw
+$40/day cap and print a summary the user sees as a system message.
+
+Two invocations, two jobs:
+  (no args)  — SessionStart: print today's tally-so-far, over every session
+               that has a ledger entry today. For a session starting fresh,
+               that is only the earlier sessions (its own transcript doesn't
+               exist yet). But do NOT state it as "prior sessions": a session
+               that has been running since an earlier day already has a ledger
+               entry which the statusline wrapper keeps updating, so it is
+               included. Assuming otherwise under-counted a real long-running
+               session by ~$14 (2026-08-10). The label describes membership;
+               it never infers it from session age.
+  --check    — Stop (fires after every assistant turn): recompute today's
+               tally, this time including the current session's turns so
+               far. Stays silent unless the warning threshold is newly
+               crossed today, so it doesn't spam a line after every turn.
+
+The running session's own transcript is located deterministically via
+CLAUDE_CODE_SESSION_ID (see current_session_path()) — the same mechanism
+~/.claude/scripts/compact_session.py uses to find "the current session":
+the env var holds the session's UUID, which is also its transcript's
+filename under the cwd-slug project dir. Its usage is tallied both as part
+of the aggregate "files modified today" scan (which independently catches
+it by mtime) and in isolation, so the reported line can show the current
+session's own contribution as a real number, not just a scope label.
+Fixed 2026-07-16 — previously there was no way to isolate "this session"'s
+spend at all. The separate overshoot bug (tally reading HIGHER than real spend,
+because token reconstruction over-priced cache tokens ~4x) is addressed
+2026-07-21 by reading the authoritative cost-ledger instead of reconstructing —
+see the "Spend source" note below and memory: cost-ledger-capture. Overshoot
+can still occur only for the fallback path (sessions with no ledger entry).
+
+Trigger: SessionStart + Stop — deliberately NOT a cron job. The task ("how
+much have I spent today") is only relevant while a session is actually
+running; a cron would fire uselessly into the void on days with no session.
+See memory: llm-gateway-budget-limit, and the measure-twice skill's
+survey-then-match-trigger rule.
+
+Spend source (as of 2026-07-21): PRIMARY is the authoritative per-session
+cost-ledger at ~/.claude/cost-ledger/ — Claude Code's own .cost.total_cost_usd,
+captured by the statusLine wrapper cost-ledger-capture.sh (one-way: the
+statusline's proven cost info -> ledger -> here; budget-tally only READS it,
+it does NOT touch the statusline). This replaces the old token-reconstruction
+for every session the ledger covers, fixing the ~4x over-count (cache-token
+rates were too high). FALLBACK for sessions with no ledger entry (ran before
+the wrapper existed, or before their first statusLine render): reconstruct cost
+from raw token usage in the transcript (*.jsonl under ~/.claude/projects/**)
+using the same math Claude Code's built-in tracker uses (published Anthropic
+per-token rates + time-boxed intro discounts). See the pricing table below and
+memory: cost-ledger-capture, budget-tally-sessionstart-hook.
+
+Warning threshold: when today's tally reaches BUDGET_TALLY_WARN_PCT (default
+0.75) of the cap, the printed line is prefixed with a ⚠️ WARNING tag instead
+of the plain summary. On the `--check` (Stop) path, once that warning has
+fired for today it's suppressed for the rest of the day via a dated stamp
+file (BUDGET_TALLY_STAMP) — otherwise every subsequent turn would repeat it.
+
+Test overrides (all optional):
+  BUDGET_TALLY_PROJECTS_DIR   root to scan for *.jsonl (default ~/.claude/projects)
+  BUDGET_TALLY_CAP_USD        the daily cap to report against (default: resolved from the
+                              connection; a gateway's learned key cap, else none)
+  BUDGET_TALLY_WARN_PCT       warning threshold as a fraction (default 0.75)
+  BUDGET_TALLY_STAMP          path to the once-per-day warn stamp (default ~/.claude/.budget-tally-warned)
+  BUDGET_TALLY_TODAY          override "today" as YYYY-MM-DD (for testing)
+"""
+import glob
+import json
+import re
+import os
+import sys
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
+
+PROJECTS_DIR = os.environ.get(
+    "BUDGET_TALLY_PROJECTS_DIR", os.path.expanduser("~/.claude/projects")
+)
+# 0.12.0: the cap, the fee and the measured gap come from the SAME resolver cost-tracker uses
+# (bin/cost_connection.py), keyed on how this session connects. Before, CAP_USD defaulted to 40 —
+# one gateway key's daily cap — so every subscription, Console-key and Bedrock user was warned
+# against a ceiling that does not exist for them.
+def _load_connection():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    here = os.path.dirname(os.path.realpath(__file__))
+    loader = SourceFileLoader("cost_connection", os.path.join(here, "cost_connection.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:  # caught by _resolve()'s fail-open except
+        raise ImportError("cannot build a module spec for cost_connection.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(loader.name, mod)
+    loader.exec_module(mod)
+    return mod
+
+
+def conn_config_path():
+    return os.path.join(os.environ.get("COST_TRACKER_CONFIG_DIR",
+                                       os.path.expanduser("~/.claude/cost-tracker")), "cap.json")
+
+
+def _resolve():
+    """(cap_usd or None, fee, gap or None, connection dict). Never raises."""
+    try:
+        conn = _load_connection().resolve_connection(os.environ)
+    except Exception:
+        conn = {"kind": "unknown", "fee": 1.0, "gap": None, "cap_kind": "none",
+                "provider": None, "fee_source": "none (list price)"}
+    cap = None
+    for var in ("COST_TRACKER_CAP_USD", "BUDGET_TALLY_CAP_USD"):
+        try:
+            v = float(os.environ.get(var) or 0)
+        except ValueError:
+            v = 0
+        if v > 0:
+            cap = v
+            break
+    if cap is None and conn.get("kind") == "gateway":
+        # A reselling gateway's daily key cap, learned by `cost-tracker cap` from its refusal.
+        try:
+            with open(conn_config_path()) as f:
+                k = (json.load(f) or {}).get("key") or {}
+            cap = float(k.get("cap_usd") or 0) or None
+        except (OSError, ValueError, TypeError, AttributeError):
+            cap = None
+    elif cap is None and conn.get("cap_kind") in ("spend-limit", "daily-key"):
+        # 0.16.0: "daily-key" reaches here only from a FREE/local session, which carries the
+        # gateway key's cap as context for the day's aggregate. A gateway session takes the branch
+        # above (kind == "gateway") and reads the same file directly, so widening this tuple cannot
+        # change a gateway's resolution.
+        cap = conn.get("cap_usd")
+    gap = conn.get("gap") if os.environ.get("COST_TRACKER_APPLY_GAP", "1") != "0" else None
+    return cap, float(conn.get("fee") or 1.0), gap, conn
+
+
+CAP_USD, MARKUP, GAP, CONNECTION = _resolve()
+# The cap in the units this script measures (list price). The warning PROJECTS with the measured
+# gap as well (user decision 2026-10-11), so it fires before the gateway's own refusal does.
+_PROJ = MARKUP * (GAP or 1.0)
+EFFECTIVE_CAP_USD = (CAP_USD / _PROJ) if CAP_USD else None
+WARN_PCT = float(os.environ.get("BUDGET_TALLY_WARN_PCT", "0.75"))
+STAMP_PATH = os.environ.get("BUDGET_TALLY_STAMP", os.path.expanduser("~/.claude/.budget-tally-warned"))
+# Authoritative per-session cost ledger written by the statusLine wrapper
+# ~/.claude/scripts/cost-ledger-capture.sh (see memory: cost-ledger-capture).
+LEDGER_DIR = os.environ.get("BUDGET_TALLY_LEDGER_DIR", os.path.expanduser("~/.claude/cost-ledger"))
+# The reconstructed lines' own axis. Separate from LEDGER_DIR on purpose: everything that reads
+# LEDGER_DIR treats what it finds as the authoritative .cost.total_cost_usd.
+RECON_DIR = os.environ.get("COST_LEDGER_RECON_DIR", os.path.expanduser("~/.claude/cost-ledger-reconstructed"))
+# "Today" is UTC, matching the gateway's cap-reset clock (not local time) — record
+# timestamps in transcripts are UTC (`...Z`), so this keeps the tally window aligned
+# with what's actually being priced instead of drifting by the local UTC offset.
+TODAY = os.environ.get("BUDGET_TALLY_TODAY") or datetime.now(timezone.utc).date().isoformat()
+YESTERDAY = (date.fromisoformat(TODAY) - timedelta(days=1)).isoformat()
+
+# Rate = $ per token (not per-MTok) to keep the multiply-by-tokens math simple.
+# intro_until: if set and TODAY <= that date, use intro_input/intro_output.
+PRICING = {
+    "claude-sonnet-5": {
+        # $2/$10 announced as intro pricing, made the standard price (official footnote, 10-14).
+        "input": 2.00e-6, "output": 10.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    # Sonnet 5.5 (2026-09): $2 / $10 per MTok, cache read $0.10 (0.05x — official footnote;
+    # 0.1x until 0.15.0). Missing until 0.10.1, so 2026-10-03's Sonnet 5.5 session priced at $0.
+    "claude-sonnet-5-5": {
+        "input": 2.00e-6, "output": 10.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.05,
+    },
+    "claude-sonnet-4-6": {
+        "input": 3.00e-6, "output": 15.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    # Opus 5.5 (2026-09): $4 / $20 per MTok, cache read $0.20 (= 0.05x, NOT the usual 0.1x),
+    # per the claude-api skill's model table. Pricing it as Opus 5 would over-count ~25%.
+    "claude-opus-5-5": {
+        "input": 4.00e-6, "output": 20.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.05,
+    },
+    "claude-opus-5": {
+        "input": 5.00e-6, "output": 25.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    "claude-opus-4-8": {
+        "input": 5.00e-6, "output": 25.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    "claude-opus-4-7": {
+        "input": 5.00e-6, "output": 25.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    "claude-opus-4-6": {
+        "input": 5.00e-6, "output": 25.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    "claude-haiku-4-5": {
+        "input": 1.00e-6, "output": 5.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    "claude-fable-5": {
+        "input": 10.00e-6, "output": 50.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.1,
+    },
+    # Fable 5.1: same $10 / $50 as Fable 5; its cache read is $0.25 (0.025x, not 0.1x).
+    "claude-fable-5-1": {
+        "input": 10.00e-6, "output": 50.00e-6,
+        "cache_write_5m_mult": 1.25, "cache_write_1h_mult": 2.0, "cache_read_mult": 0.025,
+    },
+}
+
+
+# 0.15.0: the table above is now only the FALLBACK. The source of truth is
+# config/anthropic-prices.json — Anthropic's official list, cited and dated — shared with
+# bin/proxy_prices.py, which compares a gateway's own table against it. Loading it here means a
+# price change is one JSON edit, not two hand-kept copies drifting apart (the inline table had
+# already drifted: Sonnet 5 was still at $3/$15 after Anthropic made $2/$10 permanent).
+def _load_official_pricing():
+    path = os.environ.get("COST_TRACKER_OFFICIAL_PRICES", os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "config", "anthropic-prices.json"))
+    try:
+        with open(path) as f:
+            models = (json.load(f) or {}).get("models") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    out = {}
+    for name, r in models.items():
+        try:
+            inp = float(r["input"]) / 1e6
+            out[name] = {"input": inp, "output": float(r["output"]) / 1e6,
+                         "cache_write_5m_mult": float(r["cache_write_5m"]) / 1e6 / inp,
+                         "cache_write_1h_mult": float(r["cache_write_1h"]) / 1e6 / inp,
+                         "cache_read_mult": float(r["cache_read"]) / 1e6 / inp}
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+    return out or None
+
+
+PRICING = _load_official_pricing() or PRICING
+
+
+# Pseudo-models that appear in the "model" field of a transcript record but are NOT billable
+# and have no rates by design. They must not be reported as "unpriced model(s) excluded" —
+# that note is meant to flag a real PRICING gap, and burying it among permanent non-entries is
+# how a genuine gap goes unnoticed. `<synthetic>` is Claude Code's marker for records it
+# generates itself (123 of them on this machine, all with zero token usage).
+NON_BILLABLE_MODELS = {"<synthetic>"}
+
+# Vendor prefixes served through the FREE lanes (free-tier APIs reached via the LiteLLM proxy).
+# These are real hosted models with real list prices elsewhere, but WE are not billed for them,
+# so pricing them against the daily cap would invent spend that never happened. A bare-slug id
+# like `gemini-3.8-flash` is why the `/` discriminator below is not sufficient on its own.
+NON_BILLABLE_PREFIXES = ("gemini-", "gemma-", "nemotron-", "llama-", "qwen", "deepseek-",
+                         "mistral-", "mixtral-", "kimi-", "glm-", "grok-")
+
+
+def is_non_billable(model):
+    """True for a model id that has no cloud price BY DESIGN, so it must never be
+    reported as a pricing gap.
+
+    Two kinds:
+      * `<synthetic>` — Claude Code's marker for records it generates itself.
+      * a LOCAL model served under its on-disk path, e.g.
+        `/Users/me/.models/Ornith-1.5-35B-A3B-MLX-4bit`. Local inference is free
+        compute; pricing it is meaningless, and flagging it as unpriced buries a real
+        gap in permanent noise. A `/` is the discriminator and a safe one: every
+        cloud model id is a bare slug (`claude-opus-5`, optionally with a bracketed
+        context variant) and never contains a path separator.
+
+    Found by the recurrence guard on 2026-09-03, which is exactly its job: a local
+    session's model id had started appearing in transcripts and was being reported as
+    an unpriced cloud model."""
+    if not model:
+        return False
+    if model in NON_BILLABLE_MODELS:
+        return True
+    if "/" in model or model.startswith("~"):
+        return True
+    # A free-lane model served under a bare slug (no vendor prefix, no path), e.g.
+    # `gemini-3.8-flash`. Added 2026-09-18: a free-API session put exactly that id into a
+    # transcript and the recurrence guard reported it as an unpriced CLOUD model, which is
+    # the same "buries a real gap in noise" failure the path rule above exists to prevent.
+    return model.lower().startswith(NON_BILLABLE_PREFIXES)
+
+
+def _canonical_model(model):
+    """Strip a trailing bracketed variant suffix, e.g. 'claude-opus-5[1m]' -> 'claude-opus-5'.
+
+    Claude Code identifies a long-context variant that way (this machine's own model reports as
+    `claude-opus-5[1m]`), and such an id is a DIFFERENT dict key — so an unstripped suffix
+    silently prices the session at $0 while looking like an unknown model. Rates are per-token
+    and identical across the context variants, so the base id is the correct lookup."""
+    if not model:
+        return model
+    base, sep, _ = model.partition("[")
+    base = base if sep else model
+    # A dated snapshot id (`claude-haiku-4-5-20251001`) is the same rates as its alias; a
+    # subagent put exactly that id into a transcript on 2026-09-24 and it read as unpriced.
+    m = re.match(r"^(claude-.+?)-\d{8}$", base)
+    return m.group(1) if m else base
+
+
+# --- prices for models the table above does not know (0.10.1) ------------------------------
+# A NEW Claude model used to price at $0 until someone edited PRICING by hand: claude-sonnet-5-5
+# did exactly that on 2026-10-03. Two layers now close the gap, both deterministic and free:
+#   1. prices.json in the config dir — rates pulled from LiteLLM's public price table (the same
+#      table the gateway itself runs on) by `--sync-prices`. Pulled ONLY for a claude-* id that
+#      is neither in PRICING nor already saved there, so a normal session never touches the net.
+#   2. failing that, an ASSUMPTION: the newest known version of the same family (opus, sonnet,
+#      haiku, fable). Past successors kept or lowered their family's price (Sonnet 5 -> 5.5 and
+#      Fable 5 -> 5.1 the same, Opus 5 -> 5.5 cheaper), so this is the likeliest figure and errs
+#      high rather than at $0. Assumed entries are saved with source "assumed" and re-checked
+#      upstream at most once per PRICE_RECHECK_S.
+CONFIG_DIR = os.environ.get("COST_TRACKER_CONFIG_DIR", os.path.expanduser("~/.claude/cost-tracker"))
+PRICES_PATH = os.path.join(CONFIG_DIR, "prices.json")
+PRICES_URL = os.environ.get(
+    "COST_TRACKER_PRICES_URL",
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json")
+PRICE_RECHECK_S = 24 * 3600
+_FAMILY_RE = re.compile(r"^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?$")
+# claude-* ids priced by ASSUMPTION during this run, and every model id tally() met. The
+# SessionStart path hands the latter to the background sync, which itself filters down to ids
+# that are not already known — so a day with only known models spawns nothing.
+ASSUMED_SEEN = set()
+SEEN_MODELS = set()
+
+
+def _load_saved_prices():
+    try:
+        with open(PRICES_PATH) as f:
+            d = json.load(f)
+        return d.get("models", {}) if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_SAVED_PRICES = None
+
+
+def _saved_prices():
+    global _SAVED_PRICES
+    if _SAVED_PRICES is None:
+        _SAVED_PRICES = _load_saved_prices()
+    return _SAVED_PRICES
+
+
+def _family_version(model):
+    m = _FAMILY_RE.match(model or "")
+    if not m:
+        return None
+    return m.group(1), (int(m.group(2)), int(m.group(3) or 0))
+
+
+def assumed_pricing(model):
+    """The likeliest rates for an unknown claude-* id: the newest KNOWN version of its family.
+    None for anything that is not a recognisable Claude family id."""
+    fv = _family_version(model)
+    if not fv:
+        return None
+    family, _ver = fv
+    known = [(v, k) for k in list(PRICING) + list(_saved_prices())
+             for f, v in [_family_version(k) or (None, None)]
+             if f == family and (k in PRICING or _saved_prices()[k].get("source") != "assumed")]
+    if not known:
+        return None
+    _v, best = max(known)
+    return PRICING.get(best) or _saved_prices()[best]
+
+
+def _pricing_entry(model):
+    """(entry, source) where source is "builtin", "litellm", "assumed" or None."""
+    canon = _canonical_model(model)
+    p = PRICING.get(canon)
+    if p is not None:
+        return p, "builtin"
+    saved = _saved_prices().get(canon)
+    if saved is not None:
+        return saved, saved.get("source", "litellm")
+    p = assumed_pricing(canon)
+    if p is not None:
+        return p, "assumed"
+    return None, None
+
+
+def is_priced(model):
+    return _pricing_entry(model)[0] is not None or _proxy_rate(model) is not None
+
+
+def _entry_from_litellm(row):
+    """LiteLLM's per-token row -> this table's shape (input/output + cache multipliers)."""
+    inp = float(row["input_cost_per_token"])
+    out = float(row["output_cost_per_token"])
+    if inp <= 0 or out <= 0:
+        raise ValueError("non-positive rate")
+    def mult(key, default):
+        v = row.get(key)
+        return float(v) / inp if v else default
+    return {"input": inp, "output": out,
+            "cache_write_5m_mult": mult("cache_creation_input_token_cost", 1.25),
+            "cache_write_1h_mult": mult("cache_creation_input_token_cost_above_1hr", 2.0),
+            "cache_read_mult": mult("cache_read_input_token_cost", 0.1)}
+
+
+def _fetch_price_table():
+    """LiteLLM's price JSON, or None. curl first: it uses the macOS keychain, so it survives a
+    TLS-intercepting corporate proxy that Python's bundled CA store rejects."""
+    import subprocess
+    try:
+        r = subprocess.run(["curl", "-fsSL", "--max-time", "15", PRICES_URL],
+                           capture_output=True, timeout=20)
+        if r.returncode == 0:
+            return json.loads(r.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        import urllib.request
+        with urllib.request.urlopen(PRICES_URL, timeout=15) as resp:
+            return json.loads(resp.read())
+    except (OSError, ValueError):
+        return None
+
+
+def models_needing_prices(models):
+    """The claude-* ids worth a lookup: not in PRICING, and either never saved or saved as an
+    assumption that has not been re-checked within PRICE_RECHECK_S."""
+    now = datetime.now(timezone.utc).timestamp()
+    saved = _saved_prices()
+    out = set()
+    for m in models:
+        canon = _canonical_model(m)
+        if not canon or not canon.startswith("claude-") or canon in PRICING:
+            continue
+        s = saved.get(canon)
+        if s is None or (s.get("source") == "assumed"
+                         and now - float(s.get("checked_at", 0)) >= PRICE_RECHECK_S):
+            out.add(canon)
+    return sorted(out)
+
+
+def sync_prices(models):
+    """Look up `models` (only those models_needing_prices() lets through) and save them to
+    prices.json. Fetches NOTHING when every id is already known. Returns {model: source}."""
+    global _SAVED_PRICES
+    todo = models_needing_prices(models)
+    if not todo:
+        return {}
+    table = _fetch_price_table() or {}
+    saved = dict(_saved_prices())
+    now = datetime.now(timezone.utc).timestamp()
+    result = {}
+    for m in todo:
+        row = table.get(m)
+        entry = None
+        if isinstance(row, dict) and row.get("litellm_provider") == "anthropic":
+            try:
+                entry = dict(_entry_from_litellm(row), source="litellm")
+            except (KeyError, ValueError, TypeError):
+                entry = None
+        if entry is None:
+            guess = assumed_pricing(m)
+            if guess is None:
+                continue
+            entry = {k: guess[k] for k in ("input", "output", "cache_write_5m_mult",
+                                           "cache_write_1h_mult", "cache_read_mult")}
+            entry["source"] = "assumed"
+        entry["checked_at"] = now
+        saved[m] = entry
+        result[m] = entry["source"]
+    if result:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        tmp = PRICES_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"contract": 1, "source_url": PRICES_URL, "models": saved}, f,
+                      indent=2, sort_keys=True)
+        os.replace(tmp, PRICES_PATH)
+        _SAVED_PRICES = saved
+    return result
+
+
+def spawn_price_sync(models):
+    """Run --sync-prices detached so SessionStart never waits on the network. No-op unless a
+    model actually needs a lookup; COST_TRACKER_NO_PRICE_SYNC=1 disables it."""
+    if os.environ.get("COST_TRACKER_NO_PRICE_SYNC") == "1":
+        return
+    todo = models_needing_prices(models)
+    if not todo:
+        return
+    import subprocess
+    try:
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "--sync-prices", *todo],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def _proxy_rate(model):
+    """A gateway's OWN row for `model`, expressed on the LIST axis (divided by the connection
+    fee), or None. Everything this script reconstructs is multiplied by the fee afterwards, so
+    returning row / fee makes that product the gateway's exact row — a model the gateway
+    prices off its usual markup (a CUSTOM row) is then priced as billed, not as list x markup."""
+    pt = CONNECTION.get("price_table")
+    if not pt or not MARKUP:
+        return None
+    try:
+        mod = sys.modules.get("proxy_prices")
+        if mod is None:
+            return None
+        row, basis = mod.price_for(model, mod.cached(os.environ))
+    except Exception:
+        return None
+    if basis != "proxy table" or not row or "input" not in row or "output" not in row:
+        return None
+    k = 1e-6 / MARKUP
+    inp = row["input"] * k
+    return {"input": inp, "output": row["output"] * k,
+            "cache_write_5m": row.get("cache_write_5m", row["input"] * 1.25) * k,
+            "cache_write_1h": row.get("cache_write_1h", row["input"] * 2.0) * k,
+            "cache_read": row.get("cache_read", row["input"] * 0.1) * k}
+
+
+def rate_for(model):
+    proxy = _proxy_rate(model)
+    if proxy is not None:
+        return proxy
+    p, source = _pricing_entry(model)
+    if p is None:
+        return None
+    if source == "assumed":
+        ASSUMED_SEEN.add(_canonical_model(model))
+    intro_until = p.get("intro_until")
+    if intro_until and TODAY <= intro_until:
+        in_rate = p.get("intro_input", p["input"])
+        out_rate = p.get("intro_output", p["output"])
+    else:
+        in_rate, out_rate = p["input"], p["output"]
+    return {
+        "input": in_rate,
+        "output": out_rate,
+        "cache_write_5m": in_rate * p["cache_write_5m_mult"],
+        "cache_write_1h": in_rate * p["cache_write_1h_mult"],
+        "cache_read": in_rate * p["cache_read_mult"],
+    }
+
+
+def _session_id_of(path):
+    """The session a transcript's spend belongs to.
+
+    A subagent transcript (`<parent-sid>/subagents/agent-*.jsonl`) belongs to its PARENT: its
+    cost is inside the parent's total_cost_usd (5e0d99c5 on 2026-09-26: the $10.40 ledger
+    figure includes its $0.24 subagent). Keyed by its own filename it looked uncovered and was
+    reconstructed on top of the parent's ledger entry — a double count. Keyed by the parent it
+    is skipped whenever the parent is covered, and still counted when the parent is not (an SDK
+    session with no statusline), which dropping subagents outright would lose."""
+    parts = os.path.normpath(path).split(os.sep)
+    if len(parts) >= 3 and parts[-2] == "subagents":
+        return parts[-3]
+    base = os.path.basename(path)
+    return base[:-6] if base.endswith(".jsonl") else base
+
+
+def read_ledger_today():
+    """Read the authoritative per-session cost ledger written by the statusLine
+    wrapper ~/.claude/scripts/cost-ledger-capture.sh (see memory: cost-ledger-capture).
+
+    Each file is named by session UUID and holds '<utc_date> <cum_cost_usd> <baseline>'
+    (3-field, current), '<utc_date> <cum_cost_usd>' (legacy 2-field), or — on local
+    records since 0.14.0 — up to two further fields (phantom, phantom baseline) that
+    this reader ignores. cum_cost_usd
+    is the session's latest cumulative .cost.total_cost_usd — Claude Code's own
+    ground-truth number (same as the built-in cost tracker / joyia statusline). baseline
+    is the cumulative CARRIED INTO <utc_date> (the cumulative at the last render on the
+    prior UTC day). A session's spend attributable to <utc_date> is therefore
+    (cum - baseline). budget-tally only READS this; capture is done entirely by the
+    statusLine wrapper (one-way: statusline info -> ledger -> here). Returns
+    {session_id: today_spend} for entries dated TODAY.
+
+    Authoritative — replaces token reconstruction for any session it covers, because
+    reconstruction over-counts (cache-token rates ~4x too high). Sessions with no ledger
+    entry (ran before the wrapper existed, or before their first statusLine render) fall
+    back to reconstruction so they're never dropped.
+
+    Multi-day sessions (FIXED 2026-07-29): the 3-field baseline is what makes a session
+    spanning several UTC days count only THAT day's delta instead of dumping its whole
+    lifetime cumulative onto the day it last rendered. This bug is what once showed a
+    4-day session's $75 lifetime cost as "today" (189% of the $40 cap). Legacy 2-field
+    entries have no baseline -> baseline 0 -> today_spend = full cumulative (the old
+    behaviour); such an entry self-heals the first time the capture wrapper re-renders it
+    across a UTC midnight. An already-EXITED legacy multi-day entry can only be corrected
+    by hand (we did this once for session 1b225c8c)."""
+    out = {}
+    try:
+        entries = os.listdir(LEDGER_DIR)
+    except OSError:
+        return out
+    for name in entries:
+        if name.endswith(".tmp"):
+            continue
+        path = os.path.join(LEDGER_DIR, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", errors="ignore") as f:
+                parts = f.read().split()
+        except OSError:
+            continue
+        # Accept 2-field (legacy) or 3-field (current, with baseline).
+        if len(parts) < 2 or parts[0] != TODAY:
+            continue
+        try:
+            cum = float(parts[1])
+            baseline = float(parts[2]) if len(parts) >= 3 else 0.0
+        except ValueError:
+            continue
+        # today's attributable spend = cumulative minus what was carried into today.
+        out[name] = max(0.0, cum - baseline)
+    # REWIND DEDUPE (added 2026-09-25). When Claude Code rewinds a session, it creates a
+    # new session_id but carries the parent's total_cost_usd forward as the child's starting
+    # point. Both sessions then render in the ledger with the same date, and budget-tally
+    # sums both in full — double-counting the parent's spend. The gateway bills per-request,
+    # not per-session, so the true cost is just the child's cumulative (which includes the
+    # inherited parent portion as its baseline).
+    #
+    # Detection: scan transcripts for 'continued-in' records where the child's first ledger
+    # cum exactly matches the parent's final ledger cum. This exact-match signature
+    # distinguishes a true rewind from overlapping sessions (which have a continued-in
+    # record but non-matching cums, e.g. 1a41aae4->06885ad1 where child started at 17.09
+    # while parent ended at 16.95).
+    #
+    # Action: zero out the parent's today_spend so only the child's delta counts.
+    if out:
+        _dedupe_rewind_pairs(out)
+    return out
+
+
+def _dedupe_rewind_pairs(out):
+    """Find and neutralise same-day rewind pairs in the ledger-today dict.
+
+    A rewind is identified when a transcript contains a `continued-in` record whose
+    `continuedInSessionId` points at another session that is also present in `out`, AND
+    the child's first ledger cumulative exactly equals the parent's final ledger
+    cumulative (measured against the on-disk ledger files, not the already-computed
+    today_spend values). When both hold, the parent's entry is set to 0.0 — its spend
+    is subsumed by the child.
+
+    Guarded: best-effort only. If transcript scanning fails we leave `out` untouched;
+    the worst case is a slight over-count, not a crash or missing session.
+    """
+    try:
+        pairs = _find_continued_in_pairs()
+    except OSError:
+        return
+    for parent, child in pairs:
+        if parent not in out or child not in out:
+            continue
+        # Exact-cum match is the rewind signature. Use the on-disk ledger files (not the
+        # already-computed today_spend) so we compare raw cumulatives, not deltas.
+        parent_cum = _ledger_cum(parent)
+        child_first_cum = _ledger_first_cum(child)
+        if parent_cum is not None and child_first_cum is not None:
+            if abs(parent_cum - child_first_cum) < 1e-9:
+                out[parent] = 0.0
+
+
+def read_reconstructed_today():
+    """Permanent reconstructed lines: {session_id: usd} dated TODAY.
+
+    Written by hooks/session-end-reconcile.py for sessions whose statusLine never rendered, so the
+    authoritative ledger has no line for them. They live in their OWN directory precisely so no
+    reader of ~/.claude/cost-ledger can mistake them for a .cost.total_cost_usd.
+
+    They are preferred over re-deriving from the transcript for the same reason the ledger is:
+    a permanent record survives the transcript's deletion or rotation, and a derived figure does
+    not. They are NOT authoritative — the label in the reported wording is the whole point of
+    keeping them separate."""
+    out = {}
+    try:
+        names = os.listdir(RECON_DIR)
+    except OSError:
+        return out
+    for name in names:
+        if name.endswith(".tmp"):
+            continue
+        try:
+            with open(os.path.join(RECON_DIR, name), errors="ignore") as fh:
+                parts = fh.read().split()
+        except OSError:
+            continue
+        # Two fields, deliberately not the ledger's 3/5: "<utc-date> <reconstructed-cost>". A line
+        # that does not parse is ignored rather than guessed at.
+        if len(parts) != 2 or parts[0] != TODAY:
+            continue
+        try:
+            out[name] = float(parts[1])
+        except ValueError:
+            continue
+    return out
+
+
+def _ledger_cum(sid):
+    """Return the latest cumulative cost for `sid` from its ledger file, or None."""
+    path = os.path.join(LEDGER_DIR, sid)
+    try:
+        if not os.path.isfile(path):
+            return None
+        parts = open(path, "r", errors="ignore").read().split()
+        if len(parts) < 2:
+            return None
+        return float(parts[1])
+    except (OSError, ValueError):
+        return None
+
+
+def _ledger_first_cum(sid):
+    """Return the FIRST cumulative cost ever recorded for `sid` in the history log, or None."""
+    # The history log sits beside the ledger dir: ~/.claude/cost-ledger-history.log.
+    hist_path = os.path.join(os.path.dirname(LEDGER_DIR), "cost-ledger-history.log")
+    try:
+        with open(hist_path, "r", errors="ignore") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 4 and parts[1] == sid:
+                    return float(parts[3])
+    except OSError:
+        pass
+    return None
+
+
+def _find_continued_in_pairs():
+    """Scan transcript files for `continued-in` records, returning [(parent, child), ...]."""
+    pairs = []
+    for root, _dirs, files in os.walk(PROJECTS_DIR):
+        for fname in files:
+            if not fname.endswith(".jsonl"):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, "r", errors="ignore") as f:
+                    for line in f:
+                        if "continuedInSessionId" in line:
+                            d = json.loads(line)
+                            parent = d.get("sessionId")
+                            child = d.get("continuedInSessionId")
+                            if parent and child:
+                                pairs.append((parent, child))
+                            break
+            except (OSError, json.JSONDecodeError):
+                continue
+    return pairs
+
+
+def current_session_path():
+    """Deterministically locate the running session's own transcript file,
+    the same way ~/.claude/scripts/compact_session.py's is_likely_current_session()
+    does: CLAUDE_CODE_SESSION_ID (or legacy CLAUDE_SESSION_ID) is the session's
+    UUID, and its transcript is named exactly that under the cwd-slug project
+    dir. Returns None if the env var isn't set or the file doesn't exist yet
+    (e.g. at SessionStart, before the current session has written anything)."""
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
+    if not session_id:
+        return None
+    cwd_slug = os.getcwd().replace("/", "-")
+    candidate = os.path.join(PROJECTS_DIR, cwd_slug, f"{session_id}.jsonl")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def files_modified_today():
+    """Pre-filter by mtime (UTC date) to bound how many files tally() has to open.
+    Widened to include yesterday's mtime too — a file can still be mid-write (mtime
+    lagging) or hold a mix of yesterday's and today's records across a midnight-crossing
+    session; tally() re-filters by each record's own timestamp, so this is just an
+    inclusive candidate set, not the actual cutoff."""
+    out = []
+    for path in glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True):
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc).date().isoformat()
+        except OSError:
+            continue
+        if mtime in (TODAY, YESTERDAY):
+            out.append(path)
+    # Belt-and-suspenders: the running session's own transcript should already
+    # be caught by the mtime scan above (it's actively being written to), but
+    # explicitly folding it in via CLAUDE_CODE_SESSION_ID removes any reliance
+    # on mtime timing/clock-skew for the one file we can name with certainty.
+    cur = current_session_path()
+    if cur and cur not in out:
+        out.append(cur)
+    return out
+
+
+def _record_is_today(d, day=None):
+    ts = d.get("timestamp")
+    if not ts:
+        return False
+    try:
+        # Transcript timestamps are ISO-8601 UTC with a "Z" suffix.
+        return (datetime.fromisoformat(ts.replace("Z", "+00:00")).date().isoformat()
+                == (day or TODAY))
+    except ValueError:
+        return False
+
+
+# A response served by LOCAL/free inference carries the id its server minted, not an Anthropic
+# one: `chatcmpl-…` (LiteLLM / OpenAI-compatible), a bare 24-hex `msg_<hex>` (Rapid-MLX), or a
+# UUID-shaped `msg_<8>-<4>-…`. Real gateway responses are `msg_bdrk_…` (this gateway fronts
+# Bedrock) or Anthropic's own `msg_01…`. The model id cannot tell them apart — local sessions
+# spoof `claude-opus-5` — so this is the per-MESSAGE lane test. It is needed because a local
+# session that never rendered its statusline while local has no history line to mark it:
+# 2026-09-23 had four such sessions reconstructing to $3.80 of invented spend.
+_LOCAL_ID_RE = re.compile(r"^(chatcmpl-|msg_[0-9a-f]{24}$|msg_[0-9a-f]{8}-[0-9a-f]{4}-)")
+
+
+def is_local_message_id(mid):
+    return bool(mid) and bool(_LOCAL_ID_RE.match(mid))
+
+
+def tally(paths, day=None, skip_sids=None):
+    """Token usage per model for `day`'s records in `paths`.
+
+    `skip_sids` are sessions to leave out entirely — the LOCAL lane, whose transcripts carry
+    spoofed cloud model ids (`claude-opus-5`) for free compute. Priced, they invent spend: the
+    same session is $0 in the ledger and would be $14 here."""
+    usage = defaultdict(lambda: defaultdict(int))
+    unknown_models = set()
+    for path in set(paths):
+        if skip_sids and _session_id_of(path) in skip_sids:
+            continue
+        try:
+            f = open(path, "r", errors="ignore")
+        except OSError:
+            continue
+        # ONE API RESPONSE, MANY RECORDS. Claude Code writes an assistant record per content
+        # block (thinking, text, each tool_use) and every one repeats the response's full
+        # `usage`. Summing records therefore multiplies spend by the block count: 865ca06a on
+        # 2026-09-26 reconstructed to $22.09 against its authoritative $9.96. Price each
+        # message.id once.
+        seen_ids = set()
+        with f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") != "assistant":
+                    continue
+                if not _record_is_today(d, day):
+                    continue
+                msg = d.get("message") or {}
+                model = msg.get("model")
+                u = msg.get("usage") or {}
+                if not model or not u:
+                    continue
+                mid = msg.get("id")
+                if is_local_message_id(mid):
+                    continue
+                if mid:
+                    if mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
+                cc = u.get("cache_creation") or {}
+                w5 =cc.get("ephemeral_5m_input_tokens", 0) or 0
+                w1 = cc.get("ephemeral_1h_input_tokens", 0) or 0
+                if not cc:
+                    # Older/SDK records give only the flat total; it is a 5-minute write.
+                    w5 = u.get("cache_creation_input_tokens", 0) or 0
+                usage[model]["input"] += u.get("input_tokens", 0) or 0
+                usage[model]["output"] += u.get("output_tokens", 0) or 0
+                usage[model]["cache_write_5m"] += w5
+                usage[model]["cache_write_1h"] += w1
+                usage[model]["cache_read"] += u.get("cache_read_input_tokens", 0) or 0
+                if not is_priced(model) and not is_non_billable(model):
+                    unknown_models.add(model)
+                SEEN_MODELS.add(model)
+    return usage, unknown_models
+
+
+def _price(usage):
+    total = 0.0
+    priced_any = False
+    unknown_models = set()
+    for model, u in usage.items():
+        rates = rate_for(model)
+        if rates is None:
+            if not is_non_billable(model):
+                unknown_models.add(model)
+            continue
+        priced_any = True
+        total += u["input"] * rates["input"]
+        total += u["output"] * rates["output"]
+        total += u["cache_write_5m"] * rates["cache_write_5m"]
+        total += u["cache_write_1h"] * rates["cache_write_1h"]
+        total += u["cache_read"] * rates["cache_read"]
+    return total, priced_any, unknown_models
+
+
+HISTORY_PATH = os.environ.get(
+    "COST_TRACKER_HISTORY", os.path.join(os.path.dirname(LEDGER_DIR), "cost-ledger-history.log"))
+
+
+def local_lane_sessions(day=None):
+    """Sessions that rendered LOCAL on `day`: the capture wrapper zeroed the cost (field 4 = 0)
+    while Claude Code reported a phantom (field 6 > 0). One pass over the history log.
+
+    This is a LANE marker only. The phantom it keys on is what free compute would have cost at
+    cloud prices — it is never spend (the premise of the reverted 2026-09-26 change)."""
+    day = day or TODAY
+    out = set()
+    try:
+        with open(HISTORY_PATH, "r", errors="ignore") as f:
+            for line in f:
+                p = line.split()
+                if len(p) < 6 or p[2] != day:
+                    continue
+                try:
+                    if float(p[3]) == 0.0 and float(p[5]) > 0.0:
+                        out.add(p[1])
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+# --- auto-mode classifier estimate --------------------------------------------------------
+# In `auto` permission mode Claude Code asks a SECOND model — `claude-sonnet-5[1m]` on the same
+# gateway key — whether each non-read-only tool call is safe. That side request never reaches
+# the transcript as a message and is NOT in total_cost_usd, so the ledger cannot see it. Its size
+# is visible only when it fails (auto-mode-classifier-error.txt): 60-97k tokens per call on the
+# sessions measured 2026-09-20..26, i.e. a large slice of the main-loop context.
+#
+# It is therefore ESTIMATED, never reported as authoritative: a flat USD per gateway classifier
+# call (one per non-read-only tool_use in an `auto`-mode turn). Flat, not context-scaled, because
+# the classifier sends a condensed transcript that grows far slower than the main loop (0.17-0.56
+# of main-loop tokens across 20 dumps), and a context-weighted model fitted WORSE (rms $3.49 vs
+# $2.85). $0.0265/call is the least-squares fit over 9 capped days, 2026-09-15..26: the gateway's
+# `Current cost` at its first refusal minus our ledger + reconstruction. 2026-09-25 is excluded —
+# its ledger alone EXCEEDS the gateway figure (an open overcount, not a classifier question).
+# Residual rms $2.85/day. Override with COST_TRACKER_CLASSIFIER_USD_PER_CALL (0 disables).
+#
+# LOCAL / free-API lanes are excluded: every classifier failure recorded from them is the free
+# provider's error (the spoof list maps claude-sonnet-5 there), never a gateway refusal. A
+# successful call leaves no record, so that is the evidence so far, not a proof.
+READ_ONLY_TOOLS = frozenset({
+    "Read", "Grep", "Glob", "LS", "NotebookRead", "TodoWrite", "TodoRead", "Skill",
+    "AskUserQuestion", "ToolSearch", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
+    "TaskOutput", "BashOutput", "WebSearch", "ExitPlanMode", "EnterPlanMode",
+})
+
+
+def classifier_usd_per_call():
+    raw = os.environ.get("COST_TRACKER_CLASSIFIER_USD_PER_CALL")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return 0.0265
+
+
+def classifier_calls(paths, day=None, skip_sids=None):
+    """(n_calls, weighted_context_tokens) for auto-mode, non-read-only tool calls on `day`."""
+    n = 0
+    weighted = 0
+    for path in set(paths):
+        if skip_sids and _session_id_of(path) in skip_sids:
+            continue
+        try:
+            f = open(path, "r", errors="ignore")
+        except OSError:
+            continue
+        mode = None
+        seen_blocks = set()
+        with f:
+            for line in f:
+                if '"permissionMode"' not in line and '"assistant"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                pm = d.get("permissionMode")
+                if pm:
+                    mode = pm
+                if d.get("type") != "assistant" or mode != "auto":
+                    continue
+                if not _record_is_today(d, day):
+                    continue
+                msg = d.get("message") or {}
+                model = msg.get("model") or ""
+                if rate_for(model) is None or is_local_message_id(msg.get("id")):
+                    continue  # local/spoofed/synthetic — not a gateway turn
+                u = msg.get("usage") or {}
+                # A tool_use block can be repeated across records of one response; its own
+                # id is the unit, so each call is counted once.
+                tools = 0
+                for c in msg.get("content") or []:
+                    if (isinstance(c, dict) and c.get("type") == "tool_use"
+                            and c.get("name") not in READ_ONLY_TOOLS):
+                        bid = c.get("id")
+                        if bid and bid in seen_blocks:
+                            continue
+                        if bid:
+                            seen_blocks.add(bid)
+                        tools += 1
+                if not tools:
+                    continue
+                ctx = ((u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
+                       + (u.get("cache_creation_input_tokens") or 0))
+                n += tools
+                weighted += tools * ctx
+    return n, weighted
+
+
+def estimate_classifier_usd(paths, day=None, skip_sids=None):
+    """(estimated_usd, n_calls) for the gateway classifier calls on `day`."""
+    per_call = classifier_usd_per_call()
+    if not per_call:
+        return 0.0, 0
+    n, _weighted = classifier_calls(paths, day, skip_sids)
+    return n * per_call, n
+
+
+def paths_for_day(day):
+    """Transcripts that can hold records for `day` (mtime on `day` or later)."""
+    out = []
+    for path in glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True):
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc).date().isoformat()
+        except OSError:
+            continue
+        if mtime >= day:
+            out.append(path)
+    return out
+
+
+# ── Spend by processes OUTSIDE the interactive session ─────────────────────────────────────────
+# Measured 2026-10-07: ledger $34.63, gateway refusal $40.02, and the OTel sink matched the ledger
+# to the cent — the gap was other processes on the same key. Each one is named here so the tally
+# can say WHICH, not just "reconstructed". Two kinds:
+#   * a transcript exists (an Agent-SDK session): it is already inside `uncovered_usd`; matching
+#     its first prompt only LABELS that slice — `transcript_prompt` entries.
+#   * no transcript at all: the spend is invisible to every other figure here and is ADDED as a
+#     new component — `log` entries, read from the spender's own log.
+SIDE_SPENDERS = (
+    {"id": "security-guidance-sdk", "label": "security-guidance (sdk reviews)",
+     "kind": "transcript_prompt",
+     "prompt_prefix": "Review this change for security vulnerabilities."},
+    {"id": "security-guidance-stop", "label": "security-guidance (stop-hook reviews, est.)",
+     "kind": "log"},
+    {"id": "remember", "label": "remember (logged)", "kind": "log"},
+)
+_SIDE_LABEL = {s["id"]: s["label"] for s in SIDE_SPENDERS}
+LAST_BY_SOURCE = {}   # set by compute(); read by format_line
+LAST_RECON_LINES = {}   # set by compute(); permanent reconstructed lines, read by format_line
+
+
+def _remember_dirs():
+    raw = os.environ.get("COST_TRACKER_REMEMBER_DIRS")
+    if raw:
+        return [d for d in raw.split(":") if d]
+    home = os.path.expanduser("~")
+    return ([os.path.join(home, ".remember")]
+            + sorted(glob.glob(os.path.join(home, "ClaudeWorkspace", "*", ".remember"))))
+
+
+def _sg_log_paths():
+    base = os.environ.get("COST_TRACKER_SG_LOG") or os.path.join(
+        os.environ.get("SECURITY_WARNINGS_STATE_DIR") or os.path.expanduser("~/.claude/security"),
+        "log.txt")
+    return [base + ".1", base]   # rotated copy first: it holds the older lines
+
+
+def _local_to_utc_day(local_date, hms):
+    """Both plugin logs stamp LOCAL wall time; the tally's day is UTC."""
+    try:
+        t = datetime.strptime(f"{local_date} {hms}", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return t.astimezone(timezone.utc).date().isoformat()   # naive -> system local tz
+
+
+_REMEMBER_COST_RE = re.compile(r"^(\d\d:\d\d:\d\d) .*\(\$([0-9]+(?:\.[0-9]+)?)\)")
+
+
+def remember_logged(day):
+    """(usd, calls) remember priced itself for UTC `day`, from `memory-YYYY-MM-DD.log`.
+
+    Every `claude -p` it runs logs one `($x)` line — successes as `tokens:`, failed calls as
+    `call exited 1 after spending tokens:` (still billed). Lines are LOCAL time under the file's
+    date, so a UTC day spans two files."""
+    usd, calls = 0.0, 0
+    d = date.fromisoformat(day)
+    names = {f"memory-{(d + timedelta(days=k)).isoformat()}.log" for k in (-1, 0, 1)}
+    for root in _remember_dirs():
+        for name in names:
+            path = os.path.join(root, "logs", name)
+            try:
+                f = open(path, "r", errors="replace")
+            except OSError:
+                continue
+            with f:
+                for line in f:
+                    m = _REMEMBER_COST_RE.match(line)
+                    if m and _local_to_utc_day(name[7:17], m.group(1)) == day:
+                        usd += float(m.group(2))
+                        calls += 1
+    return usd, calls
+
+
+_SG_STOP_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)\.\d+\] Stop hook: reviewing ")
+_SG_HOOK_RE = re.compile(r"^\[[^\]]+\] Hook called with args:")
+_SG_API_ERROR_RE = re.compile(r"^\[[^\]]+\] API error: ")
+
+
+def security_stop_reviews(day):
+    """Count of security-guidance Stop-hook LLM reviews on UTC `day`. These call the API by
+    direct HTTP: no transcript, no OTel, and the plugin keeps its cost in memory only — so the
+    count is all there is, and the dollar figure is an estimate.
+
+    A review whose block (from its 'reviewing' line to the next hook invocation) holds an
+    'API error:' line is NOT counted: inside a free session the local proxy 400s every model the
+    plugin tries in ~0.1s, so nothing reaches the gateway. Measured 2026-10-06: 33 of 37 logged
+    reviews were such rejections, and 10-07 (the day the default rate was fitted on) had no others."""
+    n = 0
+    for path in _sg_log_paths():
+        try:
+            f = open(path, "r", errors="replace")
+        except OSError:
+            continue
+        pending = None   # is the open review block on `day`, and has it failed?
+        with f:
+            for line in f:
+                m = _SG_STOP_RE.match(line)
+                if m or _SG_HOOK_RE.match(line):
+                    if pending is not None and not pending["failed"]:
+                        n += 1
+                    pending = None
+                    if m and _local_to_utc_day(m.group(1), m.group(2)) == day:
+                        pending = {"failed": False}
+                elif pending is not None and _SG_API_ERROR_RE.match(line):
+                    pending["failed"] = True
+        if pending is not None and not pending["failed"]:
+            n += 1
+    return n
+
+
+def _first_user_prompt(path):
+    """(entrypoint, text) of a transcript's first user record, or (None, '')."""
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") != "user":
+                    continue
+                c = (d.get("message") or {}).get("content")
+                if isinstance(c, list):
+                    c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+                return d.get("entrypoint"), c if isinstance(c, str) else ""
+    except OSError:
+        pass
+    return None, ""
+
+
+def classify_session(path):
+    """The SIDE_SPENDERS id a transcript belongs to, or None. SDK sessions only — the entrypoint
+    alone would label every headless run, so the opening prompt must match too."""
+    entry, text = _first_user_prompt(path)
+    if not (entry or "").startswith("sdk"):
+        return None
+    for s in SIDE_SPENDERS:
+        if s["kind"] == "transcript_prompt" and text.startswith(s["prompt_prefix"]):
+            return s["id"]
+    return None
+
+
+def _outside_sources(day, uncovered_paths, local):
+    """by_source dict for `day`. Transcript-backed entries are subsets of uncovered_usd; log
+    entries are new spend."""
+    out = {}
+    groups = defaultdict(list)
+    for p in uncovered_paths:
+        sid = _session_id_of(p)
+        if sid in local:
+            continue
+        # a subagent file inherits its parent's classification
+        parent = p if os.path.basename(os.path.dirname(p)) != "subagents" else os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(p))), sid + ".jsonl")
+        sp = classify_session(parent)
+        if sp:
+            groups[sp].append(p)
+    for sp, paths in groups.items():
+        per_session = defaultdict(float)
+        for p in paths:
+            per_session[_session_id_of(p)] += _price(tally([p], day=day)[0])[0]
+        spent = {s: u for s, u in per_session.items() if u > 0}   # a file touched today ≠ spend today
+        if spent:
+            out[sp] = {"label": _SIDE_LABEL[sp], "usd": round(sum(spent.values()), 4),
+                       "sessions": sorted(spent), "basis": "transcript", "in_uncovered": True}
+
+    n_stop = security_stop_reviews(day)
+    if n_stop:
+        # ONE direct HTTP request per review (Opus, ~30k-token prompt, thinking) — not comparable
+        # to an agentic SDK review (6-9 requests). The $0.31 default is UNCALIBRATED: it was fitted
+        # on 2026-10-07 as $3.13 over "10 stop reviews", but all 10 were endpoint rejections (see
+        # security_stop_reviews), so that $3.13 was some other gap. Kept as an order-of-magnitude
+        # guess for one ~30k-token Opus call until a refusal day has enough real reviews to fit.
+        per = float(os.environ.get("COST_TRACKER_SG_STOP_USD", "0.31"))
+        out["security-guidance-stop"] = {"label": _SIDE_LABEL["security-guidance-stop"],
+                                         "usd": round(n_stop * per, 4), "calls": n_stop,
+                                         "basis": f"count × ${per:.2f} (COST_TRACKER_SG_STOP_USD)",
+                                         "in_uncovered": False}
+    r_usd, r_calls = remember_logged(day)
+    if r_calls:
+        out["remember"] = {"label": _SIDE_LABEL["remember"], "usd": round(r_usd, 4),
+                           "calls": r_calls, "basis": "its own log", "in_uncovered": False}
+    return out
+
+
+def outside_usd(by_source):
+    """Spend in by_source that is NOT already inside uncovered_usd."""
+    return round(sum(v["usd"] for v in by_source.values() if not v.get("in_uncovered")), 4)
+
+
+def side_spend_note(by_source):
+    """'; side: <label> $x, …' for the tally line, or '' when there is none."""
+    parts = [f"{v['label']} ${v['usd']:.2f}"
+             for _id, v in sorted(by_source.items()) if v.get("usd", 0) > 0]
+    return f"; side: {', '.join(parts)}" if parts else ""
+
+
+def estimate_day(day, covered_sids):
+    """The spend the ledger cannot see for UTC `day`, split by cause. For cost-tracker.
+
+    covered_sids: sessions the ledger already has an authoritative figure for on `day`.
+    Returns {"uncovered_usd", "uncovered_sessions", "classifier_usd", "classifier_calls",
+             "classifier_usd_per_call", "unknown_models", "by_source", "outside_usd"} — every
+    figure list-price, never marked up. `by_source` names the spender behind each slice;
+    `outside_usd` is the part of it no transcript holds (so it is NOT in uncovered_usd)."""
+    paths = paths_for_day(day)
+    local = local_lane_sessions(day)
+    uncovered = [p for p in paths if _session_id_of(p) not in covered_sids]
+    usage, unknown = tally(uncovered, day=day, skip_sids=local)
+    recon, _, unpriced = _price(usage)
+    cls_usd, n_calls = estimate_classifier_usd(paths, day=day, skip_sids=local)
+    by_source = _outside_sources(day, uncovered, local)
+    return {
+        "uncovered_usd": round(recon, 4),
+        "uncovered_sessions": sorted({_session_id_of(p) for p in uncovered} - local),
+        "classifier_usd": round(cls_usd, 4),
+        "classifier_calls": n_calls,
+        "classifier_usd_per_call": classifier_usd_per_call(),
+        "unknown_models": sorted(unknown | unpriced),
+        "by_source": by_source,
+        "outside_usd": outside_usd(by_source),
+    }
+
+
+def compute():
+    """Returns (total, pct, remaining, unknown_models, priced_any,
+    current_session_total, ledger_total, recon_total).
+
+    Spend is the authoritative cost-ledger sum (per-session .cost.total_cost_usd
+    captured by the statusLine wrapper) PLUS token reconstruction for only those
+    sessions the ledger doesn't cover — so we never double-count and never drop a
+    session. ledger_total / recon_total are split out for the reported wording.
+
+    current_session_total isolates the running session's own contribution to
+    today's total (prefers its authoritative ledger value; falls back to
+    reconstruction; 0.0 if it has no usage yet, e.g. at SessionStart before it's
+    written anything)."""
+    ledger = read_ledger_today()
+    ledger_total = sum(ledger.values())
+
+    paths = files_modified_today()
+    # Reconstruct spend ONLY for sessions the ledger doesn't already cover
+    # authoritatively — avoids double-counting a session both ways.
+    # A session with a PERMANENT reconstructed line is covered too, and by the better source: the
+    # line survives its transcript's deletion or rotation and re-deriving does not.
+    recon_lines = read_reconstructed_today()
+    # Drop any session the LEDGER already covers authoritatively. A session can hold both (it
+    # rendered once, then a later SessionEnd hook ran anyway): keeping its reconstructed line would
+    # double-count it AND let the wording name a session whose cost is already authoritative.
+    recon_lines = {sid: v for sid, v in recon_lines.items() if sid not in ledger}
+    uncovered = [p for p in paths
+                 if _session_id_of(p) not in ledger and _session_id_of(p) not in recon_lines]
+    # LOCAL-lane sessions are skipped: their transcripts carry spoofed cloud ids for free
+    # compute. Before this, a local session with no ledger entry for today reconstructed at
+    # Opus rates ($20.80 of invented spend on 2026-09-26).
+    local = local_lane_sessions()
+    usage, unknown_models = tally(uncovered, skip_sids=local)
+    recon_total, recon_priced, unpriced = _price(usage)
+    unknown_models |= unpriced
+    # The classifier estimate joins the reconstructed bucket: both are figures WE derived,
+    # as opposed to the authoritative ledger, and format_line labels that split.
+    cls_usd, _ = estimate_classifier_usd(paths, skip_sids=local)
+    recon_total += cls_usd
+    # Outside-process spend: transcript-backed slices are already in recon_total (only labelled);
+    # log-backed ones are new. format_line names every slice via LAST_BY_SOURCE.
+    global LAST_BY_SOURCE
+    LAST_BY_SOURCE = _outside_sources(TODAY, uncovered, local)
+    recon_total += outside_usd(LAST_BY_SOURCE)
+
+    # The permanent reconstructed lines: real spend from sessions that never rendered, recorded by
+    # the SessionEnd hook rather than re-derived here. Labelled, never authoritative.
+    global LAST_RECON_LINES
+    LAST_RECON_LINES = recon_lines
+    recon_lines_total = sum(recon_lines.values())
+    recon_total += recon_lines_total
+
+    total = ledger_total + recon_total
+    priced_any = recon_priced or bool(ledger)
+    pct = total / EFFECTIVE_CAP_USD if EFFECTIVE_CAP_USD else 0.0
+    remaining = (EFFECTIVE_CAP_USD - total) if EFFECTIVE_CAP_USD else None
+
+    current_session_total = 0.0
+    cur = current_session_path()
+    if cur:
+        sid = _session_id_of(cur)
+        if sid in ledger:
+            # Authoritative even on a free lane: a session that moved from the gateway onto a
+            # free lane carries real gateway spend, and blanking it would lose that.
+            current_session_total = ledger[sid]
+        elif sid not in local and not is_free_session():
+            # 0.16.0: the reconstruction path was OUTSIDE the local-lane skip that protects the
+            # aggregate, so a headless free session with no ledger entry reconstructed at cloud
+            # rates and printed `this session ≈ $X` for a session that costs $0. `local` only
+            # knows sessions that rendered a statusline (local_lane_sessions reads the capture
+            # history log), so a HEADLESS free session is invisible to it — and the per-message
+            # id heuristic misses a free lane whose proxy mints gateway-shaped ids
+            # (`msg_bdrk_…`). is_free_session() needs neither.
+            cur_usage, _ = tally([cur])
+            current_session_total, _, _ = _price(cur_usage)
+
+    return total, pct, remaining, unknown_models, priced_any, current_session_total, ledger_total, recon_total
+
+
+# Warning bands (fractions of the cap). Warn once per band per day, so a missed/invisible lower
+# band still lets higher bands alert. WARN_PCT is the lowest band. (Replaced the old once-per-day
+# stamp, which silenced the whole day after a single — sometimes invisible — fire.)
+BANDS = sorted({WARN_PCT, 0.90, 1.00})
+
+
+def bands_fired_today():
+    """Set of band-floats already warned for TODAY, per the dated stamp `YYYY-MM-DD:0.75,0.9`.
+    Any missing / stale-date / old-bare-date / corrupt stamp → empty set. Safe default: at worst we
+    re-warn once; we never wrongly SUPPRESS a warning. partition() tolerates stray colons; the
+    (OSError, ValueError) guard tolerates a non-float payload (validator-flagged edge case)."""
+    try:
+        with open(STAMP_PATH) as f:
+            content = f.read().strip()
+        date_part, sep, bands_part = content.partition(":")
+        if date_part != TODAY or not sep or not bands_part:
+            return set()  # stale date, or the legacy bare-date format → nothing fired today
+        return {float(s) for s in bands_part.split(",") if s.strip()}
+    except (OSError, ValueError):
+        return set()
+
+
+def record_bands_today(bands_iterable):
+    try:
+        with open(STAMP_PATH, "w") as f:
+            f.write(f"{TODAY}:" + ",".join(str(b) for b in sorted(bands_iterable)))
+    except OSError:
+        pass  # non-fatal — worst case a band warning repeats once more
+
+
+def is_free_session():
+    """True when THIS session runs on free compute — local inference or a remote free-API proxy,
+    both reached through a localhost ANTHROPIC_BASE_URL. Same endpoint gate as
+    cost-ledger-capture.sh (never CLAUDE_IS_LOCAL, which leaks into later gateway sessions). Its
+    own turns cost $0, so a "% of daily cap used" alarm here reads as "this session is burning
+    budget" when it isn't; the tally stays informative, only the warning is dropped."""
+    url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    return url.startswith(("http://localhost", "http://127.0.0.1",
+                           "https://localhost", "https://127.0.0.1"))
+
+
+def _basis_wording(ledger_total, recon_total, recon_lines):
+    """How today's figure was arrived at, naming the permanent-recorded slice when there is one.
+
+    The slice is named whenever it exists, not only when an authoritative ledger does too: a day
+    with no ledger at all is exactly the day the reconstructed axis carries everything, so hiding
+    the label there would mislabel the whole figure as derived-this-moment."""
+    perm = sum(recon_lines.values())
+    perm_note = ""
+    if perm > 0:
+        perm_note = (f", ${perm:.2f} permanent-recorded from {len(recon_lines)} "
+                     "session(s) that never rendered")
+    if ledger_total > 0 and recon_total > 0:
+        return f"${ledger_total:.2f} authoritative + ${recon_total:.2f} reconstructed{perm_note}"
+    if ledger_total > 0:
+        return f"${ledger_total:.2f} authoritative"
+    return f"${recon_total:.2f} reconstructed{perm_note}"
+
+
+def _format_free_lane(total, unknown_models, ledger_total, recon_total):
+    """A free lane prints the GATEWAY's day, and says whose money it is.
+
+    This session's own turns cost $0, so a bare dollar figure reads as "I am spending money" when
+    every cent of it belongs to other sessions on the gateway. The figure stays — priced on the
+    axis the gateway itself bills (0.16.0: the markup is resolved from the gateway's learned price
+    table, not from this session's localhost endpoint, which is what made the two disagree) — but
+    ownership is stated FIRST and the cap is named as context, because a free lane does not draw
+    against it.
+
+    The phantom "saved with free agents" axis is deliberately absent here: it is a DIFFERENT axis,
+    owned by statusline-render.sh, and summing it into a spend line would add two numbers that must
+    never be added.
+    """
+    note = ""
+    if unknown_models:
+        note = f" (unpriced model(s) excluded: {', '.join(sorted(unknown_models))})"
+    billed = total * MARKUP
+    fee = f" at fee ×{MARKUP:.2f}" if MARKUP != 1.0 else ""
+    basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES)
+    side = side_spend_note(LAST_BY_SOURCE)
+    cap = ""
+    if CAP_USD:
+        cap = f" of ${CAP_USD:.0f} cap (~${max(0.0, CAP_USD - billed):.2f} left)"
+    return (f"budget-tally: free lane — this session costs $0; today's gateway spend "
+            f"(other sessions) ≈ ${billed:.2f}{cap} — {basis}{side}{fee}{note}")
+
+
+def format_line(total, pct, remaining, unknown_models, session_scope,
+                current_session_total, ledger_total, recon_total, warn=True, free=False):
+    if free:
+        return _format_free_lane(total, unknown_models, ledger_total, recon_total)
+    note = ""
+    if unknown_models:
+        note = f" (unpriced model(s) excluded: {', '.join(sorted(unknown_models))})"
+    if current_session_total > 0:
+        session_scope = f"{session_scope}, this session ≈ ${current_session_total:.2f}"
+    # Report the basis honestly: authoritative ledger vs token reconstruction
+    # (reconstruction over-counts, so flag when any is mixed in).
+    basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES)
+    kind = CONNECTION.get("kind") or ""
+    if not CAP_USD:
+        # No dollar cap applies to this connection (subscription windows, a Console key's
+        # monthly cap, a cloud provider's console) — print the spend with no denominator rather
+        # than an invented one, and say what the figure is.
+        what = {"subscription": "API-equivalent, not billed — your limit is the 5h/weekly window",
+                "first-party": "list price; no daily cap applies",
+                "api-key": "list price; Console keys have a MONTHLY tier cap, no daily one",
+                "cloud-provider": "list price; spend limits live in your cloud console",
+                "local": "free lane"}.get(kind, "no cap known")
+        fee_note = f", fee ×{MARKUP:.2f}" if MARKUP != 1.0 else ""
+        return (f"budget-tally: today's spend ({session_scope}) ≈ ${total * MARKUP:.2f} "
+                f"({what}{fee_note}; {basis}{side_spend_note(LAST_BY_SOURCE)}){note}")
+    prefix = f"⚠️ WARNING — {pct * 100:.0f}% of daily cap used: " if warn and pct >= WARN_PCT else "budget-tally: "
+    # Both figures on the GATEWAY axis when a fee applies: the user is measured against the
+    # gateway's cap and its refusal message quotes that number. The FEE is published and
+    # deterministic; the GAP is measured and unexplained, so it is named separately and its
+    # projection is shown beside the billed figure, never in place of it.
+    # 0.13.0 (user decision 2026-10-13): the HEADLINE is the best estimate of the gateway's own
+    # `Current cost` — list x fee x gap — the same figure the statusline shows. The breakdown
+    # follows it, one named step per factor, and only for the factors that apply.
+    billed = total * MARKUP
+    projected = billed * (GAP or 1.0)
+    headline = (f"{prefix}today's spend ({session_scope}) ≈ ${projected:.2f} of ${CAP_USD:.0f} cap "
+                f"(~${CAP_USD - projected:.2f} left)")
+    if MARKUP == 1.0 and not GAP:
+        return f"{headline} — {basis}{side_spend_note(LAST_BY_SOURCE)}{note}"
+    provider = CONNECTION.get("provider") or "gateway"
+    steps = [f"calculated ${total:.2f} at list price ({basis}{side_spend_note(LAST_BY_SOURCE)})"]
+    if MARKUP != 1.0:
+        # The registry's citation is a URL plus a quote — right for `report`, too long here.
+        src = CONNECTION.get("fee_source") or ""
+        src = "published markup" if not src or "http" in src else src
+        steps.append(f"× {provider} fee {MARKUP:.2f} ({src}) = ${billed:.2f}")
+    if GAP:
+        n = CONNECTION.get("gap_n_days")
+        cal = f", calibrated on {n} refusal day(s)" if n else ""
+        steps.append(f"× measured gap {GAP:.3f} (cause unknown{cal}) = ${projected:.2f}")
+    return f"{headline} — " + " ".join(steps) + note
+
+
+def spawn_proxy_price_refresh():
+    """Re-learn the gateway's own price table in the background when the cached copy is older
+    than its TTL (bin/proxy_prices.py). A no-op off a gateway; never waits on the network."""
+    try:
+        mod = sys.modules.get("proxy_prices")
+        if mod is None:
+            from importlib.machinery import SourceFileLoader
+            import importlib.util
+            loader = SourceFileLoader("proxy_prices", os.path.join(
+                os.path.dirname(os.path.realpath(__file__)), "proxy_prices.py"))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            if spec is None:
+                return
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[loader.name] = mod
+            loader.exec_module(mod)
+        mod.spawn_refresh(os.environ)
+    except Exception:
+        pass
+
+
+def main_session_start():
+    spawn_proxy_price_refresh()
+    total, pct, remaining, unknown_models, priced_any, current_session_total, ledger_total, recon_total = compute()
+    if not priced_any:
+        spawn_price_sync(SEEN_MODELS)
+        return  # nothing billable found for today yet — stay silent
+    # NOT "prior sessions": the label must describe what the number aggregates, not assume the
+    # current session is absent. A session that has been running since an earlier day already has a
+    # ledger entry the statusline wrapper keeps updating, so it IS in this total. Labelling it
+    # "prior sessions" under-counted by ~$14 in a real long-running session (2026-08-10).
+    print(format_line(total, pct, remaining, unknown_models, "all sessions with an entry today",
+                      current_session_total, ledger_total, recon_total,
+                      warn=not is_free_session(), free=is_free_session()))
+    spawn_price_sync(SEEN_MODELS)
+
+
+def main_check():
+    """Stop hook (fires after every assistant turn): recompute today's tally including the current
+    session so far, and warn when a NEW threshold band is crossed today. Delivery: a Claude Code Stop
+    hook ignores plain stdout, but surfaces a user-visible notice for `{"systemMessage": "..."}` — so
+    emit that JSON, not a bare print (the old bare print fired invisibly). Per-band dedupe means a
+    missed 75% still alerts at 90%/100%. A free session stays silent and records NO band, so a
+    cloud session later the same day still gets its warning."""
+    if is_free_session():
+        return
+    total, pct, remaining, unknown_models, priced_any, current_session_total, ledger_total, recon_total = compute()
+    if not priced_any:
+        return
+    reached = [b for b in BANDS if pct >= b]
+    if not reached:
+        return
+    already = bands_fired_today()
+    if all(b in already for b in reached):
+        return  # already warned for the highest band reached today
+    line = format_line(total, pct, remaining, unknown_models, "all sessions",
+                       current_session_total, ledger_total, recon_total)
+    print(json.dumps({"systemMessage": line}))
+    record_bands_today(reached)
+
+
+USAGE = """budget-tally.py — tally today's Claude Code API spend against the daily cap.
+
+Runs as a SessionStart and Stop hook, and is safe to run by hand.
+
+Usage:
+  budget-tally.py            SessionStart mode: print today's tally so far, across every
+                             session with a ledger entry today. Always prints.
+  budget-tally.py --check    Stop mode: recompute including the current session's turns.
+                             Silent unless a warning threshold is newly crossed today.
+  budget-tally.py --sync-prices [MODEL ...]
+                             Look up rates for claude-* ids the built-in table does not know
+                             (from LiteLLM's public price table) and save them to
+                             <config dir>/prices.json. Only ids never saved before, or saved
+                             as an assumption >24h ago, are fetched; with nothing to look up it
+                             touches no network. SessionStart runs this in the background for
+                             any unknown claude-* id it meets. With no MODEL, prints the saved
+                             table. Until a lookup lands, an unknown id is priced as the newest
+                             known version of its family (opus/sonnet/haiku/fable).
+  budget-tally.py --help     This text.
+
+Every figure printed is on the GATEWAY axis — the markup is applied, so the total and the
+cap are both the numbers the gateway's own refusal message quotes. The ledger on disk stays
+at list price; it is the canonical record and is never rewritten.
+
+Environment:
+  COST_TRACKER_CAP_USD / BUDGET_TALLY_CAP_USD   override the daily cap (USD)
+  COST_TRACKER_FEE (alias COST_TRACKER_MARKUP)  override the gateway FEE factor
+  COST_TRACKER_APPLY_GAP=0                      do not project the measured gap in warnings
+  COST_TRACKER_LEDGER_DIR                       ledger directory (default ~/.claude/cost-ledger)
+  COST_TRACKER_CONFIG_DIR                       config dir holding the learned cap and markup
+  COST_TRACKER_HISTORY                          history log path
+  BUDGET_TALLY_PROJECTS_DIR                     transcripts dir used for reconstruction
+                                                (--help previously named COST_TRACKER_PROJECTS_DIR,
+                                                which this script never read; the documented name
+                                                silently fell back to ~/.claude/projects)
+  COST_TRACKER_PRICES_URL                       price table to sync unknown models from
+  COST_TRACKER_OFFICIAL_PRICES                  official price JSON (default config/anthropic-prices.json)
+  COST_TRACKER_PROXY_PRICES_URL                 gateway price-table URL (default <base>/model/info); off = never probe
+  COST_TRACKER_NO_PRICE_SYNC                    1 = never start the background price lookup
+  COST_TRACKER_REMEMBER_DIRS                    colon-separated remember dirs whose logs/ are summed
+                                                (default ~/.remember + ~/ClaudeWorkspace/*/.remember)
+  COST_TRACKER_SG_LOG                           security-guidance log (default ~/.claude/security/log.txt)
+  COST_TRACKER_SG_STOP_USD                      est. $ per security-guidance Stop-hook review (default 0.31)
+  ANTHROPIC_BASE_URL                            a localhost value marks a FREE session (local or
+                                                free-API): the tally prints without the ⚠️ cap
+                                                WARNING, and --check stays silent. Since 0.16.0 the
+                                                fee is NOT taken from this endpoint — a free lane
+                                                reports the day's gateway spend at the markup the
+                                                gateway itself publishes, learned from
+                                                proxy-prices.json, so its figure agrees with the
+                                                gateway's own refusal instead of reading 10% low
+
+Exit status is 0 even on an internal error: this must never break a hook."""
+
+
+def main_help():
+    print(USAGE)
+
+
+if __name__ == "__main__":
+    # Parse BEFORE doing any work. Reaching the tally on an unrecognised flag would mean a
+    # user probing this script with --help triggers a real run and reads the output as help.
+    args = sys.argv[1:]
+    if "--help" in args or "-h" in args:
+        main_help()
+        sys.exit(0)
+    unknown = [a for a in args if a.startswith("-") and a not in ("--check", "--sync-prices")]
+    if unknown:
+        print("budget-tally.py: unrecognised option: %s" % " ".join(unknown), file=sys.stderr)
+        print("Try 'budget-tally.py --help'.", file=sys.stderr)
+        sys.exit(2)
+    if "--sync-prices" in args:
+        models = [a for a in args if not a.startswith("-")]
+        if models:
+            for m, src in sorted(sync_prices(models).items()):
+                print(f"{m}: {src}")
+        else:
+            print(json.dumps(_saved_prices(), indent=2, sort_keys=True))
+        sys.exit(0)
+    try:
+        if "--check" in args:
+            main_check()
+        else:
+            main_session_start()
+    except Exception as e:  # never break a hook over a tallying bug
+        print(f"budget-tally: skipped ({e})", file=sys.stderr)

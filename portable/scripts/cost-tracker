@@ -1,0 +1,2560 @@
+#!/usr/bin/env python3
+"""cost-tracker — what did today cost, and on which axis?
+
+THE ONE RULE: every dollar figure this tool prints names its own membership.
+An unlabelled dollar figure is the bug this tool exists to prevent. On
+2026-08-10 a spend line labelled "prior sessions" silently included the
+running session and so under-counted ~$14 of $18.16; the label had inferred
+membership from session age instead of stating what it summed. So:
+
+  THREE AXES, ALWAYS LABELLED
+    session   one Claude Code session's LIFETIME cost (may span UTC days)
+    today     gateway spend across ALL sessions with an entry on one UTC day
+    local     localhost inference — free compute, reported as savings, never
+              added to cloud spend
+
+Reads (never writes) two stores produced by the statusline capture wrapper:
+
+  ~/.claude/cost-ledger/<session_id>   one line, latest render wins
+        "<utc_date> <cum> [<baseline>] [<local_phantom_cum> [<phantom_baseline>]]"
+  ~/.claude/cost-ledger-history.log    append-only, one line per render
+        "<iso_ts> <session_id> <utc_date> <cum> <baseline> [<raw_cost>]"
+
+The per-session file is OVERWRITTEN every render, so it can only answer
+"today". Any longer period comes from the history log, grouped by
+(session_id, utc_date) with the LAST row per group winning — never by adding
+rows, and never by adding into an assumed-membership subtotal.
+
+Structurally invalid records are QUARANTINED with a visible reason, never
+counted as a session and never silently dropped. `doctor` prints them.
+
+Environment overrides (all optional):
+  COST_TRACKER_LEDGER_DIR   default ~/.claude/cost-ledger
+  COST_TRACKER_HISTORY      default ~/.claude/cost-ledger-history.log
+  COST_TRACKER_CAP_USD      daily cap; falls back to BUDGET_TALLY_CAP_USD, then a gateway's learned cap
+  COST_TRACKER_FEE          gateway fee override (alias COST_TRACKER_MARKUP); 1 = none
+  COST_TRACKER_APPLY_GAP    0 = warnings do not project the measured gap
+  COST_TRACKER_PROVIDERS    provider fee registry (default <plugin>/config/providers.json)
+  COST_TRACKER_PROXY_PRICES_URL  gateway price-table URL (default <base>/model/info); off = never probe
+  COST_TRACKER_OFFICIAL_PRICES   official Anthropic price JSON (default config/anthropic-prices.json)
+  COST_TRACKER_TODAY        override "today" as YYYY-MM-DD (tests)
+  COST_TRACKER_SAVINGS_CMD  argv (shell-split) printing savings-ledger JSON
+  COST_TRACKER_ESTIMATES    0 = ledger only; no no-ledger / classifier estimate
+  COST_TRACKER_CLASSIFIER_USD_PER_CALL  estimated $ per auto-mode classifier call (0 = off)
+  COST_TRACKER_NO_SPAWN     1 = the statusline never forks a background estimate refresh
+  COST_TRACKER_NO_MENU      1/true/yes = never open the interactive menu (bare or `menu`)
+"""
+import argparse
+import glob
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
+
+CONTRACT = 1
+
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+LEDGER_DIR = os.environ.get(
+    "COST_TRACKER_LEDGER_DIR", os.path.expanduser("~/.claude/cost-ledger")
+)
+HISTORY_PATH = os.environ.get(
+    "COST_TRACKER_HISTORY", os.path.expanduser("~/.claude/cost-ledger-history.log")
+)
+TODAY = os.environ.get("COST_TRACKER_TODAY") or datetime.now(timezone.utc).date().isoformat()
+
+
+# --- the cap: learned from the gateway's own refusal -------------------------
+# The gateway will not TELL us the cap (/key/info is 403 for a virtual key scoped to
+# llm_api_routes) but it SHOUTS it the moment the cap is hit:
+#
+#   API Error: Request rejected (429) · Budget has been exceeded!
+#   Key=Joyia-Code-M4m (sk-...YxHg) Current cost: 40.11333501999997, Max budget: 40.0
+#
+# That message is persisted into the transcript as an assistant turn, so the cap is
+# READABLE after all — just from the refusal rather than from an API. The most recent
+# observation is the cap until a newer refusal says otherwise.
+#
+# Only the per-KEY scope is usable as a daily denominator. The same message shape also
+# carries `Team=<uuid>` for the SHARED team cap (historically 1300 → 1400), and using
+# that as a personal daily cap would divide by a number 35x too large. Scope is
+# therefore recorded and filtered on, never assumed.
+KILL_RE = re.compile(
+    r"Budget has been exceeded!\s*"
+    r"(?P<scope>Key|Team)=(?P<label>[^\s(]+)"
+    r"(?:\s*\((?P<keyhint>[^)]*)\))?"
+    r"\s*Current cost:\s*(?P<cost>[0-9]+(?:\.[0-9]+)?)\s*,\s*"
+    r"Max budget:\s*(?P<cap>[0-9]+(?:\.[0-9]+)?)"
+)
+
+CONFIG_DIR = os.environ.get(
+    "COST_TRACKER_CONFIG_DIR", os.path.expanduser("~/.claude/cost-tracker")
+)
+CONFIG_PATH = os.path.join(CONFIG_DIR, "cap.json")
+TRANSCRIPTS_DIR = os.environ.get(
+    "COST_TRACKER_PROJECTS_DIR", os.path.expanduser("~/.claude/projects")
+)
+
+
+def read_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    # 0.12.0: the single legacy `markup` splits into `fee` (set by hand = a stated charge) and
+    # `gap` (learned by calibrate = an observation). Migrated on read, dropped on the next write.
+    return _connection().migrate_config(data)
+
+
+def write_config(data):
+    """Best-effort: a cap we cannot cache is a cap we look up again, not an error."""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp, CONFIG_PATH)      # atomic: a reader never sees half a file
+        return True
+    except OSError:
+        return False
+
+
+def find_refusals(max_files=500, since_days=365):
+    """EVERY genuine refusal in the transcripts, oldest first.
+
+    `learn_cap` wants only the newest observation per scope; CALIBRATION wants all of
+    them, because each refusal is a free measurement of the true cumulative on its own
+    day. One scan serves both so the two can never disagree about what counts as a
+    refusal — in particular about the poisoned-source filter below.
+
+    Bounded on purpose: newest-mtime-first, a file limit and an age limit, because this
+    reads whole transcripts and must stay a rare operation. NEVER called from the
+    statusline path.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
+    paths = []
+    for pat in ("*/*.jsonl", "*.jsonl"):
+        paths.extend(glob.glob(os.path.join(TRANSCRIPTS_DIR, pat)))
+    try:
+        paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    except OSError:
+        pass
+    paths = paths[:max_files]
+    observations = []
+    scanned = 0
+    for path in paths:
+        try:
+            f = open(path, "r", errors="ignore")
+        except OSError:
+            continue
+        scanned += 1
+        with f:
+            for line in f:
+                # cheap substring reject first: parsing every transcript line as JSON
+                # to find a rare error turn is orders of magnitude slower.
+                if "Budget has been exceeded" not in line:
+                    continue
+                m = KILL_RE.search(line)
+                if not m:
+                    continue
+                try:
+                    d = json.loads(line)
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                # ONLY a real refusal counts. `isApiErrorMessage` is set by Claude Code
+                # on the turn it writes for a rejected request; PROSE that merely quotes
+                # the message — a note, a plan, an assistant explaining a past kill — has
+                # no such marker. This matters: the first probe of this learner picked up
+                # the error text out of the very session that was investigating it, and
+                # would have "learned" the cap from a sentence rather than from the
+                # gateway. Any conversation ABOUT a budget kill is a poisoned source.
+                if d.get("isApiErrorMessage") is not True:
+                    continue
+                ts = d.get("timestamp") or ""
+                scope = m.group("scope").lower()
+                obs = {
+                    "cap_usd": float(m.group("cap")),
+                    "cost_at_kill_usd": float(m.group("cost")),
+                    "scope": scope,
+                    "label": m.group("label"),
+                    "key_hint": m.group("keyhint") or "",
+                    "observed_at": ts,
+                    "source_file": os.path.basename(path),
+                    "raw": m.group(0)[:300],
+                }
+                # The age limit the docstring promises: an observation older than the
+                # cutoff is not evidence about the cap we are under today.
+                if ts and ts < cutoff:
+                    continue
+                observations.append(obs)
+    observations.sort(key=lambda o: o["observed_at"] or "")
+    return {"observations": observations, "files_scanned": scanned,
+            "files_available": len(paths)}
+
+
+def learn_cap(max_files=500, since_days=365):
+    """The newest refusal per scope, as a cacheable config record.
+
+    Returns a dict (never written here — the caller decides) with the observation and its
+    provenance, or a `found: false` record. A file's mtime only approximates its records'
+    timestamps, so the winner is chosen by the RECORD's own timestamp across everything
+    scanned, not by file order.
+    """
+    found = find_refusals(max_files=max_files, since_days=since_days)
+    best = {}          # scope -> observation
+    for obs in found["observations"]:
+        prev = best.get(obs["scope"])
+        if prev is None or (obs["observed_at"] or "") >= (prev["observed_at"] or ""):
+            best[obs["scope"]] = obs
+    return {
+        "contract": 1,
+        "learned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "files_scanned": found["files_scanned"],
+        "files_available": found["files_available"],
+        "found": bool(best.get("key")),
+        "key": best.get("key"),
+        "team": best.get("team"),
+    }
+
+
+def learned_cap(auto_learn=False):
+    """The learned per-key cap and its provenance, or (None, provenance-or-None).
+
+    auto_learn=True performs the ONE first-run scan when no config exists yet. The
+    result is written even when nothing was found, so a machine that has never hit the
+    cap does not re-scan every transcript on every invocation. `cap --learn` re-scans on
+    demand; that is what "the daily budget cap changed" should run.
+    """
+    cfg = read_config()
+    if cfg is None and auto_learn:
+        cfg = learn_cap()
+        write_config(cfg)
+    if not cfg:
+        return None, None
+    key = cfg.get("key")
+    if not key or not key.get("cap_usd"):
+        return None, cfg
+    return float(key["cap_usd"]), cfg
+
+
+# --- the gateway markup -------------------------------------------------------
+# Claude Code's own `total_cost_usd` prices tokens at Anthropic LIST rates, and it is
+# RIGHT: reconstructing a session from its own usage records reproduces that figure (one
+# session measured 0.9996 of it, median 1.0207 across 14). We report that number
+# faithfully. A RESELLING GATEWAY (LiteLLM and friends) may nonetheless bill a different
+# amount for the same tokens, and then the ledger is accurate about cost while being
+# useless as a predictor of the refusal — the only number that actually stops the work.
+#
+# So the markup is deliberately NOT a correction to our figure. It is a second,
+# separately-labelled axis, learned from external evidence, and its DEFAULT IS EXACTLY
+# 1.0 — meaning ordinary first-party Claude Code (no gateway, no cap, no refusals ever)
+# resolves identity, renders byte-identical output, and cannot acquire a markup, because
+# the only thing it can be learned from is a gateway refusal message that will never
+# exist. Compatibility here is structural, not a flag someone has to remember to unset.
+
+MARKUP_MIN_DAYS = 5          # below this, one odd day sets the factor
+MARKUP_MAX_CV = 0.25         # above this the ratio is noise, not a rate
+MARKUP_IDENTITY = 1.0
+
+# --- the phantom BASIS --------------------------------------------------------
+# The phantom is Claude Code's own `cost.total_cost_usd` for a free-lane session, so our code
+# never chooses Opus: the basis is whatever model id the free-agents proxy spoofs
+# (`claude-opus-5-5`) prices at on Anthropic's table, and the ledger stores a DOLLAR figure, not
+# tokens. Re-basing it therefore cannot be a re-pricing of stored data — it is a factor applied
+# at display time, and the stored figure is never overwritten.
+#
+# Why the Sonnet factor is exactly 0.5 and not an estimate: on the official table Opus 5.5 is
+# $4/$20 and Sonnet 5.5 is $2/$10, and BOTH define their cache multipliers relative to their own
+# input rate (cache_read 0.05x, cache_write_5m 1.25x, cache_write_1h 2.0x). So every token type
+# on Sonnet 5.5 is exactly half of Opus 5.5 — independent of the token mix, which is what makes
+# the conversion exact rather than mix-dependent.
+PHANTOM_BASIS_OPUS = 1.0
+PHANTOM_BASIS_SONNET = 0.5
+
+
+def phantom_basis_factor():
+    """Factor for rendering the savings axis, from the basis config. `opus` (default) is the
+    stored figure's own basis and changes nothing; `sonnet` re-prices what the same work would
+    have cost on Sonnet 5.5. A bare number is taken as a custom factor."""
+    try:
+        cfg = read_config() or {}
+    except Exception:
+        cfg = {}
+    basis = os.environ.get("COST_TRACKER_PHANTOM_BASIS") \
+        or ((cfg.get("phantom") or {}).get("basis") if isinstance(cfg.get("phantom"), dict) else None) \
+        or "opus"
+    basis = str(basis).strip().lower()
+    if basis in ("sonnet", "sonnet-5.5", "sonnet-5"):
+        return PHANTOM_BASIS_SONNET
+    if basis in ("opus", "opus-5.5", "opus-5", "stored", "as-recorded"):
+        return PHANTOM_BASIS_OPUS
+    try:
+        v = float(basis)
+    except ValueError:
+        return PHANTOM_BASIS_OPUS
+    return v if v > 0 else PHANTOM_BASIS_OPUS
+
+
+def phantom_basis_name():
+    f = phantom_basis_factor()
+    if f == PHANTOM_BASIS_OPUS:
+        return "Opus 5.5 (as recorded)"
+    if f == PHANTOM_BASIS_SONNET:
+        return "Sonnet 5.5 basis"
+    return f"custom ×{f:g}"
+
+
+def _median(xs):
+    s = sorted(xs)
+    if not s:
+        return None
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def measure_markup(cal):
+    """What this gateway bills per dollar of list price, from `calibrate` rows.
+
+    MEDIAN of the per-day gateway/ours ratios, not a ratio of the sums: a single
+    partially-covered day would otherwise drag the rate, and the whole point is a figure
+    steady enough to trust.
+
+    The CV gate is what makes this honest. A markup is a claim that ONE multiplicative
+    constant explains the gap; if the per-day ratios scatter, that claim is false and the
+    right answer is to learn nothing rather than to publish an average of unlike things.
+    Measured on the machine this was built on: 19 days, ratios 1.205-1.289, CV 0.0525 —
+    well inside the gate, and 4x tighter as a multiplicative model (CV 0.0178) than as an
+    additive one (0.0752), which is the evidence that it IS a rate and not a fixed fee.
+    """
+    # The GAP is measured on top of list x FEE (0.12.0): the fee is published and deterministic,
+    # so it is divided out first and only what nobody has explained is left in the ratio.
+    fee = float(cal.get("fee") or MARKUP_IDENTITY)
+    ratios = [r["gateway_usd"] / (r["ours_usd"] * fee)
+              for r in cal.get("days", [])
+              if r.get("verdict") != "no-data" and r.get("ours_usd")
+              and r.get("gateway_usd")]
+    n = len(ratios)
+    if not n:
+        return {"factor": None, "n_days": 0, "cv": None,
+                "reason": "no calibrated day has both a gateway figure and one of ours"}
+    med = _median(ratios)
+    mean = sum(ratios) / n
+    var = sum((x - mean) ** 2 for x in ratios) / n
+    cv = (var ** 0.5 / mean) if mean else None
+    out = {"factor": round(med, 4), "n_days": n,
+           "cv": (round(cv, 4) if cv is not None else None),
+           "ratio_min": round(min(ratios), 4), "ratio_max": round(max(ratios), 4),
+           "reason": None}
+    if n < MARKUP_MIN_DAYS:
+        out["reason"] = (f"only {n} calibrated day(s); needs {MARKUP_MIN_DAYS} before one "
+                         "day stops being able to set the rate")
+    elif cv is not None and cv > MARKUP_MAX_CV:
+        out["reason"] = (f"the per-day ratios scatter too much (CV {cv:.3f} > "
+                         f"{MARKUP_MAX_CV}) to be a single rate")
+    elif med is not None and med < 1.0:
+        # Ours ABOVE the gateway is not a markup. A refusal is a lower bound on the day,
+        # so this is the expected shape of a well-behaved account, not a discount.
+        out["reason"] = ("we already report at or above the gateway — nothing to mark up")
+    return out
+
+
+def learned_markup():
+    """(factor, provenance) from the config file, or (None, None). Never scans."""
+    cfg = read_config()
+    if not cfg:
+        return None, None
+    m = cfg.get("markup")
+    if not isinstance(m, dict) or not m.get("factor"):
+        return None, cfg
+    try:
+        f = float(m["factor"])
+    except (TypeError, ValueError):
+        return None, cfg
+    return (f, cfg) if f > 0 else (None, cfg)
+
+
+def markup_factor():
+    """The FEE the session's gateway charges per dollar of list price. 1.0 unless the session is
+    routed through a gateway AND a fee is known for it (0.12.0).
+
+    Resolution (bin/cost_connection.py): COST_TRACKER_FEE / COST_TRACKER_MARKUP override ->
+    a fee set by hand (`cost-tracker fee --set`) -> the published fee of a registered provider
+    (config/providers.json) -> 1.0. A subscription, Console-key or cloud-provider session is at
+    list price whatever this machine's config says: the fee belongs to the reseller.
+    The measured GAP is a separate axis (gap_factor) and never feeds this.
+    """
+    try:
+        return float(connection()["fee"]) or MARKUP_IDENTITY
+    except Exception:
+        return MARKUP_IDENTITY
+
+
+def gap_factor():
+    """The measured, UNEXPLAINED ratio on top of list x fee (from `calibrate --learn-gap`), or
+    None. Reported separately; warnings project with it unless COST_TRACKER_APPLY_GAP=0."""
+    try:
+        g = connection().get("gap")
+    except Exception:
+        return None
+    return float(g) if g and g > 0 else None
+
+
+def cap_usd(auto_learn=False):
+    """The daily cap, or None. None is a real answer, not zero.
+
+    Resolution order, most explicit first:
+      1. COST_TRACKER_CAP_USD / BUDGET_TALLY_CAP_USD — a deliberate override always wins.
+      2. the cap LEARNED from the gateway's own refusal message (see learn_cap).
+      3. None — spend prints with no denominator rather than an invented one.
+    Never probes the network, and never scans transcripts unless auto_learn is set, so
+    the statusline path stays cheap.
+    """
+    for var in ("COST_TRACKER_CAP_USD", "BUDGET_TALLY_CAP_USD"):
+        raw = os.environ.get(var)
+        if raw:
+            try:
+                v = float(raw)
+            except ValueError:
+                continue
+            if v > 0:
+                return v
+    try:
+        conn = connection()
+    except Exception:
+        conn = {"kind": "gateway"}
+    # A refusal-learned DAILY key cap is a property of a reselling gateway. A subscription
+    # (percent windows), a Console key (monthly tier cap) or a cloud provider never has one,
+    # and inheriting this machine's learned $40 would invent a ceiling that does not exist.
+    if conn.get("kind") != "gateway":
+        return conn.get("cap_usd") if conn.get("cap_kind") == "spend-limit" else None
+    cap, _cfg = learned_cap(auto_learn=auto_learn)
+    return cap
+
+
+# --- parsing -----------------------------------------------------------------
+
+class Record:
+    """One parsed ledger record. `valid` False means QUARANTINED with a reason."""
+
+    __slots__ = ("session_id", "valid", "reason", "day", "cum", "baseline",
+                 "phantom", "phantom_base", "axis", "raw", "reset_anchored")
+
+    def __init__(self, session_id, raw, valid, reason="", day=None, cum=0.0,
+                 baseline=0.0, phantom=None, axis="", reset_anchored=False,
+                 phantom_base=None):
+        self.session_id = session_id
+        self.raw = raw
+        self.valid = valid
+        self.reason = reason
+        self.day = day
+        self.cum = cum
+        self.baseline = baseline
+        self.phantom = phantom
+        self.axis = axis
+        # True when the session's own cumulative RESET below its carried-in baseline —
+        # a resumed session, whose spend is anchored at the reset instead.
+        self.reset_anchored = reset_anchored
+        # 0.14.0: the phantom carried INTO self.day (ledger field 5). None on legacy
+        # 4-field lines, which keep the full-anchor behaviour and self-heal at midnight.
+        self.phantom_base = phantom_base
+
+    @property
+    def day_usd(self):
+        """Spend attributable to self.day — the delta over the baseline carried
+        into that day. NOT the lifetime cumulative: charging a multi-day
+        session's whole lifetime to the day it last rendered once showed a
+        4-day $75 session as 189% of a $40 cap.
+
+        RESET-ANCHORED case: when a session is RESUMED, Claude Code's
+        total_cost_usd restarts at 0, so the incoming cumulative can be BELOW the
+        baseline carried into the day. The baseline then describes a counter that
+        no longer exists, and the spend accrued since the reset is the cumulative
+        itself. Subtracting the stale baseline yields a negative number; clamping
+        that to 0 (what budget-tally did) reports the day as free. Measured on
+        session e4d10d09, 2026-08-26: cumulative reached $16.07 against a stale
+        baseline of $17.35, so the day was reported as $0.00. Anchoring at the
+        reset recovers it. The known cost is that any spend EARLIER the same day,
+        before the reset, is not recoverable from the ledger — so this figure is a
+        floor, and it is labelled as one wherever it is printed."""
+        if not self.valid or self.axis in ("local", "zero"):
+            return 0.0
+        if self.reset_anchored:
+            return self.cum
+        return self.cum - self.baseline
+
+    @property
+    def lifetime_usd(self):
+        """The session axis: cumulative cost since the session began."""
+        if not self.valid or self.axis == "local":
+            return 0.0
+        return self.cum
+
+    @property
+    def day_phantom(self):
+        """Phantom attributable to self.day — the delta over the phantom baseline
+        carried into that day (ledger field 5, 0.14.0), NOT the lifetime anchor.
+        Charging a multi-day free session's whole anchor to the day it last rendered
+        is the same defect day_usd documents for the booked axis (measured 2026-10-13:
+        c441f503 carried ~$73.77 of pre-midnight phantom into "today saved").
+        Legacy 4-field lines have no field 5; they keep the full-anchor behaviour and
+        self-heal at the next UTC midnight. Clamped at 0: a resume can restart the
+        phantom counter below the carried-in baseline (the same shape day_usd anchors
+        at a reset), and the clamp undercounts only that case."""
+        if self.phantom is None:
+            return None
+        if self.phantom_base is None:
+            return self.phantom
+        return max(0.0, self.phantom - self.phantom_base)
+
+
+def _valid_date(s):
+    if not DATE_RE.match(s):
+        return False
+    try:
+        date.fromisoformat(s)
+    except ValueError:
+        return False       # shape-valid but not a real date, e.g. 2026-13-45
+    return True
+
+
+def parse_ledger_fields(session_id, fields, raw):
+    """Apply the validation rules in a fixed order, so a record with two
+    problems always reports the same one."""
+    if len(fields) < 2:
+        return Record(session_id, raw, False, "too-few-fields")
+    if len(fields) > 5:
+        return Record(session_id, raw, False, "too-many-fields")
+    if not _valid_date(fields[0]):
+        # A history line starts with an ISO timestamp and lands here — which is
+        # why history is kept OUTSIDE the ledger dir. Structural, not luck.
+        return Record(session_id, raw, False, "bad-date")
+    nums = []
+    for f in fields[1:]:
+        try:
+            nums.append(float(f))
+        except ValueError:
+            return Record(session_id, raw, False, "non-numeric")
+    cum = nums[0]
+    baseline = nums[1] if len(nums) >= 2 else 0.0
+    phantom = nums[2] if len(nums) >= 3 else None
+    # 0.14.0 field 5: the phantom carried into the day. Absent on legacy lines.
+    phantom_base = nums[3] if len(nums) >= 4 else None
+    if cum < 0 or baseline < 0:
+        return Record(session_id, raw, False, "negative-cost")
+    # A cumulative BELOW its own carried-in baseline is not corruption, and this is
+    # the whole reason the earlier "baseline-exceeds-cumulative" quarantine existed:
+    # cum is a lifetime cumulative, so it can only fall if the COUNTER RESTARTED.
+    # Two distinct restarts, told apart by whether any spend is reported at all:
+    #
+    #   cum == 0, baseline > 0  -> a zero-cost render. AMBIGUOUS before 2026-08-29:
+    #       either a local render (the endpoint gate zeroes the cost) or a resumed
+    #       session whose counter has restarted but not yet billed a turn. Field 4
+    #       disambiguates it, and field 4 did not exist before that date — so a
+    #       3-field zero is honestly `zero`, not asserted to be local. Either way it
+    #       contributes $0.
+    #   0 < cum < baseline      -> a RESUMED session, counter restarted and already
+    #       billing. Measured on sessions 960b07ca (2026-08-24) and e4d10d09
+    #       (2026-08-26). The baseline now describes a counter that no longer exists,
+    #       so the day is anchored at the reset — see Record.day_usd.
+    ambiguous_zero = (cum == 0.0 and baseline > 0.0 and phantom is None)
+    counter_reset = (0.0 < cum < baseline)
+    if phantom is not None and cum == 0.0:
+        axis = "local"                 # field 4 present: unambiguously a local render
+    elif ambiguous_zero:
+        axis = "zero"
+    else:
+        axis = "cloud"
+    return Record(session_id, raw, True, "", fields[0], cum, baseline, phantom, axis,
+                  reset_anchored=counter_reset, phantom_base=phantom_base)
+
+
+def parse_ledger_line(session_id, text):
+    fields = text.split()
+    return parse_ledger_fields(session_id, fields, text.strip())
+
+
+def read_ledger():
+    """Every record currently in the ledger dir, valid or quarantined."""
+    out = []
+    try:
+        names = sorted(os.listdir(LEDGER_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if name.endswith(".tmp") or name.startswith("."):
+            continue
+        path = os.path.join(LEDGER_DIR, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", errors="ignore") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if not text.strip():
+            out.append(Record(name, "", False, "empty"))
+            continue
+        out.append(parse_ledger_line(name, text))
+    return out
+
+
+def read_history():
+    """Group history rows by (session_id, utc_date), LAST row per group wins.
+
+    Rows are cumulative snapshots, so summing rows would multiply-count a
+    session by however many times its statusline rendered. Grouping is the
+    whole point: D15's rule is group by (session_id, UTC day) and sum groups.
+    """
+    groups = {}
+    quarantined = []
+    # A reset is only fully visible in the ROW SEQUENCE. Anchoring on the final row
+    # alone misses the case where the counter restarted mid-day and then climbed back
+    # ABOVE the stale baseline before the last render — session 960b07ca on 2026-08-24
+    # went 0 -> 1.11 -> 3.68 -> 15.998 against a baseline of 3.614, so its final row
+    # looks ordinary and the day was under-counted by exactly that stale $3.61. Per
+    # (session, day) we therefore remember the highest cumulative seen and whether it
+    # ever went DOWN. Rows with cum == 0 are skipped: a local render legitimately
+    # reports 0 and would otherwise look like a reset on every single row.
+    peak = {}
+    reset_seen = set()
+    # CLOUD -> LOCAL (0.10.1). Before the capture fix, a session that moved from the gateway to a
+    # local lane wrote cost 0 on every local render, so "last row wins" booked its real cloud
+    # spend as $0 (9bc4ee06 on 2026-10-04: $4.64). The last CLOUD row of the day still holds that
+    # figure, so a local zero after it is read as the cloud cumulative frozen there — exactly
+    # what the fixed capture now writes itself.
+    last_cloud = {}
+    try:
+        f = open(HISTORY_PATH, "r", errors="ignore")
+    except OSError:
+        return groups, quarantined
+    with f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 5:
+                quarantined.append((lineno, "too-few-fields", line))
+                continue
+            _ts, sid, day = parts[0], parts[1], parts[2]
+            rec = parse_ledger_fields(sid, [day] + parts[3:5], line)
+            if not rec.valid:
+                quarantined.append((lineno, rec.reason, line))
+                continue
+            # field 6 (raw pre-gate cost) marks a local render: cost was zeroed
+            # but the phantom kept accruing, so the axis is legible after the fact.
+            if len(parts) >= 6:
+                try:
+                    raw_cost = float(parts[5])
+                except ValueError:
+                    raw_cost = 0.0
+                if rec.cum == 0.0 and raw_cost > 0:
+                    rec.axis = "local"
+            key = (sid, day)
+            if rec.cum > 0.0:
+                last_cloud[key] = rec
+            elif rec.axis == "local" and key in last_cloud:
+                frozen = last_cloud[key]
+                rec.cum, rec.baseline, rec.axis = frozen.cum, frozen.baseline, "cloud"
+            if rec.cum > 0.0:
+                if rec.cum < peak.get(key, 0.0):
+                    reset_seen.add(key)
+                peak[key] = max(peak.get(key, 0.0), rec.cum)
+            if rec.reset_anchored:
+                reset_seen.add(key)
+            groups[key] = rec              # later line wins
+    for key in reset_seen:
+        if key in groups:
+            groups[key].reset_anchored = True
+    return groups, quarantined
+
+
+# --- savings (the local axis) -------------------------------------------------
+
+def read_savings_fast():
+    """Today's savings read straight from the DERIVED rollup — no subprocess.
+
+    The statusline path cannot afford to spawn the savings ledger on every render, and
+    the rollup exists precisely so a status line can read it without parsing a growing
+    log. Staleness is checked rather than assumed: the rollup records the event count it
+    was built from, so a log that has grown since means the rollup is behind and the
+    honest answer is None (unmeasured), not a stale number presented as current.
+    """
+    d = os.environ.get("LOCAL_AGENTS_LEDGER_DIR") or os.path.expanduser("~/.claude/local-agents")
+    rollup, events = os.path.join(d, "rollup.json"), os.path.join(d, "savings.jsonl")
+    try:
+        with open(rollup) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or "rows" not in data:
+        return None
+    try:
+        with open(events, errors="ignore") as f:
+            n = sum(1 for line in f if line.strip())
+    except OSError:
+        n = None
+    if n is not None and data.get("source_events") != n:
+        return None                      # rollup is behind the log: unmeasured, not stale
+    total, count = 0.0, 0
+    for row in data.get("rows") or []:
+        if row.get("day") != TODAY:
+            continue
+        if row.get("saved_usd") is None:
+            continue
+        total += float(row["saved_usd"])
+        count += int(row.get("events") or 0)
+    return {"saved_usd": round(total, 4), "events": count}
+
+
+def read_savings(period_flag):
+    """Savings from the local-agents savings ledger, or None if unavailable.
+
+    None is not zero. Zero saved is a claim that local work happened and was
+    worth nothing; None says nothing measured it. Reporting an absent ledger
+    as $0.00 understates savings forever and looks correct while doing it.
+    """
+    cmd = os.environ.get("COST_TRACKER_SAVINGS_CMD")
+    if cmd:
+        argv = shlex.split(cmd)
+    else:
+        found = _find_savings_ledger()
+        if not found:
+            return None
+        argv = [sys.executable, found]
+    argv = argv + ["report", period_flag, "--json"]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or "saved_usd" not in data:
+        return None
+    return data
+
+
+def _find_savings_ledger():
+    import glob as _glob
+    roots = []
+    # Explicit override from the environment (developer/sysadmin pin).
+    _env = os.environ.get("COST_LOCAL_AGENTS_BIN")
+    if _env:
+        roots.append(os.path.join(_env, "savings-ledger.py"))
+    # Developer checkout conventions. On a fresh install the repo may live
+    # anywhere, so the cache is the reliable fallback.
+    roots.append(os.path.expanduser("~/ClaudeWorkspace/local-agents/bin/savings-ledger.py"))
+    roots.append(os.path.expanduser("~/ClaudeWorkspace/free-agents/bin/savings-ledger.py"))
+    # Highest-versioned installed plugin cache entry.
+    roots += sorted(_glob.glob(os.path.expanduser(
+        "~/.claude/plugins/cache/*/local-agents/*/bin/savings-ledger.py")), reverse=True)
+    for p in roots:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+# --- periods ------------------------------------------------------------------
+
+PERIODS = {
+    "today": ("today", "--today"),
+    "week": ("last 7 days", "--week"),
+    "month": ("last 30 days", "--month"),
+}
+
+
+MAX_WINDOW_DAYS = 400      # one row per UTC day; a ceiling stops a typo printing thousands
+
+
+def period_days(period, since=None, ndays=None):
+    """The inclusive list of UTC dates a period covers, newest last."""
+    today = date.fromisoformat(TODAY)
+    if ndays:
+        # A rolling window ending today, same as --week/--month but user-sized. A window of 1
+        # is exactly "today", and one larger than the history is clamped by the loop below
+        # (it simply yields the days that exist rather than inventing empties).
+        start = today - timedelta(days=max(1, ndays) - 1)
+    elif since:
+        start = date.fromisoformat(since)
+    elif period == "week":
+        start = today - timedelta(days=6)
+    elif period == "month":
+        start = today - timedelta(days=29)
+    else:
+        start = today
+    if start > today:
+        start = today
+    days, d = [], start
+    while d <= today:
+        days.append(d.isoformat())
+        d += timedelta(days=1)
+    return days
+
+
+def _merged_records(fast=False):
+    """(session_id, day) -> Record for everything on record, plus the quarantine list.
+
+    Shared by collect() and daily_totals() ON PURPOSE: the calibration harness compares
+    our daily figure against the gateway's, and that comparison is worthless if the
+    reported total and the calibrated total are assembled by two different code paths.
+    """
+    ledger = read_ledger()
+    # FAST PATH (statusline): the per-session ledger dir alone answers "today", so the
+    # history log — hundreds of thousands of lines on a long-lived machine — is not read
+    # at all. It is only needed for periods the overwritten ledger file cannot describe.
+    if fast:
+        hist_groups, hist_bad = {}, []
+    else:
+        hist_groups, hist_bad = read_history()
+
+    quarantined = [
+        {"source": "ledger", "session_id": r.session_id, "reason": r.reason, "raw": r.raw}
+        for r in ledger if not r.valid
+    ]
+    quarantined += [
+        {"source": f"history:{lineno}", "session_id": "", "reason": reason, "raw": raw}
+        for lineno, reason, raw in hist_bad
+    ]
+
+    # (session_id, day) -> record. History first, then let the live ledger win
+    # for the day it describes: it is the newest render of that session.
+    merged = dict(hist_groups)
+    for r in ledger:
+        if not r.valid:
+            continue
+        key = (r.session_id, r.day)
+        # The ledger line is the NEWEST render, so it wins on the numbers — but it is a
+        # single line and cannot show a reset that happened earlier in the day and then
+        # climbed back above the stale baseline. That is a fact about the day, observable
+        # only in the row sequence, so carry the flag forward instead of letting the
+        # overwrite erase it. Without this, session 960b07ca's 2026-08-24 reset was
+        # detected in history and then immediately forgotten.
+        prior = merged.get(key)
+        if prior is not None and prior.reset_anchored:
+            r.reset_anchored = True
+        # A pre-0.10.1 local ledger line ("<day> 0 <base> <phantom>") written after a cloud
+        # stretch would erase the cloud figure history just recovered — keep history's.
+        if (prior is not None and r.axis == "local" and r.cum == 0.0
+                and prior.axis == "cloud" and prior.cum > 0.0):
+            continue
+        merged[key] = r
+    return merged, quarantined
+
+
+# --- spend the ledger cannot see ------------------------------------------------------------
+# The ledger is written by the statusline, so it is blind to two kinds of REAL gateway spend:
+#   * sessions that never render a statusline — SDK / headless runs (`claude -p`, plugin test
+#     harnesses, dogfood sessions under /private/var/folders). 14 of them cost ~$9.60 list on
+#     2026-09-26 with no ledger entry at all;
+#   * the auto-mode safety classifier: a side request to claude-sonnet-5 on the same key for
+#     every non-read-only tool call, which is in neither the transcript nor total_cost_usd.
+# budget-tally.py owns the arithmetic (estimate_day); it is loaded, not re-implemented, so the
+# hook and this report cannot drift apart. Both figures are ESTIMATES and are labelled so.
+# COST_TRACKER_ESTIMATES=0 turns them off and restores ledger-only totals.
+
+_BT_MODULE = None
+_CC_MODULE = None
+
+
+def _connection():
+    """The shared resolver (bin/cost_connection.py), loaded by path so this CLI keeps no
+    .py extension. Same loader shape as _budget_tally()."""
+    global _CC_MODULE
+    if _CC_MODULE is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        loader = SourceFileLoader("cost_connection", os.path.join(here, "cost_connection.py"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _CC_MODULE = mod
+    _CC_MODULE.config_path = lambda: CONFIG_PATH   # bind to THIS process's config dir
+    return _CC_MODULE
+
+
+STATUSLINE_PAYLOAD = None   # set by `statusline --payload -`: Claude Code's stdin JSON
+
+
+def connection(payload=None):
+    """{kind, provider, fee, cap_kind, gap, ...} for this process's environment (and, on the
+    statusline path, the payload Claude Code sent it — the only place `rate_limits` lives)."""
+    return _connection().resolve_connection(os.environ, payload or STATUSLINE_PAYLOAD)
+ESTIMATE_CACHE_TTL_S = 120
+
+
+def _budget_tally():
+    global _BT_MODULE
+    if _BT_MODULE is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        # exec_module, not load_module: Python 3.15 removed load_module(), and the estimate's
+        # catch-all turned that into a silent $0 side spend (0.11.0 on the live CLI).
+        loader = SourceFileLoader("budget_tally", os.path.join(here, "budget-tally.py"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        sys.modules[loader.name] = mod   # what load_module did; dataclasses etc. look it up
+        loader.exec_module(mod)
+        _BT_MODULE = mod
+    # budget-tally resolves its paths from BUDGET_TALLY_* at import; THIS process may have been
+    # pointed elsewhere by COST_TRACKER_*. Bind it to our paths so the estimate reads the same
+    # ledger, history and transcripts as everything else here — otherwise a test (or a user
+    # override) silently estimates against the real ~/.claude.
+    _BT_MODULE.PROJECTS_DIR = TRANSCRIPTS_DIR
+    _BT_MODULE.LEDGER_DIR = LEDGER_DIR
+    _BT_MODULE.HISTORY_PATH = HISTORY_PATH
+    _BT_MODULE.TODAY = TODAY
+    return _BT_MODULE
+
+
+def _estimate_cache_path():
+    return os.path.join(CONFIG_DIR, "estimate-cache.json")
+
+
+def _spawn_estimate_refresh():
+    """Rebuild the estimate cache in a detached child. Best-effort; COST_TRACKER_NO_SPAWN=1
+    disables it (tests, and anyone who wants the statusline to never fork)."""
+    if os.environ.get("COST_TRACKER_NO_SPAWN") == "1":
+        return
+    lock = _estimate_cache_path() + ".lock"
+    try:
+        # One refresh at a time: a lock younger than the TTL means one is already running.
+        if (os.path.exists(lock) and datetime.now(timezone.utc).timestamp()
+                - os.path.getmtime(lock) < ESTIMATE_CACHE_TTL_S):
+            return
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        open(lock, "w").close()
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "statusline",
+                          "--refresh-estimate"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def estimate_unseen(days, covered_sids, fast=False):
+    """Sum of budget-tally's per-day estimates over `days`. Never raises.
+
+    The FAST (statusline) path never scans transcripts — it runs on every render and the scan
+    costs ~1 s. It serves the last cached result for the same days (whatever its age), and when
+    that is older than ESTIMATE_CACHE_TTL_S it spawns a detached `cost-tracker statusline
+    --refresh-estimate` to rebuild it, so the NEXT render is current. With no cache yet it
+    reports zero, labelled `pending`, rather than blocking the statusline."""
+    zero = {"uncovered_usd": 0.0, "uncovered_sessions": [], "classifier_usd": 0.0,
+            "classifier_calls": 0, "outside_usd": 0.0, "by_source": {}, "total_usd": 0.0,
+            "source": "off"}
+    if os.environ.get("COST_TRACKER_ESTIMATES", "1") == "0":
+        return zero
+    key = ",".join(sorted(days))
+    if fast:
+        cached, age = None, None
+        try:
+            with open(_estimate_cache_path()) as f:
+                c = json.load(f)
+            if c.get("key") == key:
+                cached = c["value"]
+                age = datetime.now(timezone.utc).timestamp() - float(c.get("at", 0))
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            pass
+        if cached is None or age is None or not (0 <= age < ESTIMATE_CACHE_TTL_S):
+            _spawn_estimate_refresh()
+        return cached if cached is not None else dict(zero, source="pending")
+    try:
+        bt = _budget_tally()
+        out = dict(zero, source="estimated (budget-tally.estimate_day)")
+        sessions = set()
+        for d in sorted(days):
+            e = bt.estimate_day(d, covered_sids)
+            out["uncovered_usd"] += e["uncovered_usd"]
+            out["classifier_usd"] += e["classifier_usd"]
+            out["classifier_calls"] += e["classifier_calls"]
+            sessions.update(e["uncovered_sessions"])
+            # Outside-process spend, per named source (see budget-tally SIDE_SPENDERS). Only the
+            # part with no transcript (outside_usd) is new money; the rest labels uncovered_usd.
+            out["outside_usd"] += e.get("outside_usd", 0.0)
+            by = out["by_source"] = dict(out["by_source"])
+            for sid, v in (e.get("by_source") or {}).items():
+                acc = by.setdefault(sid, {"label": v["label"], "usd": 0.0, "basis": v["basis"],
+                                          "in_uncovered": v["in_uncovered"]})
+                acc["usd"] = round(acc["usd"] + v["usd"], 4)
+                for k in ("calls",):
+                    if k in v:
+                        acc[k] = acc.get(k, 0) + v[k]
+                if "sessions" in v:
+                    acc["sessions"] = sorted(set(acc.get("sessions", [])) | set(v["sessions"]))
+        out["uncovered_sessions"] = sorted(sessions)
+        out["uncovered_usd"] = round(out["uncovered_usd"], 4)
+        out["classifier_usd"] = round(out["classifier_usd"], 4)
+        out["outside_usd"] = round(out["outside_usd"], 4)
+        out["total_usd"] = round(out["uncovered_usd"] + out["classifier_usd"]
+                                 + out["outside_usd"], 4)
+    except Exception as e:  # an estimate must never break the report or the statusline
+        return dict(zero, source=f"unavailable ({type(e).__name__})")
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        tmp = _estimate_cache_path() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"key": key, "at": datetime.now(timezone.utc).timestamp(),
+                       "value": out}, f)
+        os.replace(tmp, _estimate_cache_path())
+    except OSError:
+        pass
+    return out
+
+
+def collect(period="today", since=None, fast=False, days=None, ndays=None,
+            want_series=False):
+    """Build the report data. Membership is explicit in every field name.
+
+    `days` overrides the period with an explicit set of UTC dates — how the calibration
+    harness asks for one past day at a time. `ndays` is the rolling window ending today.
+    """
+    if days is not None:
+        days = set(days)
+        label = (sorted(days)[0] if len(days) == 1
+                 else f"{min(days)} … {max(days)}")
+    else:
+        days = set(period_days(period, since, ndays))
+        if ndays:
+            label = f"last {len(days)} day(s)"
+        else:
+            label = (PERIODS.get(period, (period, ""))[0] if not since
+                     else f"since {since}")
+    merged, quarantined = _merged_records(fast=fast)
+
+    per_session_day = {k: v for k, v in merged.items() if k[1] in days}
+
+    sessions = defaultdict(lambda: {"period_usd": 0.0, "lifetime_usd": 0.0,
+                                    "days": [], "axis": "cloud",
+                                    "reset_anchored": False})
+    for (sid, day), rec in sorted(per_session_day.items()):
+        s = sessions[sid]
+        s["period_usd"] += rec.day_usd
+        # lifetime is a cumulative, so the LARGEST seen is the session's total —
+        # never a sum of per-day cumulatives.
+        s["lifetime_usd"] = max(s["lifetime_usd"], rec.lifetime_usd)
+        s["days"].append(day)
+        if rec.reset_anchored:
+            s["reset_anchored"] = True
+        if rec.axis in ("local", "zero") and s["period_usd"] == 0.0:
+            s["axis"] = rec.axis
+
+    cloud_total = sum(s["period_usd"] for s in sessions.values())
+    est = estimate_unseen(days, {sid for (sid, _d) in per_session_day}, fast=fast)
+    local_sessions = [sid for sid, s in sessions.items() if s["axis"] == "local"]
+    zero_sessions = [sid for sid, s in sessions.items() if s["axis"] == "zero"]
+    reset_sessions = [sid for sid, s in sessions.items() if s["reset_anchored"]]
+
+    # Sum phantoms for local sessions — what local/free API sessions would have cost at
+    # gateway rates. Used by the statusline renderer for "today: $X saved with free
+    # agents", which combines the phantoms + dispatch savings. 0.14.0: the per-DAY
+    # accrual (field 4 minus the field-5 baseline carried in), not the lifetime anchor —
+    # a multi-day free session must not re-donate its earlier days to today.
+    local_phantom_total = 0.0
+    # The SAME single pass also records the per-session split. It was always available here —
+    # each session's own ledger line carries its phantom in field 4, which is how the statusline
+    # prints `free api session saved $45.61` — it was simply summed away instead of exposed.
+    savings_by_session = {}
+    basis_factor = phantom_basis_factor()
+    for rec in per_session_day.values():
+        dp = rec.day_phantom
+        if rec.axis == "local" and dp is not None:
+            local_phantom_total += dp
+            if dp > 0:
+                # Scaled to the configured basis so every row in the block agrees with its total
+                savings_by_session[rec.session_id] = round(dp * basis_factor, 4)
+    savings_by_session = dict(sorted(savings_by_session.items(),
+                                     key=lambda kv: (-kv[1], kv[0])))
+    if fast:
+        savings = read_savings_fast()
+    else:
+        # A rolling window bounds the savings read too, or the block would show a 30-day
+        # phantom beside a 1-day dispatch figure and total two different windows as one number.
+        if ndays:
+            flag = "--since=" + min(days)
+        elif since:
+            flag = "--since=" + since
+        else:
+            flag = PERIODS.get(period, ("", "--today"))[1]
+        savings = read_savings(flag)
+
+    cap = cap_usd(auto_learn=not fast)
+    cap_source = "unset"
+    if cap is not None:
+        if os.environ.get("COST_TRACKER_CAP_USD") or os.environ.get("BUDGET_TALLY_CAP_USD"):
+            cap_source = "env override"
+        else:
+            cap_source = "learned from a budget-kill message"
+    try:
+        conn = connection()
+    except Exception:
+        conn = {"kind": "unknown", "fee": MARKUP_IDENTITY, "fee_source": "none (list price)",
+                "gap": None, "cap_kind": "none"}
+    markup = float(conn.get("fee") or MARKUP_IDENTITY)
+    markup_source = conn.get("fee_source") or "none (list price)"
+    gap = conn.get("gap") if os.environ.get("COST_TRACKER_APPLY_GAP", "1") != "0" else None
+    return {
+        "contract": CONTRACT,
+        "period": label,
+        "period_days_utc": sorted(days),
+        "today_utc": TODAY,
+        "membership": ("all sessions with a ledger or history entry on "
+                       + ("this UTC day" if len(days) == 1 else "these UTC days")),
+        "cloud_usd": round(cloud_total, 4),
+        "cap_usd": cap,
+        "cap_source": cap_source,
+        "pct_of_cap": (round(cloud_total / cap, 4) if cap else None),
+        # The gateway axis. ADDITIVE keys: `cloud_usd` and `pct_of_cap` keep their exact
+        # prior meaning (what Claude Code says the tokens cost, at list price), so every
+        # existing consumer is unaffected. At the identity factor these say 1.0 / the same
+        # figure / the same percentage, which is why a first-party user sees no change.
+        "markup": markup,
+        "markup_source": markup_source,
+        # Spend the ledger CANNOT see, estimated and kept on its own keys so `cloud_usd`
+        # keeps its exact meaning (Claude Code's own list-price figure). See estimate_unseen.
+        "estimated_uncovered_usd": est["uncovered_usd"],
+        "estimated_uncovered_sessions": est["uncovered_sessions"],
+        "estimated_classifier_usd": est["classifier_usd"],
+        "estimated_classifier_calls": est["classifier_calls"],
+        # Spend by processes outside any session, named by source (additive keys).
+        "estimated_outside_usd": est.get("outside_usd", 0.0),
+        "estimated_by_source": est.get("by_source", {}),
+        "estimate_source": est["source"],
+        "billed_usd": round((cloud_total + est["total_usd"]) * markup, 4),
+        "billed_pct_of_cap": (round((cloud_total + est["total_usd"]) * markup / cap, 4)
+                              if cap else None),
+        # The cap expressed in OUR units: the figure our own total may reach before the
+        # gateway refuses. With no markup this is just the cap.
+        "effective_cap_usd": (round(cap / markup, 4) if cap else None),
+        # FEE and GAP are separate axes (0.12.0). `markup` above is the FEE (published,
+        # deterministic). The GAP is measured and unexplained; `projected_usd` adds it so a
+        # warning can fire in time, and is always labelled as including an unknown.
+        "connection": conn.get("kind"),
+        "provider": conn.get("provider"),
+        "cap_kind": conn.get("cap_kind"),
+        "fee": markup,
+        "fee_source": markup_source,
+        "gap": conn.get("gap"),
+        "gap_applied": bool(gap),
+        "projected_usd": (round((cloud_total + est["total_usd"]) * markup * gap, 4) if gap else None),
+        "projected_pct_of_cap": (round((cloud_total + est["total_usd"]) * markup * gap / cap, 4)
+                                 if gap and cap else None),
+        "sessions": {sid: {"period_usd": round(s["period_usd"], 4),
+                           "lifetime_usd": round(s["lifetime_usd"], 4),
+                           "days": s["days"], "axis": s["axis"],
+                           "reset_anchored": s["reset_anchored"]}
+                     for sid, s in sorted(sessions.items())},
+        "local_sessions": sorted(local_sessions),
+        "zero_sessions": sorted(zero_sessions),
+        "reset_anchored_sessions": sorted(reset_sessions),
+        "local_saved_usd": (savings.get("saved_usd") if savings else None),
+        # Per-session DISPATCH savings (free-agents `report --json` by_session, 0.43.2). None when
+        # the ledger predates it or cannot be read — never an empty dict, because "no dispatches"
+        # and "not measured" are different claims.
+        "dispatch_by_session": ({sid: round(v * phantom_basis_factor(), 4)
+                                 for sid, v in
+                                 {r["session"]: float(r["saved_usd"])
+                                  for r in (savings.get("by_session") or [])
+                                  if isinstance(r, dict) and r.get("session") is not None
+                                  and r.get("saved_usd") is not None}.items()}
+                                if savings and savings.get("by_session") else None),
+        "local_events": (savings.get("events") if savings else None),
+        "local_phantom_usd": round(local_phantom_total, 4) if local_phantom_total > 0 else None,
+        # The savings axis re-priced on the configured basis, carried BESIDE the stored figure and
+        # never in place of it: the ledger line keeps its own meaning and the re-basing stays
+        # visible and reversible.
+        "local_saved_basis_usd": (round(savings.get("saved_usd") * phantom_basis_factor(), 4)
+                                  if savings and savings.get("saved_usd") is not None else None),
+        "local_phantom_basis_usd": (round(local_phantom_total * phantom_basis_factor(), 4)
+                                    if local_phantom_total > 0 else None),
+        # Per-session savings: {session_id: day phantom}. A free-lane session's phantom lives in
+        # ITS OWN ledger line (field 4), so this needs no statusline render of its own — the same
+        # source the statusline reads, exposed as data instead of summed away.
+        "savings_by_session": savings_by_session,
+        # Per-day series, ONLY when asked for. collect() is the statusline hot path and
+        # daily_totals() takes a second pass over the merged records, so this must never be
+        # computed for a render that will not show it.
+        "daily_series": (daily_totals(sorted(days)) if want_series and len(days) > 1 else None),
+        "phantom_basis": phantom_basis_name(),
+        "quarantined": quarantined,
+    }
+
+
+# --- calibration against the gateway's own figure -----------------------------
+# The daily total has been wrong in BOTH directions and was internally consistent every
+# time, so internal consistency is not evidence. A refusal states `Current cost` — the
+# cumulative FOR THE KEY in the current budget window, which is exactly the `today` axis.
+# That makes every refusal a free, external measurement of a day we can check ourselves
+# against, and there are 119 of them across 37 UTC days on the machine this was built on.
+#
+# Direction matters: a refusal is a LOWER BOUND (it names the cumulative at that instant,
+# and the day can overshoot — $43.17 is on record). So ours-below-gateway is a defect;
+# ours-above is not.
+
+STALE_REPEAT_WINDOW_MIN = 30     # reset propagation lag, measured at ~5-10 min
+CENT = 0.005                     # "the same figure" for two floats printed to the cent
+
+
+def _minutes_into_utc_day(ts):
+    """Minutes past 00:00 UTC, or None if the timestamp is unusable."""
+    try:
+        return int(ts[11:13]) * 60 + int(ts[14:16])
+    except (ValueError, IndexError, TypeError):
+        return None
+
+
+def gateway_totals(observations, stale_window_min=STALE_REPEAT_WINDOW_MIN):
+    """Per UTC day: the highest cumulative the GATEWAY itself stated, and how it got it.
+
+    Two things that would otherwise manufacture false findings:
+
+    REPEATS. Once blocked, every further request re-reports the same cached cumulative —
+    14 of them on 2026-08-24. They are one measurement, not fourteen.
+
+    THE POST-MIDNIGHT REPEAT. The budget window resets at 00:00 UTC but propagation lags
+    minutes, so a refusal just after midnight restates YESTERDAY's cumulative. Counted as
+    the new day's ground truth it invents a ~$40 reference for a day that has barely
+    spent anything — a phantom undercount on every such day, which is precisely the
+    finding this harness exists to report honestly. Confirmed instances: 2026-07-31T00:05
+    and 2026-08-21T00:00, both repeating the prior day to the cent. The rule keys on the
+    VALUE repeating as well as the clock, because a genuine post-reset kill the same night
+    states a DIFFERENT figure and is real data (2026-08-21T00:06 does exactly that).
+
+    Only the per-KEY scope is a personal daily reference; `Team=` carries the shared cap
+    (1400), and using it would call every day a $1400 undercount.
+    """
+    by_day = defaultdict(list)
+    for obs in observations:
+        if obs.get("scope") != "key":
+            continue
+        ts = obs.get("observed_at") or ""
+        if not _valid_date(ts[:10]):
+            continue
+        by_day[ts[:10]].append(obs)
+
+    out = {}
+    for day in sorted(by_day):
+        prev_cal_day = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+        ref = out.get(prev_cal_day, {}).get("gateway_usd")
+        fresh, stale = [], []
+        for obs in by_day[day]:
+            mins = _minutes_into_utc_day(obs.get("observed_at") or "")
+            if (ref is not None and mins is not None and mins <= stale_window_min
+                    and abs(obs["cost_at_kill_usd"] - ref) <= CENT):
+                stale.append(obs)
+            else:
+                fresh.append(obs)
+        if stale and prev_cal_day in out:
+            out[prev_cal_day]["stale_repeats"] += len(stale)
+        if fresh:
+            best = max(fresh, key=lambda o: o["cost_at_kill_usd"])
+            out[day] = {
+                "gateway_usd": best["cost_at_kill_usd"],
+                "cap_usd": best["cap_usd"],
+                "n_refusals": len(fresh),
+                "first_observed_at": min(o["observed_at"] or "" for o in fresh),
+                "last_observed_at": max(o["observed_at"] or "" for o in fresh),
+                "stale_repeats": 0,
+            }
+    return out
+
+
+HISTORY_TRIM_KEEP = int(os.environ.get("COST_TRACKER_HISTORY_TRIM_KEEP", "20000"))  # = capture wrapper
+
+
+def history_coverage():
+    """(first_day, last_day) the history log actually covers, or (None, None).
+
+    This is what makes a day CALIBRATABLE. Refusals reach back further than the log does
+    — on the machine this was built on, back to 2026-07-26 against a log starting
+    2026-08-18 — and for those earlier days our total is not a small figure, it is NO
+    figure. Reporting them as maximal undercounts would inflate the headline from $290 to
+    $701 and aim the investigation at an attribution bug that cannot exist where there is
+    nothing to attribute.
+
+    Keyed on the log's window rather than on "we found no records", because inside the
+    window an empty day is the real structural blindness and must still be reported.
+    Note that pre-coverage ledger FILES do survive on disk as 2-field `<day> 0` records,
+    so a day can look populated while carrying no spend — coverage, not record count, is
+    the honest discriminator.
+    """
+    first = last = None
+    n_lines = 0
+    try:
+        f = open(HISTORY_PATH, "r", errors="ignore")
+    except OSError:
+        return None, None
+    with f:
+        for line in f:
+            n_lines += 1
+            parts = line.split()
+            if len(parts) < 5 or not _valid_date(parts[2]):
+                continue
+            day = parts[2]
+            if first is None or day < first:
+                first = day
+            if last is None or day > last:
+                last = day
+    # A TRIMMED log's oldest day is a fragment. cost-ledger-capture.sh keeps only the newest
+    # HISTORY_TRIM_KEEP lines once the log passes 25000, and it never shrinks below that, so a log
+    # at or above that size HAS been trimmed and its first day was cut at an arbitrary row:
+    # 2026-10-01 began at 14:25Z and read $9.13 against the gateway's $40.06 (a "x4.18 gap" that
+    # blocked learning the real one). An untrimmed log's first day stays covered, as before.
+    if first and first != last and n_lines >= HISTORY_TRIM_KEEP:
+        first = (date.fromisoformat(first) + timedelta(days=1)).isoformat()
+    return first, last
+
+
+def daily_totals(days):
+    """OUR figure for each of `days`: the cloud spend attributable to that UTC day.
+
+    Deliberately built from _merged_records, the same assembly collect() reports from —
+    a calibration harness that computes the total a second way would only ever prove the
+    two implementations agree.
+    """
+    merged, _quarantined = _merged_records()
+    out = {d: {"ours_usd": 0.0, "sessions_counted": 0, "reset_anchored_sessions": 0,
+               "estimated_usd": 0.0, "uncovered_usd": 0.0, "classifier_usd": 0.0,
+               "phantom_usd": 0.0}
+           for d in days}
+    covered = defaultdict(set)
+    for (sid, day), rec in merged.items():
+        row = out.get(day)
+        if row is None:
+            continue
+        covered[day].add(sid)
+        row["ours_usd"] += rec.day_usd
+        dp = rec.day_phantom
+        if rec.axis == "local" and dp is not None:
+            row["phantom_usd"] += dp
+        if rec.valid and rec.axis == "cloud":
+            row["sessions_counted"] += 1
+        if rec.reset_anchored:
+            row["reset_anchored_sessions"] += 1
+    for day, row in out.items():
+        row["ours_usd"] = round(row["ours_usd"], 4)
+        row["phantom_usd"] = round(row["phantom_usd"], 4)
+        # Same estimate collect() adds to billed_usd, so the markup learned from these rows
+        # is the markup ON TOP of the estimate — not one that already absorbed it.
+        e = estimate_unseen([day], covered[day])
+        row["estimated_usd"] = e["total_usd"]
+        row["uncovered_usd"] = e["uncovered_usd"]
+        row["classifier_usd"] = e["classifier_usd"]
+    return out
+
+
+# Stale-estimate detector. Anthropic is moving auto-mode classifier checks server-side at NO
+# charge (code.claude.com/docs/en/auto-mode-classifier-billing); a session only gets that once
+# its gateway passes `safeguards` / `safeguard_results` through. When that happens here, the
+# per-call classifier estimate starts charging for calls that are now free — and nothing in a
+# transcript says so. The gateway's own refusal figure does: ledger + estimates then runs ABOVE
+# it on day after day. Two such days beyond the fit's normal error are the signal.
+CLASSIFIER_STALE_MARGIN_USD = 3.0
+CLASSIFIER_STALE_MIN_DAYS = 2
+CLASSIFIER_STALE_WINDOW = 5
+
+
+def classifier_estimate_check(rows):
+    """Over the most recent calibrated days that carry a classifier estimate, count the ones
+    where our total exceeds the gateway by more than the margin AND the estimate alone is at
+    least that excess (so the estimate is what put us over — a ledger overcount is not this)."""
+    recent = [r for r in rows if r.get("verdict") != "no-data" and r.get("classifier_usd")]
+    recent = recent[-CLASSIFIER_STALE_WINDOW:]
+    over = [r["day"] for r in recent
+            if r["delta_usd"] > CLASSIFIER_STALE_MARGIN_USD
+            and r["classifier_usd"] >= r["delta_usd"]
+            and r.get("ledger_usd", 0.0) + r.get("uncovered_usd", 0.0) <= r["gateway_usd"]]
+    return {"days_checked": len(recent), "overestimate_days": over,
+            "margin_usd": CLASSIFIER_STALE_MARGIN_USD,
+            "stale": len(over) >= CLASSIFIER_STALE_MIN_DAYS}
+
+
+def calibrate(max_files=500, since_days=365, tolerance=0.01):
+    """Compare our daily total against the gateway's stated cumulative, day by day."""
+    found = find_refusals(max_files=max_files, since_days=since_days)
+    gw = gateway_totals(found["observations"])
+    ours = daily_totals(sorted(gw))
+    cov_first, cov_last = history_coverage()
+    rows = []
+    # Compare against list x FEE (0.12.0): the published fee is not an error, so it is applied
+    # before the verdict. What remains below the gateway is the gap, the only unexplained part.
+    fee = markup_factor()
+    for day in sorted(gw):
+        g, o = gw[day], ours[day]
+        # Compare the gateway against everything we attribute to the day: the ledger plus the
+        # estimated spend it cannot see (SDK sessions, classifier). `ledger_usd` keeps the
+        # ledger-only figure visible.
+        total = round(o["ours_usd"] + o["estimated_usd"], 4)
+        delta = round(total * fee - g["gateway_usd"], 4)
+        covered = cov_first is not None and day >= cov_first
+        if not covered:
+            verdict = "no-data"
+        elif delta < -tolerance:
+            # A refusal is a lower bound, so only ours-BELOW-gateway is a defect.
+            verdict = "undercount"
+        else:
+            verdict = "ok"
+        rows.append({
+            "day": day,
+            "ours_usd": total,
+            "ledger_usd": o["ours_usd"],
+            "estimated_usd": o["estimated_usd"],
+            "uncovered_usd": o["uncovered_usd"],
+            "classifier_usd": o["classifier_usd"],
+            "gateway_usd": round(g["gateway_usd"], 4),
+            "delta_usd": delta,
+            "covered": covered,
+            "verdict": verdict,
+            # Our share of a figure the day PROVABLY reached. Once the gateway refuses,
+            # the key is blocked for the rest of the budget window — and the window is the
+            # UTC day — so the stated cumulative is approximately the day's FINAL total,
+            # not merely a floor. The shortfall is therefore the whole error, and a ratio
+            # that holds steady across days with very different session mixes is what
+            # distinguishes a systematic missing component from a few absent sessions.
+            "ours_pct_of_gateway": (round(100.0 * total * fee / g["gateway_usd"], 2)
+                                    if g["gateway_usd"] else None),
+            "n_refusals": g["n_refusals"],
+            "stale_repeats": g["stale_repeats"],
+            "cap_usd": g["cap_usd"],
+            "sessions_counted": o["sessions_counted"],
+            "reset_anchored_sessions": o["reset_anchored_sessions"],
+            "last_refusal_at": g["last_observed_at"],
+        })
+    under = [r for r in rows if r["verdict"] == "undercount"]
+    no_data = [r for r in rows if r["verdict"] == "no-data"]
+    worst = min(under, key=lambda r: r["delta_usd"]) if under else None
+    # MEDIAN, not mean: one no-data-adjacent outlier should not move the headline. Only
+    # calibrated days count — a day with no basis would drag the ratio toward 0% and make
+    # a systematic one-fifth shortfall look like a catastrophic one.
+    ratios = sorted(r["ours_pct_of_gateway"] for r in rows
+                    if r["verdict"] != "no-data" and r["ours_pct_of_gateway"] is not None)
+    if ratios:
+        mid = len(ratios) // 2
+        median_pct = (ratios[mid] if len(ratios) % 2
+                      else round((ratios[mid - 1] + ratios[mid]) / 2, 2))
+    else:
+        median_pct = None
+    out = {
+        "contract": CONTRACT,
+        "reference": "the gateway's own `Current cost` at a budget refusal (a LOWER bound)",
+        "tolerance_usd": tolerance,
+        "ledger_covers_from": cov_first,
+        "ledger_covers_to": cov_last,
+        "days_with_a_reference": len(rows),
+        "days_calibrated": len(rows) - len(no_data),
+        "no_data_days": len(no_data),
+        "median_pct_of_gateway": median_pct,
+        "undercount_days": len(under),
+        "worst_day": worst["day"] if worst else None,
+        "worst_delta_usd": worst["delta_usd"] if worst else None,
+        "unaccounted_usd": round(-sum(r["delta_usd"] for r in under), 4),
+        "files_scanned": found["files_scanned"],
+        "days": rows,
+    }
+    fee = markup_factor()
+    out["fee"] = fee
+    out["fee_source"] = connection().get("fee_source")
+    for r in rows:
+        r["ours_with_fee_usd"] = round(r["ours_usd"] * fee, 4)
+        r["gap_ratio"] = (round(r["gateway_usd"] / (r["ours_usd"] * fee), 4)
+                          if r["ours_usd"] and r["verdict"] != "no-data" else None)
+    out["measured_markup"] = measure_markup(out)   # the GAP (name kept for JSON consumers)
+    out["measured_gap"] = out["measured_markup"]
+    out["classifier_estimate_check"] = classifier_estimate_check(rows)
+    return out
+
+
+# --- rendering ----------------------------------------------------------------
+
+BAR_WIDTH = 32          # a bar that fits an 80-column terminal beside its label
+BAR_FULL = "█"          # █
+BAR_FILL = "█" * BAR_WIDTH
+
+
+def _bar(frac):
+    """A proportional bar plus its percentage. The percentage is printed separately in the row,
+    so the bar never has to carry a number inside itself — and `frac` is clamped, because a bar
+    longer than the track is a lie about proportion."""
+    frac = 0.0 if frac is None or frac < 0 else (1.0 if frac > 1 else frac)
+    n = int(round(frac * BAR_WIDTH))
+    return BAR_FILL[:n] + "·" * (BAR_WIDTH - n)
+
+
+def _bar_row(label, value, total, colour, width=22):
+    """One labelled bar. The label and the number are ALWAYS printed: identity is never
+    colour-alone (a colourblind or monochrome terminal loses hue, never the row)."""
+    frac = (value / total) if total else 0.0
+    return (colour + _bar(frac) + "\033[0m"
+            + f"  {label:<{width}} {value:>8.2f}  {frac * 100:>5.1f}%")
+
+
+def render_breakdown(data):
+    """The visual section: what the period's spend is made of, and what the free lanes saved.
+
+    Two blocks, one axis each — never a dual axis. SPEND categories sum to the same total the
+    table above prints (the reconciliation is the invariant this view exists to prove, and it is
+    tested). SAVINGS is a DIFFERENT axis and is never added to spend: saved is avoided cost, and
+    summing the two produces a number that means nothing.
+    """
+    spend = [
+        ("cloud sessions", data.get("cloud_usd") or 0.0, "\033[36m"),        # cyan
+        ("no-ledger (SDK/headless)", data.get("estimated_uncovered_usd") or 0.0, "\033[33m"),  # yellow
+        ("classifier (auto-mode)", data.get("estimated_classifier_usd") or 0.0, "\033[35m"),   # magenta
+        ("outside-process spend", data.get("estimated_outside_usd") or 0.0, "\033[2m"),        # dim
+    ]
+    # Summed from the SAME three components the rows above show, so the total the bars reconcile
+    # to is provably those rows — `collect()` exposes no pre-summed estimate total, and inventing
+    # one here would let the two drift apart silently.
+    est_total = sum(v for _, v, _ in spend[1:])
+    spend_total = (data.get("cloud_usd") or 0.0) + est_total
+
+    lines = [f"breakdown — {data.get('period', 'period')} "
+             f"(cloud spend, and savings on the free lanes)",
+             ""]
+    lines.append("  cloud spend")
+    for label, value, colour in spend:
+        if value:
+            lines.append("  " + _bar_row(label, value, spend_total, colour))
+    lines.append("  " + "-" * (BAR_WIDTH + 2 + 22 + 8 + 12))
+    lines.append("  " + " " * BAR_WIDTH + "  "
+                 + f"{'TOTAL (cloud + est.)':<22} {spend_total:>8.2f}  {100.0:>5.1f}%")
+    lines.append("  (the table above prints cloud sessions alone; the estimated rows follow it)")
+
+    # TWO kinds of saving, deliberately separate (user request 2026-10-23): a whole SESSION run
+    # on a free lane, and a DISPATCH issued from a paid session. They come from different
+    # ledgers and mean different things, so they get their own rows rather than one blended
+    # figure — and their sum is what the statusline reports.
+    phantom = data.get("local_phantom_basis_usd")
+    if phantom is None:
+        phantom = data.get("local_phantom_usd") or 0.0
+    dispatched = data.get("local_saved_basis_usd") or 0.0
+    saved_total = phantom + dispatched
+    if saved_total:
+        lines.append("")
+        lines.append(f"  saved on free lanes — {data.get('phantom_basis', 'as recorded')}")
+        # One row per free-lane session, biggest first: which session saved how much. The split
+        # comes from each session's own ledger line, so it does not depend on that session having
+        # rendered a statusline — the statusline reads the same field this reads.
+        by_session = data.get("savings_by_session") or {}
+        for sid, value in by_session.items():
+            lines.append("  " + _bar_row(sid[:12], value, saved_total, "\033[32m"))
+        if not by_session:
+            lines.append("  " + _bar_row("free-lane sessions (phantom)", phantom, saved_total,
+                                         "\033[32m"))
+        # Per-session DISPATCH savings, when the ledger provides the split (free-agents 0.43.2).
+        # Absent on an older ledger, in which case the aggregate above is the honest whole story —
+        # and an empty split must not be drawn as "no dispatches", so None falls back and {} does not.
+        dispatch_by_session = data.get("dispatch_by_session")
+        if dispatch_by_session:
+            for sid, value in sorted(dispatch_by_session.items(), key=lambda kv: (-kv[1], kv[0])):
+                lines.append("  " + _bar_row(f"dispatch {sid[:12]}", value, saved_total,
+                                             "\033[36m"))
+        else:
+            lines.append("  " + _bar_row("dispatches from paid sessions", dispatched, saved_total,
+                                         "\033[36m"))
+        lines.append("  " + " " * BAR_WIDTH + "  "
+                     + f"{'TOTAL saved':<22} {saved_total:>8.2f}  {100.0:>5.1f}%")
+        # Whether to quote the stored figure is decided FROM THE DATA, not from the live
+        # environment: a renderer whose output changes with env the caller didn't pass is not
+        # testable, and this one could not be until the decision moved here.
+        stored_phantom = data.get("local_phantom_usd")
+        if stored_phantom is not None and abs(phantom - stored_phantom) > 1e-9:
+            # local_phantom_usd is ALREADY the stored (Opus-basis) figure — no conversion.
+            # Dividing it by the factor double-converted it and printed 2x the recorded number.
+            stored = stored_phantom + (data.get("local_saved_usd") or 0.0)
+            applied = phantom / stored_phantom if stored_phantom else 1.0
+            suffix = "" if abs(applied - PHANTOM_BASIS_SONNET) < 1e-9 \
+                else f" — this view applies ×{applied:g}"
+            lines.append(f"  (recorded on the Opus 5.5 basis: ${stored:.2f}{suffix})")
+    lines.append("")
+    lines.append("  `cost-tracker report --json` prints every figure in this section as data.")
+    # The per-day trend, only when the window actually spans days. On a single-day report it
+    # would restate the total and earn its lines by saying nothing new.
+    if data.get("daily_series") and len(data["daily_series"]) > 1:
+        lines.append("")
+        lines.append(render_trend(data))
+    return "\n".join(lines)
+
+
+TREND_WIDTH = 26          # narrower than the category bars: a date label takes its own space
+
+
+def render_trend(data):
+    """One row per day over the window: cloud spend, its percentage of the cap, and what the
+    free lanes saved that day.
+
+    The bars are scaled to the CAP, not to the busiest day — the question a rolling window
+    answers is "how close did each day run to the ceiling", and scaling to the max day would
+    make a uniformly bad month look comfortable. Days with no data are shown as an explicit
+    zero rather than skipped, because a gap in the series is information.
+    """
+    series = data.get("daily_series") or {}
+    cap = data.get("cap_usd")
+    markup = data.get("markup") or MARKUP_IDENTITY
+    lines = [f"trend — {data.get('period', 'period')} "
+             f"({len(series)} UTC day(s), oldest first)", ""]
+    if not series:
+        lines.append("  (no daily series for this window)")
+        return "\n".join(lines)
+    # The scale: the cap when there is one, else the largest billed day. Stated in the header so
+    # the bar lengths are readable rather than assumed.
+    billed_max = max((r["ours_usd"] + r.get("estimated_usd", 0.0)) * markup for r in series.values())
+    scale = cap if cap else (billed_max or 1.0)
+    lines.append(f"  bar length is scaled to ${scale:.2f}"
+                 + ("" if cap else " (the highest day — no cap is known)"))
+    for day in sorted(series):
+        row = series[day]
+        billed = (row["ours_usd"] + row.get("estimated_usd", 0.0)) * markup
+        frac = billed / scale if scale else 0.0
+        # "of cap" only when there IS a cap: with none, the phrase is a dangling qualifier
+        # ("40.23 — of cap") that reads as a missing figure rather than an absent denominator.
+        of_cap = f"  {billed / cap * 100:5.1f}% of cap" if cap else ""
+        saved = row.get("phantom_usd") or 0.0
+        lines.append("  " + _bar(frac) + f"  {day}  {billed:>7.2f}{of_cap}"
+                     + (f"  saved {('$%.2f' % saved):>10}" if saved else ""))
+    lines.append("")
+    total = sum((r["ours_usd"] + r.get("estimated_usd", 0.0)) * markup for r in series.values())
+    days_counted = sum(1 for r in series.values() if r["ours_usd"] or r.get("estimated_usd"))
+    lines.append(f"  {days_counted} of {len(series)} day(s) carry spend; billed total "
+                 f"${total:.2f}")
+    return "\n".join(lines)
+
+
+def render_table(data, short_ids=True):
+    """The per-session breakdown table (D16). The table IS the audit of the
+    label: a reader can add the Period column themselves and see exactly which
+    sessions the total is made of, instead of trusting a prose scope."""
+    lines = []
+    period = data["period"]
+    lines.append(f"cost-tracker — period: {period} (UTC {data['period_days_utc'][0]}"
+                 + (f" … {data['period_days_utc'][-1]}" if len(data['period_days_utc']) > 1 else "")
+                 + ")")
+    lines.append(f"membership: {data['membership']}")
+    lines.append("")
+    idw = 12 if short_ids else 36
+    head = f"{'session':<{idw}}  {'axis':<6}  {period + ' $':>14}  {'session lifetime $':>18}"
+    lines.append(head)
+    lines.append("-" * len(head))
+    if not data["sessions"]:
+        lines.append("(no sessions in this period)")
+    for sid, s in data["sessions"].items():
+        sid_disp = sid[:idw] if short_ids else sid
+        mark = "*" if s.get("reset_anchored") else " "
+        lines.append(f"{sid_disp:<{idw}}  {s['axis']:<6}  {s['period_usd']:>13.2f}{mark}  "
+                     f"{s['lifetime_usd']:>18.2f}")
+    lines.append("-" * len(head))
+    # The total fills ONLY the period column. A "total lifetime" would be the sum
+    # of overlapping cumulatives across different sessions — a number with no
+    # meaning, and exactly the kind of figure this tool refuses to print.
+    lines.append(f"{'TOTAL cloud':<{idw}}  {'':<6}  {data['cloud_usd']:>14.2f}  "
+                 f"{'—':>18}")
+    # Estimated gateway spend the ledger cannot see. Printed as its own rows, never folded into
+    # TOTAL cloud, because TOTAL cloud is Claude Code's own figure and these are ours.
+    if data.get("estimated_uncovered_usd"):
+        lines.append(f"{'+ no-ledger':<{idw}}  {'est':<6}  "
+                     f"{data['estimated_uncovered_usd']:>14.2f}  "
+                     f"{'(' + str(len(data['estimated_uncovered_sessions'])) + ' SDK/headless)':>18}")
+    if data.get("estimated_classifier_usd"):
+        lines.append(f"{'+ classifier':<{idw}}  {'est':<6}  "
+                     f"{data['estimated_classifier_usd']:>14.2f}  "
+                     f"{'(' + str(data['estimated_classifier_calls']) + ' auto-mode calls)':>18}")
+    cap = data["cap_usd"]
+    markup = data.get("markup") or MARKUP_IDENTITY
+    if markup != MARKUP_IDENTITY:
+        # A MEASURED markup means the two axes differ, so the percentage that matters is
+        # the gateway's: the cap is enforced on what the gateway bills, not on list price.
+        # Reporting "75% used" off list price while the refusal is 6% away is the reassuring
+        # wrong number. So the billed row leads and carries the percentage, and the cap is
+        # printed as the gateway's own figure — the same one its refusal message quotes.
+        # The list-price TOTAL above is NOT removed: it is the canonical recorded value and
+        # the only one Claude Code itself asserts, so it stays visible and labelled.
+        lines.append(f"{'billed (gw)':<{idw}}  {'':<6}  {data['billed_usd']:>14.2f}  "
+                     + (f"{'(' + format(data['billed_pct_of_cap'] * 100, '.0f') + '% of cap)':>18}"
+                        if cap else f"{'(×' + format(markup, '.3f') + ')':>18}"))
+        if cap:
+            lines.append(f"{'cap (gw)':<{idw}}  {'':<6}  {cap:>14.2f}  "
+                         f"{'(×' + format(markup, '.3f') + ' applied)':>18}")
+            lines.append(f"{'eff. cap':<{idw}}  {'':<6}  "
+                         f"{data['effective_cap_usd']:>14.2f}  "
+                         f"{'(= cap in list-price $)':>18}")
+    elif cap:
+        # No markup: one axis, so no qualifier is needed or honest.
+        lines.append(f"{'cap':<{idw}}  {'':<6}  {cap:>14.2f}  "
+                     f"{'(' + format(data['pct_of_cap'] * 100, '.0f') + '% used)':>18}")
+    if markup != MARKUP_IDENTITY:
+        lines.append("")
+        lines.append(f"  TOTAL cloud is list price — what Claude Code says the tokens cost, "
+                     f"and it is right.")
+        lines.append(f"  It is the canonical recorded figure; the ×{markup:.3f} markup "
+                     f"({data['markup_source']}) is stored")
+        lines.append(f"  separately and applied on top, never baked into what is recorded.")
+        if cap:
+            lines.append(f"  Read the pair you are actually measured on: billed "
+                         f"${data['billed_usd']:.2f} against the cap's ${cap:.0f} — the "
+                         f"figure the")
+            lines.append(f"  gateway's own refusal message quotes. `eff. cap` is that same "
+                         f"cap expressed back in")
+            lines.append(f"  list-price dollars (${data['effective_cap_usd']:.0f}), which is "
+                         f"where TOTAL cloud runs out.")
+        else:
+            lines.append(f"  With no cap known, the billed figure is what the gateway "
+                         f"charges; there is no denominator to print.")
+    if data["local_saved_usd"] is not None:
+        lines.append(f"{'local saved':<{idw}}  {'local':<6}  "
+                     f"{data['local_saved_usd']:>14.2f}  "
+                     f"{'(' + str(data['local_events']) + ' dispatches)':>18}")
+    else:
+        lines.append("local saved   local   not measured (savings ledger unavailable)")
+    if data.get("local_phantom_usd") is not None:
+        lines.append(f"{'local phantom':<{idw}}  {'local':<6}  "
+                     f"{data['local_phantom_usd']:>14.2f}  "
+                     f"{'(today accrual)':>18}")
+    if data["local_sessions"]:
+        lines.append(f"note: {len(data['local_sessions'])} local session(s) contribute $0 "
+                     "to cloud spend by design")
+    if data.get("zero_sessions"):
+        lines.append(f"note: {len(data['zero_sessions'])} session(s) reported $0 with a "
+                     "carried-in baseline — either a local render or a just-resumed "
+                     "counter; records before 2026-08-29 cannot tell those apart, and "
+                     "both are $0")
+    if data.get("reset_anchored_sessions"):
+        lines.append(f"* {len(data['reset_anchored_sessions'])} session(s) RESET their cost "
+                     "counter mid-period (a resume), so the baseline carried in describes a "
+                     "counter that no longer exists. Those figures are anchored at the reset "
+                     "and are FLOORS: any spend earlier the same day, before the reset, is "
+                     "not recoverable from the ledger. Subtracting the stale baseline instead "
+                     "would report the day as free — `cost-tracker doctor` explains.")
+    if data["quarantined"]:
+        sids = {q["session_id"] or _sid_from_raw(q["raw"]) for q in data["quarantined"]}
+        lines.append(f"⚠ {len(data['quarantined'])} record(s) across {len(sids)} session(s) "
+                     "QUARANTINED as structurally invalid — run `cost-tracker doctor`")
+    return "\n".join(lines)
+
+
+def render_statusline(data):
+    """The frozen one-line statusline segment.
+
+      with a cap:    today: $37.35/$40
+      without a cap: today: $12.40
+      with savings:  today: cloud $37.35/$40 · local saved $4.80
+
+    The axis word is part of the string, not decoration: this segment coexists
+    with the renderer's own session-lifetime "$<cost>", and two unlabelled
+    dollar figures on one line is the mislabel trap all over again.
+
+    BOTH figures are shown on the SAME axis, and when a markup is known that axis is
+    the GATEWAY's — because the cap the user is measured against is the gateway's $40,
+    and that is the number its refusal message quotes. The earlier form moved the
+    denominator instead ("$30.12/$32 eff (×1.24 gw)"), which was arithmetically
+    equivalent but read as a different, unexplained cap: the user sees $40 in the
+    refusal and $32 here. Showing a deflated cap to keep the numerator at list price
+    optimised for the wrong reader. The full four-figure breakdown (list price, billed,
+    cap, effective cap) stays in `cost-tracker report`, which has room to label axes;
+    this segment has one line and must therefore pick ONE axis.
+
+    0.13.0 dropped the "gw" suffix and the "(~$X +gap)" aside (user decision 2026-10-13):
+    the numerator is the projection when a gap is calibrated, else list x fee, and the
+    "/$cap" denominator already says which axis it is on. The breakdown moved to the
+    budget-tally warning.
+    """
+    cap = data["cap_usd"]
+    label = "today" if len(data["period_days_utc"]) == 1 else data["period"]
+    # "cloud" is a CONTRAST word: it exists to separate cloud spend from the local-inference
+    # savings figure. With no local figure beside it there is nothing to contrast with, so it
+    # is noise on a line that has no room for any — and a cloud session shows no savings.
+    # The moment a savings figure IS present the word is load-bearing again and comes back,
+    # which is the axis rule holding rather than an exception to it.
+    # A ZERO savings figure is not a finding — it is the absence of one, and on this line it
+    # costs the same columns as a real number while saying nothing. So the statusline treats
+    # "nothing was offloaded" and "no ledger at all" identically: both omit it. `report` still
+    # prints the zero row, because a table has room to say "0 dispatches" and that is
+    # meaningful there. Suppressing it in one surface is not hiding state: the surface that
+    # exists to enumerate is unchanged.
+    saved = data["local_saved_usd"]
+    if not saved:
+        saved = None
+    what = "cloud " if saved is not None else ""
+    if data.get("connection") == "subscription":
+        # A subscription is metered in percent windows, never dollars; the dollar figure is an
+        # API-equivalent estimate that "isn't relevant for billing" (code.claude.com/docs/en/
+        # costs). The renderer prints the 5h/7d windows itself, so this segment only labels
+        # the dollar figure honestly.
+        seg = f"{label}: {what}≈${data['cloud_usd']:.2f} api-equiv"
+    elif cap:
+        # ONE figure against the gateway's cap: the best estimate of what the gateway's own
+        # `Current cost` reads. With a calibrated gap that is the projection (list x fee x gap),
+        # which matched the refusal to the cent on 2026-10-12 ($40.07 shown, $40.08 quoted)
+        # while list x fee read $38.26. Showing both on one line made the user do the
+        # comparison; the fee/gap breakdown lives in the budget-tally warning and `report`.
+        shown = data.get("projected_usd")
+        if shown is None:
+            shown = data["billed_usd"]
+        seg = f"{label}: {what}${shown:.2f}/${cap:.0f}"
+    else:
+        seg = f"{label}: {what}${data['billed_usd']:.2f}"
+    if saved is not None:
+        seg += f" · local saved ${saved:.2f}"
+    return seg
+
+
+def render_cap(cfg, resolved, measured_today=None):
+    """Show the cap AND where it came from. A cap with no provenance is a number
+    someone will later have to re-derive; this prints the refusal it was read from."""
+    lines = []
+    env_override = None
+    for var in ("COST_TRACKER_CAP_USD", "BUDGET_TALLY_CAP_USD"):
+        if os.environ.get(var):
+            env_override = var
+            break
+    if resolved is None:
+        lines.append("cap: UNSET — spend is printed with no denominator, never an invented one.")
+    else:
+        lines.append(f"cap: ${resolved:.2f} / day")
+    if env_override:
+        lines.append(f"  source: ${os.environ[env_override]} from ${env_override} "
+                     "(an explicit override always wins)")
+    key = (cfg or {}).get("key")
+    if key:
+        lines.append("  learned from the gateway's own refusal:")
+        lines.append(f"    Max budget:  ${key['cap_usd']:.2f}")
+        lines.append(f"    at a cost of ${key['cost_at_kill_usd']:.2f} when it refused")
+        lines.append(f"    scope        {key['scope']}={key['label']} {key['key_hint']}")
+        lines.append(f"    observed     {key['observed_at'] or 'unknown'}")
+        lines.append(f"    transcript   {key['source_file']}")
+    elif cfg:
+        lines.append(f"  no budget-kill message found in {cfg.get('files_scanned', 0)} "
+                     "transcript(s) — nothing to learn from yet, which is a good sign.")
+        lines.append(f"  last looked:   {cfg.get('learned_at', 'never')}")
+    else:
+        lines.append("  never looked. Run `cost-tracker cap --learn`.")
+    team = (cfg or {}).get("team")
+    if team:
+        lines.append(f"  (also seen: the SHARED team cap ${team['cap_usd']:.2f} for "
+                     f"{team['label']} — informational only, never used as a daily "
+                     "denominator)")
+    if resolved and measured_today is not None and measured_today > resolved:
+        lines.append("")
+        lines.append(f"  ⚠ today's measured spend (${measured_today:.2f}) EXCEEDS this cap "
+                     "without a refusal.")
+        lines.append("    Either the cap was raised, or the measurement is wrong. Re-read it "
+                     "with `cost-tracker cap --learn`;")
+        lines.append("    the newest refusal wins, so a raised cap is picked up the first time "
+                     "the new one is hit.")
+    return "\n".join(lines)
+
+
+def render_calibrate(data):
+    """One row per day we have external evidence for. Days without a refusal are ABSENT
+    rather than 'ok': no reference means no opinion, and printing a pass there would
+    dress the absence of evidence up as agreement."""
+    cov = (f"{data['ledger_covers_from']} … {data['ledger_covers_to']}"
+           if data["ledger_covers_from"] else "nothing (no history log)")
+    lines = ["cost-tracker — calibration against the gateway's own figure",
+             f"  reference: {data['reference']}",
+             f"  scanned {data['files_scanned']} transcript(s); "
+             f"{data['days_with_a_reference']} UTC day(s) with a refusal to check against",
+             f"  our ledger covers: {cov}"
+             + (f" — {data['no_data_days']} earlier day(s) have a reference but NO basis "
+                f"on our side" if data["no_data_days"] else ""),
+             ""]
+    if not data["days"]:
+        lines.append("  no refusal on record — nothing to calibrate against.")
+        lines.append("  INCONCLUSIVE, not a pass: this machine has no external reference")
+        lines.append("  for any day, so the daily total is unverified either way.")
+        return "\n".join(lines)
+
+    if data.get("fee") and data["fee"] != MARKUP_IDENTITY:
+        lines.append(f"  ours = list price × fee ×{data['fee']:.4f} ({data.get('fee_source')})")
+    lines.append(f"  {'day':<12}{'ours':>10}{'gateway':>11}{'delta':>10}  "
+                 f"{'sess':>4} {'kills':>5}  verdict")
+    lines.append("  " + "-" * 62)
+    for r in data["days"]:
+        flag = {"undercount": "UNDERCOUNT", "no-data": "no data (pre-ledger)"}.get(
+            r["verdict"], "ok")
+        note = ""
+        if r["reset_anchored_sessions"]:
+            note = f"  (floor: {r['reset_anchored_sessions']} resumed)"
+        # A no-data day has no delta worth printing: the zero is an absent source, not a
+        # measurement, and a printed -40.09 reads as a finding.
+        ours = ("     —" if r["verdict"] == "no-data"
+                else f"{r['ours_usd'] * (data.get('fee') or 1.0):>10.2f}")
+        delta = "        —" if r["verdict"] == "no-data" else f"{r['delta_usd']:>+10.2f}"
+        lines.append(f"  {r['day']:<12}{ours:>10}{r['gateway_usd']:>11.2f}"
+                     f"{delta:>10}  {r['sessions_counted']:>4} "
+                     f"{r['n_refusals']:>5}  {flag}{note}")
+    lines.append("  " + "-" * 62)
+    if data["undercount_days"]:
+        lines.append(f"  {data['undercount_days']} of {data['days_calibrated']} calibrated "
+                     f"UNDERCOUNT — ${data['unaccounted_usd']:.2f} the gateway charged beyond "
+                     f"list × fee.")
+        lines.append(f"  worst: {data['worst_day']} at ${data['worst_delta_usd']:.2f}.")
+        if data["median_pct_of_gateway"] is not None:
+            lines.append(f"  we report a median {data['median_pct_of_gateway']:.1f}% of "
+                         f"what the gateway charged.")
+            lines.append("  A refusal BLOCKS the key for the rest of the window, so that "
+                         "figure is very nearly")
+            lines.append("  the day's FINAL total — the gap is the error itself, not a "
+                         "bound on it. A ratio")
+            lines.append("  this steady across different session mixes means a systematic "
+                         "missing component,")
+            lines.append("  not a few sessions that got away.")
+        lines.append("  Do NOT close the gap by scaling or clamping OUR figure: every "
+                     "previous version of")
+        lines.append("  this bug agreed with itself, and only this external reference "
+                     "catches it.")
+    else:
+        lines.append(f"  every calibrated day agrees with the gateway "
+                     f"(tolerance ${data['tolerance_usd']:.2f}).")
+
+    chk = data.get("classifier_estimate_check") or {}
+    if chk.get("stale"):
+        lines.append("")
+        lines.append(f"  ⚠ CLASSIFIER ESTIMATE LOOKS STALE: on {len(chk['overestimate_days'])} of the "
+                     f"last {chk['days_checked']} calibrated day(s)")
+        lines.append(f"    ({', '.join(chk['overestimate_days'])}) our total ran more than "
+                     f"${chk['margin_usd']:.0f} ABOVE the gateway, by")
+        lines.append("    no more than the classifier estimate. Classifier calls may now be free")
+        lines.append("    (server-side review). Check `/status` → \"Auto mode server\" in a gateway")
+        lines.append("    session; if it reads Enabled, set COST_TRACKER_CLASSIFIER_USD_PER_CALL=0.")
+    # The resolution of the long-running "20% undercount": it was never OUR arithmetic.
+    m = data.get("measured_markup") or {}
+    if m.get("n_days"):
+        lines.append("")
+        if out_fee := data.get("fee"):
+            if out_fee != MARKUP_IDENTITY:
+                lines.append(f"  fee applied first: ×{out_fee:.4f} ({data.get('fee_source')})")
+        lines.append(f"  measured gap beyond the fee: the gateway billed a median "
+                     f"×{m['factor']:.4f} of list × fee")
+        lines.append(f"    price over {m['n_days']} calibrated day(s) "
+                     f"(range ×{m['ratio_min']:.3f}-×{m['ratio_max']:.3f}"
+                     + (f", CV {m['cv']:.3f}" if m.get("cv") is not None else "") + ").")
+        if m.get("reason"):
+            lines.append(f"    NOT learned: {m['reason']}.")
+        else:
+            lines.append("    Steady enough to record: `cost-tracker calibrate --learn-gap`. "
+                         "It is stored apart")
+            lines.append("    from the fee, its CAUSE IS UNKNOWN, and it is never folded into "
+                         "the fee: warnings")
+            lines.append("    project with it, billed figures stay list × fee.")
+    return "\n".join(lines)
+
+
+KIND_LABEL = {
+    "subscription": "Claude subscription (Pro / Max / Team / Enterprise)",
+    "api-key": "Anthropic API key or bearer token (Claude Console)",
+    "cloud-provider": "cloud provider (Bedrock / Agent Platform / Foundry)",
+    "apps-gateway": "Claude apps gateway",
+    "gateway": "LLM gateway / proxy (ANTHROPIC_BASE_URL)",
+    "local": "local or free lane (localhost)",
+    "first-party": "Anthropic first-party (subscription or key, not yet distinguishable)",
+}
+LIMIT_LABEL = {
+    "daily-key": "daily per-key cap, learned from the gateway's refusal message",
+    "percent-window": "rolling 5-hour and weekly windows, in percent (no dollar cap)",
+    "spend-limit": "the gateway's spend limit",
+    "monthly": "monthly tier spend cap (Start $500 / Build $1,000 / Scale $200,000)",
+    "none": "none knowable here",
+}
+
+
+def render_fee(conn):
+    """The FEE (published, deterministic) and the GAP (measured, unexplained), as two blocks.
+    The empty state carries the finding: on a non-gateway connection there is no fee to find."""
+    lines = []
+    if conn["fee"] == MARKUP_IDENTITY:
+        lines.append("gateway fee: NONE (×1.0) — spend is reported at Anthropic list price.")
+    else:
+        lines.append(f"gateway fee: ×{conn['fee']:.4f} (+{(conn['fee'] - 1) * 100:.2f}%)")
+    lines.append(f"  source:     {conn['fee_source']}")
+    lines.append(f"  connection: {KIND_LABEL.get(conn['kind'], conn['kind'])}"
+                 + (f" — {conn['provider']}" if conn.get("provider") else ""))
+    if conn["kind"] != "gateway":
+        lines.append("  A fee is a reseller's charge, so it applies only to sessions routed through a")
+        lines.append("  gateway. This connection is billed (or metered) at list price; that is the")
+        lines.append("  correct and expected state, not a missing measurement.")
+    lines.append("")
+    if conn.get("price_table"):
+        lines.append("  The gateway publishes its own per-model price table; this factor is its "
+                     "median ratio")
+        lines.append("  to official Anthropic prices. `cost-tracker prices` lists every row.")
+        lines.append("")
+    if conn.get("gap_superseded"):
+        lines.append(f"measured gap: ×{conn['gap_superseded']:.4f} SUPERSEDED — the gateway's "
+                     "price table explains it,")
+        lines.append("  so it is no longer projected. `cost-tracker markup --clear` forgets it.")
+    elif conn.get("gap"):
+        lines.append(f"measured gap: ×{conn['gap']:.4f} on top of list × fee — CAUSE UNKNOWN")
+        lines.append(f"  from {conn.get('gap_n_days') or '?'} calibrated refusal day(s)"
+                     + (f", CV {conn['gap_cv']:.3f}" if conn.get("gap_cv") is not None else "")
+                     + ". Stored apart from the fee and never folded into it:")
+        lines.append("  a fitted constant once hid real unseen spend for weeks.")
+        lines.append("  Warnings PROJECT with it so the cap warning fires in time "
+                     "(COST_TRACKER_APPLY_GAP=0 to stop);")
+        lines.append("  billed figures stay list × fee.")
+    else:
+        lines.append("measured gap: none recorded. `cost-tracker calibrate --learn-gap` measures "
+                     "one from a")
+        lines.append("  gateway's refusal messages once a few are on record; it refuses to "
+                     "learn a ratio")
+        lines.append("  the evidence does not support.")
+    lines.append("")
+    lines.append("what this is for")
+    lines.append("  Claude Code's `total_cost_usd` prices tokens at Anthropic LIST rates "
+                 "(code.claude.com/")
+    lines.append("  docs/en/statusline). A reselling gateway can bill more for the same tokens: "
+                 "its fee is")
+    lines.append("  published (config/providers.json cites each one). Anything the gateway "
+                 "charges beyond")
+    lines.append("  list × fee is the gap, reported as an unknown until someone explains it.")
+    return "\n".join(lines)
+
+
+# Pre-0.12 name, kept so external callers keep working.
+def render_markup(cfg, resolved):
+    return render_fee(connection())
+
+
+_PP_MODULE = None
+
+
+def _proxy_prices():
+    """bin/proxy_prices.py, loaded by path (same shape as _connection())."""
+    global _PP_MODULE
+    if _PP_MODULE is None:
+        _PP_MODULE = sys.modules.get("proxy_prices")
+    if _PP_MODULE is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        loader = SourceFileLoader("proxy_prices", os.path.join(here, "proxy_prices.py"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _PP_MODULE = mod
+    return _PP_MODULE
+
+
+def _official_meta():
+    try:
+        with open(_proxy_prices().OFFICIAL_PATH) as f:
+            return json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def render_prices(conn, entry, pp):
+    meta = _official_meta()
+    lines = [f"official prices: {len(meta.get('models') or {})} Claude model(s) from "
+             f"{meta.get('source') or '?'} (verified {meta.get('verified_at') or '?'})"]
+    if conn.get("kind") != "gateway":
+        lines.append(f"connection: {KIND_LABEL.get(conn['kind'], conn['kind'])} — official "
+                     "prices apply as-is; no gateway table to look for.")
+        return "\n".join(lines)
+    lines.append(pp.summary(entry))
+    if entry and entry.get("proxy"):
+        lines.append("  per model: the gateway's own row where it lists the model; any other "
+                     "model is priced")
+        lines.append("  as official × the derived markup, so a new model is never priced at "
+                     "list or at $0.")
+        official = pp.load_official()
+        rows = []
+        for name in sorted(set(official) | set(entry.get("models") or {})):
+            rates, basis = pp.price_for(name, entry, official)
+            if rates:
+                rows.append(f"    {name:<22} in {rates['input']:<7.4g} out {rates['output']:<7.4g}"
+                            f" cache r {rates.get('cache_read', 0):<7.4g} w5m "
+                            f"{rates.get('cache_write_5m', 0):<7.4g} [{basis}]")
+        lines.append("  $/MTok as billed:")
+        lines.extend(rows)
+    if conn.get("gap_superseded"):
+        lines.append(f"  measured gap ×{conn['gap_superseded']:.4f} is SUPERSEDED by the price "
+                     "table and no longer applied")
+        lines.append("    (`cost-tracker markup --clear` forgets it).")
+    return "\n".join(lines)
+
+
+def render_connection(conn):
+    lines = [f"connection: {KIND_LABEL.get(conn['kind'], conn['kind'])}"]
+    if conn.get("host"):
+        lines.append(f"  endpoint host: {conn['host']}")
+    if conn["kind"] == "gateway":
+        lines.append(f"  provider:      {conn['provider'] or 'unknown (no fee applied)'}"
+                     + (f"  [{conn['provider_source']}]" if conn.get("provider_source") else ""))
+        if not conn["provider"]:
+            lines.append("    map a private host to a known provider with "
+                         "`cost-tracker connection --map-host HOST PROVIDER`")
+    lines.append(f"  fee:           ×{conn['fee']:.4f}  ({conn['fee_source']})")
+    lines.append(f"  limit:         {LIMIT_LABEL.get(conn['cap_kind'], conn['cap_kind'])}")
+    cap = conn.get("cap_usd_resolved", conn.get("cap_usd"))
+    if cap:
+        lines.append(f"  cap:           ${cap:.2f}" + (f" per {conn['cap_period']}" if conn.get("cap_period") else ""))
+    elif conn["cap_kind"] == "monthly":
+        lines.append("  cap:           not set — `cost-tracker cap --set USD --monthly`, or learned "
+                     "from an")
+        lines.append("                 `enforced_spend_limit_reached` refusal")
+    if conn.get("windows"):
+        lines.append("  windows:       " + ", ".join(f"{k} {v:.0f}%" for k, v in conn["windows"].items()
+                                                  if v is not None))
+    if conn.get("gap"):
+        lines.append(f"  measured gap:  ×{conn['gap']:.4f} beyond the fee, cause unknown "
+                     f"({conn.get('gap_n_days')} day(s))")
+    if conn.get("price_table"):
+        pt = conn["price_table"]
+        lines.append(f"  price table:   the gateway's own, {pt['models']} Claude model(s); "
+                     f"custom rows: {', '.join(pt['custom']) or 'none'}  (`cost-tracker prices`)")
+    if conn.get("gap_superseded"):
+        lines.append(f"  measured gap:  ×{conn['gap_superseded']:.4f} SUPERSEDED by the price "
+                     "table, not applied")
+    return "\n".join(lines)
+
+
+def render_doctor(data):
+    lines = [f"cost-tracker doctor — ledger dir: {LEDGER_DIR}",
+             f"                     history:    {HISTORY_PATH}",
+             f"today (UTC): {data['today_utc']}   cap: "
+             + (f"${data['cap_usd']:.2f}" if data["cap_usd"] else "unset (no denominator printed)")
+             + f"   [{data.get('cap_source') or 'unset'}]"]
+    lines.append("")
+    if data.get("reset_anchored_sessions"):
+        lines.append("COUNTER RESETS (a resumed session) — %d in this period:"
+                     % len(data["reset_anchored_sessions"]))
+        for sid in data["reset_anchored_sessions"]:
+            s = data["sessions"][sid]
+            lines.append(f"  {sid}  ${s['period_usd']:.2f}  days {','.join(s['days'])}")
+        lines.append("")
+        lines.append("  Claude Code's total_cost_usd restarts at 0 when a session is RESUMED, so")
+        lines.append("  the cumulative can fall BELOW the baseline carried into the day. The")
+        lines.append("  baseline then describes a counter that no longer exists. Subtracting it")
+        lines.append("  gives a negative number, and clamping that to 0 reports the day as free:")
+        lines.append("  measured on session e4d10d09, 2026-08-26 — $16.07 of real spend reported")
+        lines.append("  as $0.00. These figures are anchored at the reset instead, which makes")
+        lines.append("  them FLOORS: spend earlier the same day, before the reset, is gone from")
+        lines.append("  the ledger. A reset that later climbs back above the stale baseline is")
+        lines.append("  invisible in the final record and is detected from the row sequence.")
+        lines.append("")
+    if data.get("zero_sessions"):
+        lines.append("AMBIGUOUS ZEROS — %d session(s) reported $0 against a carried-in baseline."
+                     % len(data["zero_sessions"]))
+        lines.append("  Either a local render (the endpoint gate zeroes the cost) or a resumed")
+        lines.append("  counter that has not billed yet. Field 4 tells them apart and did not")
+        lines.append("  exist before 2026-08-29, so older records are reported as `zero` rather")
+        lines.append("  than asserted to be local. Both contribute $0 either way.")
+        lines.append("")
+    q = data["quarantined"]
+    if not q:
+        lines.append("No quarantined records. Every record parsed as a valid session-day.")
+        return "\n".join(lines)
+    # GROUPED by (reason, session): one bad session renders its statusline hundreds
+    # of times, so an ungrouped list is 131 near-identical lines that hide the fact
+    # that only two sessions are affected. The count is the volume; the group is the
+    # finding.
+    groups = defaultdict(lambda: {"n": 0, "example": "", "sources": set()})
+    for item in q:
+        key = (item["reason"], item["session_id"] or _sid_from_raw(item["raw"]))
+        g = groups[key]
+        g["n"] += 1
+        g["sources"].add(item["source"].split(":")[0])
+        if not g["example"]:
+            g["example"] = item["raw"]
+    lines.append(f"{len(q)} QUARANTINED record(s) in {len(groups)} group(s) — each counted "
+                 "as $0 and excluded from every figure, never silently dropped:")
+    for (reason, sid), g in sorted(groups.items(), key=lambda kv: -kv[1]["n"]):
+        lines.append(f"  [{reason}] session {sid or '(unknown)'} — {g['n']} record(s) "
+                     f"in {'+'.join(sorted(g['sources']))}")
+        lines.append(f"      e.g. {g['example'][:140]!r}")
+    return "\n".join(lines)
+
+
+def _sid_from_raw(raw):
+    """A history line carries its session id in field 2; the ledger record does not
+    carry one at all (the FILENAME is the id, which the caller already passed)."""
+    parts = raw.split()
+    return parts[1] if len(parts) > 1 and "T" in parts[0] else ""
+
+
+_MENU_MODULE = None
+
+
+def _menu_module():
+    """bin/cost_tracker_menu.py, loaded by path — same loader shape as _connection() and
+    _budget_tally(), so this CLI keeps no package and the selector stays a plain sibling
+    file. Lazy: only a bare invocation or `menu` ever loads it (the statusline's hot path
+    short-circuits before this is reached)."""
+    global _MENU_MODULE
+    if _MENU_MODULE is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        loader = SourceFileLoader("cost_tracker_menu",
+                                  os.path.join(here, "cost_tracker_menu.py"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name,
+                                                                              loader))
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _MENU_MODULE = mod
+    return _MENU_MODULE
+
+
+def _open_menu():
+    """Gate and open the selector, with main() itself as the dispatch: the menu composes an
+    argv and hands it to the ordinary entry point, so a dispatched action runs exactly what
+    the typed command would run — same argparse, same guards, same output. An argparse
+    rejection surfaces as SystemExit, which run() confines to the action, not the session.
+
+    Reached only through the gate in main(); the refusal here is for the explicit `menu`
+    subcommand typed where no interactive terminal is attached."""
+    m = _menu_module()
+    if not m.available():
+        print("cost-tracker: the menu needs an interactive terminal (stdin and stdout both a "
+              "TTY); the plain subcommands are the non-interactive answer, and "
+              "COST_TRACKER_NO_MENU=1 forces them on a terminal too.", file=sys.stderr)
+        return 2
+    return m.run(dispatch=main)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="cost-tracker",
+        description="Report Claude Code spend on three labelled axes: session, today, local.",
+        epilog="Environment variables (all optional): COST_TRACKER_CAP_USD, COST_TRACKER_FEE "
+               "(alias COST_TRACKER_MARKUP), COST_TRACKER_APPLY_GAP, COST_TRACKER_PROVIDERS, "
+               "COST_TRACKER_CONFIG_DIR, COST_TRACKER_LEDGER_DIR, COST_TRACKER_HISTORY, "
+               "COST_TRACKER_PROJECTS_DIR, COST_TRACKER_STATUSLINE, COST_TRACKER_NO_MENU. "
+               "See README 'Environment'.")
+    sub = ap.add_subparsers(dest="cmd")
+
+    def add_period(p):
+        g = p.add_mutually_exclusive_group()
+        g.add_argument("--today", action="store_const", const="today", dest="period")
+        g.add_argument("--week", action="store_const", const="week", dest="period")
+        g.add_argument("--month", action="store_const", const="month", dest="period")
+        p.add_argument("--since", metavar="YYYY-MM-DD")
+        p.add_argument("--json", action="store_true")
+        p.set_defaults(period="today")
+
+    rep = sub.add_parser("report", help="per-session breakdown table for a period")
+    add_period(rep)
+    rep.add_argument("--full-ids", action="store_true", help="print full session UUIDs")
+    rep.add_argument("--days", type=int, metavar="N", dest="ndays",
+                     help="rolling window of the last N UTC days ending today (e.g. 30). "
+                          "Mutually exclusive with --today/--week/--month/--since")
+    rep.add_argument("--breakdown", action="store_true",
+                     help="add the visual section: spend by category and savings on the free "
+                          "lanes, as labelled percentage bars")
+    rep.add_argument("--phantom-basis", metavar="BASIS", dest="phantom_basis",
+                     help="basis for the savings axis: opus (as recorded, default) or sonnet "
+                          "(what the same work would have cost on Sonnet 5.5). Also settable as "
+                          "COST_TRACKER_PHANTOM_BASIS")
+
+    st = sub.add_parser("statusline", help="one-line statusline segment (today)")
+    st.add_argument("--json", action="store_true")
+    st.add_argument("--fast", action="store_true",
+                    help="skip the history log and read savings from the derived rollup; "
+                         "for the per-render statusline path")
+    st.add_argument("--payload", metavar="-", dest="payload",
+                    help="read Claude Code's statusline JSON from stdin ('-') so the connection "
+                         "kind (subscription / apps gateway) can be told from its rate_limits")
+    st.add_argument("--refresh-estimate", action="store_true", dest="refresh_estimate",
+                    help="rebuild the cached no-ledger/classifier estimate and exit "
+                         "(the statusline spawns this in the background)")
+
+    doc = sub.add_parser("doctor", help="show quarantined records and resolved config")
+    doc.add_argument("--json", action="store_true")
+
+    cal = sub.add_parser("calibrate",
+                         help="check our daily totals against the gateway's own figure")
+    cal.add_argument("--json", action="store_true")
+    cal.add_argument("--since-days", type=int, default=365, dest="since_days",
+                     help="how far back to look for refusals (default 365)")
+    cal.add_argument("--tolerance", type=float, default=0.01, metavar="USD",
+                     help="ignore gaps smaller than this (default 0.01)")
+    cal.add_argument("--learn-gap", "--learn-markup", action="store_true", dest="learn_gap",
+                     help="record the measured GAP (gateway / (list x fee)) so it is reported and "
+                          "projected; refused unless the per-day ratios are steady. Never "
+                          "changes the fee. (--learn-markup is the pre-0.12 name)")
+
+    fe = sub.add_parser("fee", help="show the gateway FEE (published, deterministic) and its source")
+    fe.add_argument("--set", metavar="FACTOR", dest="set_fee",
+                    help="record the fee by hand, e.g. 1.05 for +5%% (1 = none)")
+    fe.add_argument("--clear", action="store_true",
+                    help="forget a hand-set fee; the registry fee for your provider applies again")
+    fe.add_argument("--json", action="store_true")
+
+    cn = sub.add_parser("connection",
+                        help="how this session connects, and which limit, fee and gap apply")
+    cn.add_argument("--map-host", nargs=2, metavar=("HOST", "PROVIDER"), dest="map_host",
+                    help="map a gateway host to a provider in config/providers.json, LOCALLY "
+                         "(for private hostnames that must never be shipped)")
+    cn.add_argument("--unmap-host", metavar="HOST", dest="unmap_host")
+    cn.add_argument("--json", action="store_true")
+
+    pr = sub.add_parser("prices",
+                        help="which price table applies: official Anthropic, or the gateway's own")
+    pr.add_argument("--refresh", action="store_true",
+                    help="ask the gateway for its price table now (otherwise re-learned daily "
+                         "in the background)")
+    pr.add_argument("--json", action="store_true")
+
+    mk = sub.add_parser("markup", help="(pre-0.12) show the fee and the measured gap together")
+    mk.add_argument("--set", metavar="FACTOR", dest="set_markup",
+                    help="same as `fee --set`")
+    mk.add_argument("--clear", action="store_true",
+                    help="forget the hand-set fee AND the measured gap")
+    mk.add_argument("--json", action="store_true")
+
+    cp = sub.add_parser("cap", help="show the daily cap and where it came from")
+    cp.add_argument("--learn", action="store_true",
+                    help="re-read the cap from the newest budget-kill message now "
+                         "(run this when the daily budget cap has changed)")
+    cp.add_argument("--set", metavar="USD", dest="set_cap",
+                    help="record a cap by hand instead of learning one")
+    cp.add_argument("--json", action="store_true")
+
+    sub.add_parser("menu",
+                   help="interactive selector for the routine subcommands (an interactive "
+                        "terminal only; COST_TRACKER_NO_MENU=1 forces the plain CLI)")
+
+    args = ap.parse_args(argv)
+    # The menu owns two ways in, and BOTH are gated by the same test (menu.available — a TTY
+    # on both streams, COST_TRACKER_NO_MENU off): the explicit `menu` subcommand, and a BARE
+    # invocation on an interactive terminal. Everything else is untouched — bare non-TTY
+    # falls through to the report exactly as it did before the menu existed, which is the
+    # pinned contract (tests/test_cost_tracker_menu.py, Task 3).
+    if args.cmd == "menu" or (args.cmd is None and _menu_module().available()):
+        return _open_menu()
+    cmd = args.cmd or "report"
+    if cmd == "report" and args.cmd is None:
+        args = ap.parse_args(["report"] + (argv or []))
+
+    since = getattr(args, "since", None)
+    if since:
+        try:
+            date.fromisoformat(since)
+        except ValueError:
+            ap.error("--since needs a YYYY-MM-DD date")
+    # The help says --days is mutually exclusive with the period flags, so it must be ENFORCED.
+    # `period` defaults to "today" via set_defaults, so an explicit --today is indistinguishable
+    # from the default; --days wins that case rather than erroring on an invisible conflict.
+    ndays = getattr(args, "ndays", None)
+    if ndays is not None and (since or getattr(args, "period", "today") != "today"):
+        ap.error("--days N is mutually exclusive with --since and --today/--week/--month")
+    if ndays is not None and ndays < 1:
+        ap.error("--days needs a positive number of days")
+    # A rolling window is bounded by the CALENDAR (period_days has no idea what data exists), so
+    # without a ceiling a typo like `--days 40000` prints forty thousand zero rows. The window is
+    # one row per day by design, so the bound is a usability limit, not a data one.
+    if ndays is not None and ndays > MAX_WINDOW_DAYS:
+        ap.error(f"--days is capped at {MAX_WINDOW_DAYS} (one row per UTC day); "
+                 f"use --since YYYY-MM-DD for a longer span")
+
+    if cmd == "calibrate":
+        data = calibrate(since_days=args.since_days, tolerance=args.tolerance)
+        if getattr(args, "learn_gap", False):
+            m = data.get("measured_markup") or {}
+            if m.get("factor") and not m.get("reason"):
+                cfg = read_config() or {"contract": CONTRACT}
+                cfg["gap"] = {
+                    "factor": m["factor"],
+                    "n_days": m["n_days"], "cv": m.get("cv"),
+                    "ratio_min": m.get("ratio_min"), "ratio_max": m.get("ratio_max"),
+                    "measured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "basis": ("median per-day gateway / (list x fee) over calibrated days, from "
+                              "the gateway's own `Current cost` at refusals; cause unknown"),
+                }
+                if write_config(cfg):
+                    print(f"cost-tracker: recorded a measured gap of ×{m['factor']:.4f} from "
+                          f"{m['n_days']} day(s). The fee is unchanged.")
+                else:
+                    print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+            else:
+                # Refusing to learn is a RESULT, not a failure.
+                print("cost-tracker: no gap recorded — "
+                      + (m.get("reason") or "no evidence to measure one from")
+                      + ".", file=sys.stderr)
+        if args.json:
+            print(json.dumps(data, indent=2, sort_keys=True))
+        else:
+            print(render_calibrate(data))
+        # Nonzero on a measured undercount so this can GATE a release rather than being
+        # a report nobody reads. No refusal on record is INCONCLUSIVE, and exits 0.
+        return 1 if data["undercount_days"] else 0
+
+    if cmd in ("fee", "markup"):
+        set_v = getattr(args, "set_fee", None) or getattr(args, "set_markup", None)
+        if set_v:
+            try:
+                v = float(set_v)
+            except ValueError:
+                ap.error("--set needs a number")
+            if v <= 0:
+                ap.error("--set needs a positive number")
+            cfg = read_config() or {"contract": CONTRACT}
+            if v == MARKUP_IDENTITY:
+                cfg.pop("fee", None)
+            else:
+                cfg["fee"] = {"factor": v, "set_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              "source": f"set by hand with `cost-tracker {cmd} --set`"}
+            if not write_config(cfg):
+                print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+        elif args.clear:
+            cfg = read_config() or {}
+            changed = cfg.pop("fee", None) is not None
+            if cmd == "markup":
+                changed = (cfg.pop("gap", None) is not None) or changed
+            if changed and not write_config(cfg):
+                print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+        conn = connection()
+        if args.json:
+            print(json.dumps({"contract": CONTRACT, "fee": conn["fee"],
+                              "fee_source": conn["fee_source"], "gap": conn["gap"],
+                              "markup": conn["fee"], "is_identity": conn["fee"] == MARKUP_IDENTITY,
+                              "connection": conn, "config_path": CONFIG_PATH},
+                             indent=2, sort_keys=True))
+            return 0
+        print(render_fee(conn))
+        return 0
+
+    if cmd == "prices":
+        pp = _proxy_prices()
+        entry = pp.refresh(os.environ, force=True) if args.refresh else pp.cached(os.environ)
+        conn = connection()
+        if args.json:
+            print(json.dumps({"contract": CONTRACT, "connection": conn.get("kind"),
+                              "official_source": _official_meta().get("source"),
+                              "official_verified_at": _official_meta().get("verified_at"),
+                              "proxy": entry}, indent=2, sort_keys=True))
+            return 0
+        print(render_prices(conn, entry, pp))
+        return 0
+
+    if cmd == "connection":
+        if args.map_host or args.unmap_host:
+            cfg = read_config() or {"contract": CONTRACT}
+            hm = cfg.setdefault("connection", {}).setdefault("host_map", {})
+            if args.map_host:
+                host, provider = args.map_host[0].lower(), args.map_host[1]
+                if provider not in _connection().read_registry():
+                    ap.error(f"unknown provider {provider!r}; known: "
+                             + ", ".join(sorted(_connection().read_registry())))
+                hm[host] = provider
+            else:
+                hm.pop(args.unmap_host.lower(), None)
+            if not write_config(cfg):
+                print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+        conn = connection()
+        conn["cap_usd_resolved"] = cap_usd()
+        if args.json:
+            print(json.dumps({"contract": CONTRACT, **conn}, indent=2, sort_keys=True))
+            return 0
+        print(render_connection(conn))
+        return 0
+
+    if cmd == "cap":
+        if args.set_cap:
+            try:
+                manual = float(args.set_cap)
+            except ValueError:
+                ap.error("--set needs a number")
+            if manual <= 0:
+                ap.error("--set needs a positive number")
+            cfg = read_config() or {"contract": 1}
+            cfg["key"] = {
+                "cap_usd": manual, "cost_at_kill_usd": 0.0, "scope": "key",
+                "label": "(set by hand)", "key_hint": "",
+                "observed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "source_file": "(manual)",
+                "raw": "set by hand with `cost-tracker cap --set`",
+            }
+            cfg["found"] = True
+            cfg["learned_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if not write_config(cfg):
+                print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+                return 0
+        elif args.learn:
+            cfg = learn_cap()
+            write_config(cfg)
+        else:
+            cfg = read_config()
+        resolved = cap_usd()
+        if args.json:
+            print(json.dumps({"contract": CONTRACT, "cap_usd": resolved,
+                              "config_path": CONFIG_PATH, "config": cfg},
+                             indent=2, sort_keys=True))
+            return 0
+        measured = collect("today", fast=True)["cloud_usd"]
+        print(render_cap(cfg, resolved, measured_today=measured))
+        return 0
+
+    if getattr(args, "payload", None) == "-":
+        global STATUSLINE_PAYLOAD
+        try:
+            p = json.loads(sys.stdin.read() or "{}")
+            STATUSLINE_PAYLOAD = p if isinstance(p, dict) else None
+        except (ValueError, OSError):
+            STATUSLINE_PAYLOAD = None
+
+    if getattr(args, "refresh_estimate", False):
+        try:
+            merged, _q = _merged_records(fast=True)
+            estimate_unseen([TODAY], {sid for (sid, d) in merged if d == TODAY})
+        finally:
+            try:
+                os.remove(_estimate_cache_path() + ".lock")
+            except OSError:
+                pass
+        return 0
+
+    period = getattr(args, "period", "today")
+    # The flag is a VIEW on the same setting the env var and config already read, not a rival
+    # source of truth: setting it here lets phantom_basis_factor() stay the only place the
+    # precedence is decided. A flag value wins for this run and is not persisted.
+    basis_flag = getattr(args, "phantom_basis", None)
+    if basis_flag:
+        os.environ["COST_TRACKER_PHANTOM_BASIS"] = basis_flag
+    # The per-day series is a second pass over the merged records, so it is requested only when
+    # the breakdown will actually draw it — never for a plain report, and never for the statusline.
+    data = collect(period, since, fast=getattr(args, "fast", False),
+                   ndays=getattr(args, "ndays", None),
+                   want_series=getattr(args, "breakdown", False))
+
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    if cmd == "statusline":
+        # Re-learn a gateway's own price table when the cached copy has aged out (detached,
+        # one file read when fresh) — so a user without the budget-tally hooks still gets it.
+        try:
+            _proxy_prices().spawn_refresh(os.environ)
+        except Exception:
+            pass
+        print(render_statusline(data))
+    elif cmd == "doctor":
+        print(render_doctor(data))
+    else:
+        print(render_table(data, short_ids=not getattr(args, "full_ids", False)))
+        if getattr(args, "breakdown", False):
+            print()
+            print(render_breakdown(data))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        sys.exit(0)
+    except Exception as e:               # a reporting bug must never break a caller
+        print(f"cost-tracker: skipped ({e})", file=sys.stderr)
+        sys.exit(0)

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.20.12] — 2026-11-15
+
+### Added — Phase 5 Wave C: committed portable package (COORDINATION C1/C2)
+
+- New `scripts/build-portable.py` (from the reviewed pilot pattern) generates the committed
+  `portable/` package: same-name manifest, skill + slash command, the SessionEnd hook, and
+  the CLI + its SourceFileLoader sibling modules (cost_connection, budget-tally,
+  proxy_prices, menu) moved bin/ -> scripts/ byte-identical — the CLI resolves them from its
+  own dir, which is scripts/ in the portable layout. PATH-command references in the docs
+  (cost-tracker/budget-tally) are rewritten to the scripts/ invocation, inside fenced sh
+  blocks and backticked mentions; prose name mentions are left alone. Host-only files
+  (statusline wrapper, capture shim, shim resolver, changelog tooling, install/) stay out.
+  Emits PORTABLE-BUILD.json (haiggoh-portable-build/1) + deterministic dist zip.
+- tests/test_portable.py pins freshness, same-name manifest, no bin/, the byte-identical
+  move + doc rewrite, closure, C2 schema, zip, and a functional check that the portable CLI
+  lists its subcommands from the portable root.
+
 ## [0.20.11] — 2026-11-14
 
 ### Changed — statusline line 1 shows the model's human name in free sessions (user)
