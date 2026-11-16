@@ -10,10 +10,7 @@ description: "Use when reporting, reconciling, or reasoning about Claude Code AP
 **Every dollar figure names its own membership.** An unlabelled figure is not a
 minor style problem; it is the failure mode this tool was built after.
 
-On 2026-08-10 a spend line labelled "prior sessions" silently included the running
-session and under-counted **$14 of $18.16**. The label had *inferred* membership
-from session age — a long-running session already has a ledger entry, so it was in
-the total all along. The fix is not a better guess; it is never guessing:
+(The 2026-08-10 membership incident that motivated this rule: [docs/history-and-incidents.md](../../docs/history-and-incidents.md).)
 
 | Axis | Means | Never |
 |---|---|---|
@@ -29,10 +26,8 @@ adds says `today: cloud …` out loud for exactly that reason.
 
 **Read this even if you read nothing else on this page.**
 
-The numbers stored on disk are **list price** — what the tokens would cost with no
-gateway in front of them. This gateway bills **more** than list price. So a stored
-number is **smaller than what the user is actually charged**, and repeating it
-under-reports their spend.
+Stored numbers are **list price**; a reselling gateway bills **more**, so a stored
+number under-reports what the user is charged.
 
 **So: do not read spend out of `~/.claude/cost-ledger/*`, out of a transcript's
 `total_cost_usd`, or out of a `cloud_usd` JSON field, and put it in front of the
@@ -46,12 +41,6 @@ cost-tracker report --today  # today's spend, correct
 
 Every one of these applies the markup for you. **Whatever they print is the number
 to say. Nothing else is.**
-
-Why this warning exists: the raw figure and the real figure look equally plausible —
-neither is malformed, and there is no error to notice. Reading the file "just to
-check" is exactly how a wrong number reaches the user with total confidence behind
-it. There is no case where hand-reading the ledger is the right move; the commands
-are not a slower path to the same answer, they are the only path to the right one.
 
 | If you want | Run this | Do NOT |
 |---|---|---|
@@ -74,10 +63,6 @@ message quotes:
 | `cost-tracker report` | `TOTAL cloud` **and** `billed (gw)`, each labelled | both, named |
 | the ledger on disk | `2026-09-11 30.12 0` | list price — never shown raw |
 
-An earlier version deflated the **denominator** instead (`$30.12/$32 eff`). It was
-arithmetically identical, but the user reads `$40` in the refusal message and `$32`
-here, and concludes the tool is wrong. Same ratio, worse answer.
-
 ## Commands
 
 ```
@@ -89,8 +74,7 @@ cost-tracker calibrate                   # our daily totals vs the gateway's own
 cost-tracker fee                         # the published gateway fee and its source (1 = list price)
 ```
 
-The table **is** the audit of the label — a reader can total the period column
-themselves. Quote it rather than retyping numbers out of it.
+Quote the table rather than retyping numbers out of it.
 
 ## Reading it honestly
 
@@ -106,40 +90,23 @@ themselves. Quote it rather than retyping numbers out of it.
   it, and with neither, spend prints no denominator. Never substitute a remembered
   number for a read one; `cost-tracker cap` shows exactly which refusal a cap came from.
 - **Prose that quotes the refusal is not evidence.** The learner keys on
-  `isApiErrorMessage`, the marker Claude Code sets on a rejected turn. A conversation
-  *about* a budget kill — including this one — must never teach the cap. That mistake
-  was made on the first probe of the feature.
+  `isApiErrorMessage` (set only on a real rejected turn) — conversation *about* a
+  budget kill must never teach the cap.
 - **`local saved: not measured` is not `$0.00`.** Zero saved claims local work
   happened and was worth nothing; not-measured says nothing priced it. Reporting an
   absent savings ledger as zero understates savings forever while looking right.
 - **A period longer than today comes from the history log**, grouped by
   `(session_id, utc_date)` with the last row winning. Rows are cumulative
   snapshots: summing them multiplies a session by how many times it rendered.
-- **Local sessions show $0 cloud by design.** A local render zeroes the cost field
-  while the baseline keeps the cumulative carried in. With field 4 present that is
-  unambiguously local; a 3-field `<date> 0 <baseline>` (before 2026-08-29) could
-  equally be a resumed counter that has not billed yet, so it reports as `zero`
-  rather than being asserted local. Either way it is $0.
-- **A figure marked `*` is a FLOOR, not an estimate.** The session's cost counter
-  RESET mid-period — Claude Code restarts `total_cost_usd` at 0 when a session is
-  resumed — so the baseline carried into the day describes a counter that no longer
-  exists. The day is anchored at the reset, which means spend earlier that same day,
-  before the reset, is not in the ledger at all. Say "at least $X" for those.
+- **Local sessions show $0 cloud by design** (a local render zeroes the cost field;
+  a 3-field zero is honestly `zero`, not asserted local). Either way it is $0.
+- **A figure marked `*` is a FLOOR, not an estimate.** A resumed session restarts
+  `total_cost_usd` at 0, so the day is anchored at the reset; earlier same-day spend
+  is not in the ledger. Say "at least $X" for those.
 
 ## ⚠️ On a reselling gateway, an ACCURATE total still under-predicts the cap
 
-The long-standing "~20% undercount" is **resolved, and it was not our arithmetic.** Claude
-Code's `total_cost_usd` is correct (a session reconstructed from its own usage records
-reproduces it), and cost-tracker reads that figure rather than recomputing it. The gap was
-**entirely gateway-side**: this gateway bills a median **×1.23** of Anthropic list price,
-steady over 19 calibrated days (CV 0.053).
-
-**What that means when you quote the figure.** Our number is what the tokens cost, and it
-is right. It is *not* what the cap counts. With a $40 cap the refusal lands near **$32** of
-list-price spend, so `today` is a **FLOOR against the cap** — say so whenever the number is
-being used to decide whether there is headroom, because the error runs in the direction that
-walks a session into a hard stop while the display still promises room. "$32.43 of $40" is
-the shape of that trap.
+(The resolved ~20% gateway undercount and its calibration history: [docs/history-and-incidents.md](../../docs/history-and-incidents.md). Rule that stays: **`today` is a FLOOR against the cap** — say so when the number decides headroom.)
 
 - **First, since 0.15.0: run `cost-tracker prices`.** A gateway that publishes its own
   price table (LiteLLM `/model/info`) is priced from THAT table, learned automatically in the
@@ -178,10 +145,7 @@ session. Anchor at the reset and label the result a floor.
 
 ## Wiring on a machine
 
-A session has one status line, so this plugin never claims it. It ships the wrapper
-pattern; `install/wire-statusline.sh` (dry-run by default) points a machine's
-`~/.claude/scripts/` copies at the plugin, backs up what it replaces, and rolls
-back if the chain stops rendering.
+One status line per machine; this plugin never claims it. `install/wire-statusline.sh` (dry-run by default) wires `~/.claude/scripts/` copies at the plugin, with backup and rollback.
 
 ## Branding (💸)
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.20.13] — 2026-11-16
+
+### Changed — SKILL.md back under the 1500-word budget (was 1956)
+
+- The 2026-08-10 membership incident, the resolved gateway undercount history, and
+  three long prose bullets moved to `docs/history-and-incidents.md` (linked in place);
+  imperative rules and tables stay. Every removed paragraph is in the docs file and in
+  the commit diff. Suite 303/303 + portable freshness + version consistency.
+
+## [0.20.13] — 2026-11-16
+
+- (release notes go here)
+
 ## [0.20.12] — 2026-11-15
 
 ### Added — Phase 5 Wave C: committed portable package (COORDINATION C1/C2)

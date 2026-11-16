@@ -88,7 +88,7 @@
     }
   ],
   "files": {
-    ".claude-plugin/plugin.json": "1097887fbbda0b087c377bf8bf0de46319166657905a0c8539212e2a65632983",
+    ".claude-plugin/plugin.json": "e6b0e679e07e07ae04faad7fe54723c295c9da9bea685b26d0d70fbff696d9a1",
     "commands/cost-today.md": "db4e956d0fb0d5aa48819d52b1e64fa5a8c0600f9f10cde431c03b3b2e2c7f3d",
     "hooks/hooks.json": "b3dc434d530a1f735113b7e6b57a08ae86ff03fccaf3eaa4e5834fc0fdcca910",
     "hooks/session-end-reconcile.py": "91835e3a623f3be564786528a5c038e6c1abd9598fd0d1a116812ed74de3e174",
@@ -97,10 +97,10 @@
     "scripts/cost_connection.py": "a261b6aa74aee059006378bd6e3de311b7171246216cd13ee424b8e54747873c",
     "scripts/cost_tracker_menu.py": "97dcceddc283bfee2a3a2f75570fa4b5d6a081ae16086961498e65b919512c95",
     "scripts/proxy_prices.py": "bba53511a02e03c2d8d37d993a2dc680392c5f6ca1bab151d54ecedd6fa10cc9",
-    "skills/cost-tracker/SKILL.md": "8a129d00e247b7902cb9ea67699f4e45c1971982c3e0289a9f84db3ce9e3babd"
+    "skills/cost-tracker/SKILL.md": "1f52f9ed570f86e99ef36bfa80e6d1d47a6a47f7adeeed400f7ab0189839d8c6"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "60e89bd6108671b985d72692c168060050f5999a",
+  "source_commit": "2611755c8fcf1bf8c776acf7c9a68a8bc78a6bef",
   "source_repo": "haiggoh/cost-tracker",
   "transform_version": "1"
 }
