@@ -1,6 +1,5 @@
 # Changelog
 
-## [0.20.13] — 2026-11-16
 
 ### Changed — SKILL.md back under the 1500-word budget (was 1956)
 

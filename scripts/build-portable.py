@@ -56,6 +56,7 @@ COPY_FILES = [
     "scripts/cost_tracker_menu.py",
     "scripts/proxy_prices.py",
     "skills/cost-tracker/SKILL.md",
+    "docs/history-and-incidents.md",
 ]
 HOST_TO_PORTABLE = {f"scripts/{n}": f"bin/{n}" for n in
                      ("cost-tracker", "cost_connection.py", "budget-tally.py",
@@ -86,6 +87,11 @@ COMPONENTS = [
      "surfaces": {"chat": True, "cowork": True, "code": True},
      "notes": "PATH-command references (cost-tracker/budget-tally) rewritten to the scripts/ "
               "invocation, in fenced sh blocks and backticked mentions"},
+    {"path": "docs/history-and-incidents.md", "kind": "data",
+     "adaptation_class": "native-unchanged", "evidence_level": "source-inspected",
+     "surfaces": {"chat": True, "cowork": True, "code": True},
+     "notes": "narrative moved out of SKILL.md for the word budget; bundled so the SKILL.md "
+              "links resolve inside the portable package"},
     {"path": "commands/cost-today.md", "kind": "command",
      "adaptation_class": "mechanical", "evidence_level": "source-inspected",
      "surfaces": {"chat": True, "cowork": True, "code": True},
