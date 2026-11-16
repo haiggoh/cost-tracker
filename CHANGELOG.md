@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.20.14] — 2026-11-16
+
+### Docs — restored the 0.20.13 version heading; backfilled its release notes
+
+- The 0.20.13 CHANGELOG section shipped without its `## [0.20.13] — 2026-11-16`
+  heading (a "duplicate header" cleanup deleted the version heading itself — the
+  version-consistency gate matches exactly that top heading) and the published GitHub
+  release body was the bump tool's "(release notes go here)" placeholder. Heading
+  restored in place; the release body corrected via `gh release edit`. No code
+  changes; portable/ rebuilt at 0.20.14 for consistency.
+
+## [0.20.13] — 2026-11-16
 
 ### Changed — SKILL.md back under the 1500-word budget (was 1956)
 

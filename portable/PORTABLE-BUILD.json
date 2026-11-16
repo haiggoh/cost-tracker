@@ -100,7 +100,7 @@
     }
   ],
   "files": {
-    ".claude-plugin/plugin.json": "e6b0e679e07e07ae04faad7fe54723c295c9da9bea685b26d0d70fbff696d9a1",
+    ".claude-plugin/plugin.json": "a8852b8deec782e8f9c5737fd9fefbff1ed69ad0bfe01d388c24fed1d1cda040",
     "commands/cost-today.md": "db4e956d0fb0d5aa48819d52b1e64fa5a8c0600f9f10cde431c03b3b2e2c7f3d",
     "docs/history-and-incidents.md": "e7624dbf940eec702e8d46aa9b38c6eb2d6bf31de4fd55f382dbf542b742319a",
     "hooks/hooks.json": "b3dc434d530a1f735113b7e6b57a08ae86ff03fccaf3eaa4e5834fc0fdcca910",
@@ -113,7 +113,7 @@
     "skills/cost-tracker/SKILL.md": "1f52f9ed570f86e99ef36bfa80e6d1d47a6a47f7adeeed400f7ab0189839d8c6"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "6e46254f0e6599a42a2f1da3305e59141037bcbc",
+  "source_commit": "be5c262aa2807a0419d231d0f90dd5a9a3c02fde",
   "source_repo": "haiggoh/cost-tracker",
   "transform_version": "1"
 }
