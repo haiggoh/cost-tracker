@@ -33,11 +33,13 @@ Environment:
   COST_TRACKER_CONFIG_DIR          cache location (default ~/.claude/cost-tracker)
   COST_TRACKER_PROXY_PRICES_TTL_S  cache freshness in seconds (default 86400)
 """
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import time
+import tempfile
 from urllib.parse import urlparse
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -131,6 +133,15 @@ def parse_model_info(doc):
         if "input" in rates and "output" in rates:
             out.setdefault(name, rates)
     return out
+
+
+def _response_prices(doc):
+    # Imported by path so the portable scripts/ closure resolves the same sibling.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("shared_costs", os.path.join(HERE, "shared_costs.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.parse_prices(doc)
 
 
 def derive(models, official):
@@ -265,7 +276,7 @@ def refresh(env=None, force=False):
     doc = _fetch(url, env)
     models = parse_model_info(doc) if doc is not None else None
     if models is None:
-        entry: dict = dict(old) if old.get("proxy") else {"proxy": False}
+        entry: dict = dict(old) if old.get("proxy") or old.get("response_models") else {"proxy": False}
         entry["checked_at"] = now
         entry["last_error"] = "unreachable" if doc is None else "not a LiteLLM price table"
     else:
@@ -273,14 +284,33 @@ def refresh(env=None, force=False):
         markup, matched, custom = derive(models, official)
         entry = {"proxy": bool(models), "checked_at": now, "fetched_at": now,
                  "path": urlparse(url).path or "/", "models": models,
+                 "response_models": _response_prices(doc),
                  "markup": markup, "matched": matched, "custom": custom,
                  "official_verified_at": _official_verified_at()}
-    cache[host] = entry
     os.makedirs(config_dir(), exist_ok=True)
-    tmp = cache_path() + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cache, f, indent=2, sort_keys=True)
-    os.replace(tmp, cache_path())
+    # Both hosts can refresh different gateways simultaneously. Fetch outside the lock,
+    # then merge under one lock and use a unique temp file so neither writer loses rows.
+    with open(cache_path() + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        cache = read_cache()
+        current = cache.get(host) or {}
+        if entry.get("last_error") and isinstance(current, dict):
+            entry = {**entry, **current, "checked_at": now, "last_error": entry["last_error"]}
+        elif _stamp(current) > _stamp(entry):
+            return current
+        cache[host] = entry
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=config_dir(), delete=False) as f:
+                tmp = f.name
+                json.dump(cache, f, indent=2, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, cache_path())
+            tmp = None
+        finally:
+            if tmp is not None:
+                os.unlink(tmp)
     return entry
 
 
