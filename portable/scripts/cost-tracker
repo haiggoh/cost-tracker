@@ -2551,7 +2551,16 @@ def main(argv=None):
             shared = _shared_costs()
             if getattr(args, "refresh_prices", False):
                 shared.refresh_prices(_proxy_prices())
+            claude_inputs = (os.path.isfile(HISTORY_PATH) or os.path.isdir(TRANSCRIPTS_DIR)
+                             or (os.path.isdir(LEDGER_DIR) and any(
+                                 os.path.isfile(os.path.join(LEDGER_DIR, name))
+                                 for name in os.listdir(LEDGER_DIR)
+                                 if not name.startswith(".") and not name.endswith(".tmp"))))
             combined = shared.combine(data, shared.collect(data["period_days_utc"]))
+            combined["claude_inputs_available"] = claude_inputs
+            if not claude_inputs:
+                combined["complete"] = False
+                combined["diagnostics"].append("Claude ledger/history/transcript inputs unavailable")
             data["shared"] = combined
         except Exception as e:
             print("cost-tracker: combined report unavailable: " + str(e), file=sys.stderr)

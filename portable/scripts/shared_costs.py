@@ -334,7 +334,7 @@ def refresh_prices(proxy_prices):
 def combine(claude, codex):
     result = dict(codex)
     result['claude_code_usd'] = claude['billed_usd']
-    result['combined_usd'] = result['claude_code_usd'] + result['codex_usd']
+    result['combined_usd'] = round(result['claude_code_usd'] + result['codex_usd'], 6)
     result['claude_basis'] = 'existing Claude ledger + uncovered estimates, gateway factor applied'
     if claude.get('quarantined') or claude.get('reset_anchored_sessions'):
         result['complete'] = False
