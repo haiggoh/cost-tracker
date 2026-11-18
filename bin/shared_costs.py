@@ -242,6 +242,17 @@ def _cost(data, rates):
     return total
 
 
+def _gateway_markup(entry):
+    """GPT base rates use the same learned regional premium as Claude on the gateway."""
+    if not entry.get('proxy'):
+        return 1.0
+    value = entry.get('markup')
+    if (not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value) or value <= 0):
+        raise ValueError('invalid gateway markup')
+    return float(value)
+
+
 def collect(days, price_tables=None):
     """Refresh append-only usage, then price unique responses for requested UTC dates."""
     root, config, diagnostics = _root()
@@ -268,6 +279,7 @@ def collect(days, price_tables=None):
             'SELECT DISTINCT reason FROM issues WHERE day IN (' + placeholders + ') OR day="*"', days))
     finally:
         conn.close()
+    cache = {}
     if price_tables is None:
         try:
             cache = json.loads((pathlib.Path(os.environ.get('COST_TRACKER_CONFIG_DIR', '~/.claude/cost-tracker')).expanduser() / 'proxy-prices.json').read_text())
@@ -279,6 +291,7 @@ def collect(days, price_tables=None):
     else:
         stamps = {}
     total, unpriced, endpoints = 0.0, 0, set()
+    gateway_markups = {}
     by_day, by_session = {}, {}
     for rid, day, raw in rows:
         data = json.loads(raw)
@@ -291,7 +304,10 @@ def collect(days, price_tables=None):
             rates = price_tables.get(host, {}).get(data['model'])
             try:
                 if not rates: raise ValueError('missing published model price')
-                cost = _cost(data, rates)
+                factor = _gateway_markup(cache.get(host, {}))
+                cost = _cost(data, rates) * factor
+                if cache.get(host, {}).get('proxy'):
+                    gateway_markups[host] = factor
             except ValueError as e:
                 unpriced += 1
                 diagnostics.append(str(e) + ': ' + data['model'])
@@ -301,13 +317,13 @@ def collect(days, price_tables=None):
         sid = data['session']
         by_session[sid] = by_session.get(sid, 0.0) + cost
     return dict(codex_usd=round(total, 6), responses=len(rows), unpriced_responses=unpriced,
-                legacy_estimated_responses=len(legacy_rows),
+                legacy_estimated_responses=len(legacy_rows), gateway_markups=gateway_markups,
                 days_utc=days, by_day=by_day, by_session=by_session,
                 complete=not diagnostics, diagnostics=sorted(set(diagnostics)),
                 refreshed_at=datetime.now(timezone.utc).isoformat(), price_fetched_at=stamps,
                 ledger=dbpath, endpoints=sorted(endpoints), key_scope_verified=False,
                 scope='all locally available Codex responses; historical endpoints inferred from current provider config; key membership unverified',
-                basis='native response tokens x published endpoint prices; legacy cumulative deltas separately estimated', gateway_confirmed_usd=None,
+                basis='native response tokens x published GPT base rates x learned gateway regional markup; legacy cumulative deltas separately estimated', gateway_confirmed_usd=None,
                 reserved_spend_usd=None)
 
 
@@ -334,6 +350,20 @@ def refresh_prices(proxy_prices):
 def combine(claude, codex):
     result = dict(codex)
     result['claude_code_usd'] = claude['billed_usd']
+    result['claude_gateway_factor'] = claude.get('markup', 1.0)
+    result['claude_gateway_inferred'] = False
+    factors = codex.get('gateway_markups', {})
+    if (len(factors) == 1 and claude.get('connection') == 'first-party'
+            and not any(os.environ.get(k) for k in
+                        ('ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'))):
+        # Codex does not inherit Claude's launcher env. Infer the common gateway only
+        # when the available Codex records resolve to one priced gateway; expose the inference.
+        factor = next(iter(factors.values()))
+        result['claude_code_usd'] = round(claude['billed_usd'] / claude.get('markup', 1.0) * factor, 6)
+        result['claude_gateway_factor'] = factor
+        result['claude_gateway_inferred'] = True
+        result['complete'] = False
+        result['diagnostics'] = list(result['diagnostics']) + ['Claude gateway inferred from sole priced Codex gateway']
     result['combined_usd'] = round(result['claude_code_usd'] + result['codex_usd'], 6)
     result['claude_basis'] = 'existing Claude ledger + uncovered estimates, gateway factor applied'
     if claude.get('quarantined') or claude.get('reset_anchored_sessions'):
@@ -349,6 +379,7 @@ def render_table(data):
              'Claude Code USD | Codex USD | Combined USD',
              f"{data['claude_code_usd']:.6f} | {data['codex_usd']:.6f} | {data['combined_usd']:.6f}",
              'Refreshed: ' + data['refreshed_at'],
+             'Gateway factors: Claude ' + str(data['claude_gateway_factor']) + '; Codex ' + str(data.get('gateway_markups', {})),
              'Coverage: ' + ('available records priced' if data['complete'] else 'INCOMPLETE'),
              'Scope: ' + data['scope'],
              'Gateway-confirmed billing and reserved spend: unknown']

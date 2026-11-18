@@ -265,3 +265,42 @@ def test_missing_claude_inputs_cannot_claim_complete_zero(tmp_path, monkeypatch,
     result = json.loads(capsys.readouterr().out)['shared']
     assert result['claude_inputs_available'] is False
     assert 'Claude ledger/history/transcript inputs unavailable' in result['diagnostics']
+
+
+def test_cached_gateway_markup_applies_to_both_hosts_once(tmp_path, monkeypatch):
+    m, root = setup(tmp_path, monkeypatch)
+    write(root, 'a.jsonl', records())
+    cfg = tmp_path / 'config'
+    cfg.mkdir()
+    (cfg / 'proxy-prices.json').write_text(json.dumps({'example.test': {
+        'proxy': True, 'markup': 1.1, 'response_models': prices(m), 'fetched_at': 1}}))
+    codex = m.collect(['2026-11-18'])
+    assert codex['codex_usd'] == pytest.approx(round(.000467 * 1.1, 6))
+    for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'):
+        monkeypatch.delenv(key, raising=False)
+    claude = dict(billed_usd=2.0, markup=1.0, connection='first-party',
+                  quarantined=[], reset_anchored_sessions=[])
+    combined = m.combine(claude, codex)
+    assert combined['claude_code_usd'] == pytest.approx(2.2)
+    assert combined['claude_gateway_inferred'] is True
+    already_adjusted = dict(claude, billed_usd=2.2, markup=1.1, connection='gateway')
+    assert m.combine(already_adjusted, codex)['claude_code_usd'] == pytest.approx(2.2)
+    assert combined['combined_usd'] == round(2.2 + codex['codex_usd'], 6)
+    for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'):
+        with monkeypatch.context() as explicit:
+            explicit.setenv(key, 'explicit-connection-fixture')
+            direct = m.combine(claude, codex)
+            assert direct['claude_code_usd'] == pytest.approx(2.0)
+            assert direct['claude_gateway_inferred'] is False
+
+
+def test_invalid_cached_gateway_markup_never_silently_priced(tmp_path, monkeypatch):
+    m, root = setup(tmp_path, monkeypatch)
+    write(root, 'a.jsonl', records())
+    cfg = tmp_path / 'config'; cfg.mkdir()
+    (cfg / 'proxy-prices.json').write_text(json.dumps({'example.test': {
+        'proxy': True, 'markup': -1, 'response_models': prices(m)}}))
+    result = m.collect(['2026-11-18'])
+    assert not result['complete']
+    assert result['unpriced_responses'] == 1
+    assert any('invalid gateway markup' in d for d in result['diagnostics'])

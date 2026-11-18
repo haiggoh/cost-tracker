@@ -40,8 +40,13 @@ imported history placeholders with zero billable categories do not become new sp
 
 Codex is priced from the existing `proxy-prices.json` cache, using the endpoint's
 published ordinary-input, cache-read, cache-creation and output rates, including
-context and service tiers. Reasoning tokens are already in output and are not added
-again. To refresh prices, run `cost-tracker report --combined --refresh-prices`.
+context and service tiers. GPT base rates receive the cache's learned regional
+gateway markup once; Claude's already adjusted totals retain their factor. The
+combined report displays both factors. If Codex has one priced gateway and the
+report lacks Claude connection credentials, it infers Claude's common gateway,
+labels that inference and marks coverage incomplete. An explicit Claude connection
+or credential prevents that inference. Reasoning tokens are already in output and
+are not added again. To refresh prices, run `cost-tracker report --combined --refresh-prices`.
 The credential comes from the Codex provider's `env_key` (normally
 `OPENAI_API_KEY`) or an explicit `COST_TRACKER_CODEX_TOKEN`. No inference is sent.
 

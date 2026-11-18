@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.21.1] — 2026-11-18
+
+- Apply the learned regional gateway markup to GPT base token rates once, matching the Claude pricing axis. Reject invalid cached markup with an incomplete pricing diagnostic.
+- Display both hosts' gateway factors. When Claude connection credentials are absent and Codex resolves to one priced gateway, expose the inferred Claude factor and keep coverage incomplete; retain explicit Claude credentials and already adjusted totals.
+- Rebuild the portable package and add regressions for markup parity, invalid factors and explicit Claude connections.
+
 ## [0.21.0] — 2026-11-18
 
 - Add opt-in shared Claude Code/Codex daily accounting to report and statusline, with separate host columns and a numeric combined estimate.
