@@ -5,6 +5,16 @@ description: "Use when reporting, reconciling, or reasoning about Claude Code AP
 
 # cost-tracker
 
+## Shared host accounting
+
+For Claude Code + Codex together, run `cost-tracker report --today --combined`
+(or `cost-tracker statusline --combined`). The three columns and JSON `shared`
+object name each host and the combined token-derived estimate. Quote coverage and
+UTC refresh time with the total. Exit 2 means incomplete; missing data is not zero.
+Gateway billing/reserved spend and per-key membership remain unverified. An explicit
+`--refresh-prices` queries the existing endpoint price cache without inference.
+See README "Shared Claude Code and Codex daily estimate" for storage and overrides.
+
 ## The one rule
 
 **Every dollar figure names its own membership.** An unlabelled figure is not a

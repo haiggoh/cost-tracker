@@ -55,12 +55,13 @@ COPY_FILES = [
     "scripts/cost_connection.py",
     "scripts/cost_tracker_menu.py",
     "scripts/proxy_prices.py",
+    "scripts/shared_costs.py",
     "skills/cost-tracker/SKILL.md",
     "docs/history-and-incidents.md",
 ]
 HOST_TO_PORTABLE = {f"scripts/{n}": f"bin/{n}" for n in
                      ("cost-tracker", "cost_connection.py", "budget-tally.py",
-                      "proxy_prices.py", "cost_tracker_menu.py")}
+                      "proxy_prices.py", "cost_tracker_menu.py", "shared_costs.py")}
 # (old, new) literal pairs; "fence:" prefix = apply only inside ``` fenced blocks;
 # "re:" prefix (after optional "fence:") = regex with a replacement CALLABLE
 TRANSFORMS = {

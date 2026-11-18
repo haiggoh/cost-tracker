@@ -20,6 +20,44 @@ cap                            40.00          (37% used)
 local saved   local             0.00      (0 dispatches)
 ```
 
+## Shared Claude Code and Codex daily estimate
+
+Run `cost-tracker report --today --combined` from either host. It refreshes local
+Codex usage without inference and prints separate **Claude Code USD**, **Codex USD**
+and **Combined USD** columns. `--json` adds a `shared` object with numeric totals,
+UTC dates, refresh time, price-cache timestamps, scope and coverage diagnostics.
+`cost-tracker statusline --combined` returns the same combined estimate compactly.
+The existing report, statusline and JSON fields keep their Claude-only contract.
+
+Codex response records and incremental import cursors live in
+`~/.claude/cost-ledger/codex/usage.sqlite3`, beneath the existing shared ledger.
+Claude's cumulative ledger and history remain authoritative for Claude. The database
+stores token categories, session/provider/model attribution and response IDs; it
+stores no credentials or prompts. SQLite transactions serialize concurrent queries.
+Native response IDs deduplicate imported/resumed records. Older CLI cumulative
+records are estimated separately and are replaced by native records when available;
+imported history placeholders with zero billable categories do not become new spend.
+
+Codex is priced from the existing `proxy-prices.json` cache, using the endpoint's
+published ordinary-input, cache-read, cache-creation and output rates, including
+context and service tiers. Reasoning tokens are already in output and are not added
+again. To refresh prices, run `cost-tracker report --combined --refresh-prices`.
+The credential comes from the Codex provider's `env_key` (normally
+`OPENAI_API_KEY`) or an explicit `COST_TRACKER_CODEX_TOKEN`. No inference is sent.
+
+These are **token-derived estimates**, not gateway-confirmed billing or reserved
+spend. Historical endpoint attribution uses current Codex provider configuration;
+Claude's old ledger carries no endpoint/key attribution. Per-key membership is
+therefore explicitly unverified. Missing prices, malformed records, legacy-only
+usage or quarantined Claude records make the result **INCOMPLETE** and exit **2**;
+the known numeric total remains visible. A total is not permission to spend the
+apparent headroom. Price refresh failure preserves the previous cache.
+
+Optional overrides: `COST_TRACKER_CODEX_HOME` selects an existing native transcript
+root; `COST_TRACKER_LEDGER_DIR` and `COST_TRACKER_CONFIG_DIR` select the shared
+ledger and existing config/cache locations. Both hosts must use the same locations.
+Invalid explicit Codex roots fail visibly. No hook, setting, or provider is rewired.
+
 ## Why the labels are the feature
 
 A spend line once read "prior sessions ≈ $4.16" while the real figure was $18.16.

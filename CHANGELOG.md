@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0] — 2026-11-18
+
+- Add opt-in shared Claude Code/Codex daily accounting to report and statusline, with separate host columns and a numeric combined estimate.
+- Import native responses transactionally into the existing ledger directory; deduplicate imports/resumes and retain explicitly incomplete legacy CLI estimates.
+- Preserve GPT endpoint prices, context and service tiers in the existing price cache. Expose coverage, UTC refresh time, inferred endpoint scope and unverified key membership. No live wiring or provider changes.
+- Include the shared module in the portable package; retain existing Claude-only API contracts.
+
 ## [0.20.14] — 2026-11-16
 
 ### Docs — restored the 0.20.13 version heading; backfilled its release notes

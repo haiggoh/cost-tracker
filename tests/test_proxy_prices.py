@@ -221,3 +221,31 @@ def test_cli_help_does_not_probe(env, monkeypatch):
     monkeypatch.setattr(pp, "refresh", lambda *a, **k: pytest.fail("--help probed the network"))
     assert pp.main(["--help"]) == 0
     assert pp.main(["--bogus"]) == 2
+
+
+def test_concurrent_host_price_refresh_does_not_lose_cache_rows(env, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    pp = _load('proxy_prices', 'proxy_prices.py')
+    barrier = threading.Barrier(2)
+    def fetch(url, e):
+        barrier.wait(timeout=3)
+        return proxy_doc()
+    monkeypatch.setattr(pp, '_fetch', fetch)
+    gateways = [dict(ANTHROPIC_BASE_URL='https://one.example.test'),
+                dict(ANTHROPIC_BASE_URL='https://two.example.test')]
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(lambda e: pp.refresh(e, force=True), gateways))
+    assert all(r['response_models']['gpt-x'] for r in results)
+    assert set(pp.read_cache()) == {'one.example.test', 'two.example.test'}
+
+
+def test_failed_gpt_only_refresh_retains_response_prices(env, monkeypatch):
+    pp = _load('proxy_prices', 'proxy_prices.py')
+    monkeypatch.setattr(pp, '_fetch', lambda *args: {'data': [dict(model_name='gpt-x',
+        model_info=dict(input_cost_per_token=1e-6, output_cost_per_token=2e-6))]})
+    good = pp.refresh(GW, force=True)
+    monkeypatch.setattr(pp, '_fetch', lambda *args: None)
+    failed = pp.refresh(GW, force=True)
+    assert failed['response_models'] == good['response_models']
+    assert failed['last_error'] == 'unreachable'
