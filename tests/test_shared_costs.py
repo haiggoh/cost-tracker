@@ -172,6 +172,7 @@ def test_cli_json_and_statusline_use_shared_total(tmp_path, monkeypatch, capsys)
     (config / 'proxy-prices.json').write_text(json.dumps({'example.test': dict(response_models=prices(m))}))
     monkeypatch.setattr(ct, 'collect', lambda *a, **kw: dict(
         billed_usd=1.25, period_days_utc=['2026-11-18'], quarantined=[], reset_anchored_sessions=[]))
+    pathlib.Path(ct.HISTORY_PATH).write_text('')
     assert ct.main(['report', '--combined', '--json']) == 0
     result = json.loads(capsys.readouterr().out)['shared']
     assert result['combined_usd'] == pytest.approx(1.250467)
@@ -252,3 +253,15 @@ def test_legacy_reset_to_zero_does_not_lose_second_identical_request(tmp_path, m
     result = m.collect(['2026-11-18'], price_tables={'example.test': prices(m)})
     assert result['responses'] == 2
     assert result['codex_usd'] == pytest.approx(.000934)
+
+
+def test_missing_claude_inputs_cannot_claim_complete_zero(tmp_path, monkeypatch, capsys):
+    ct, _ = load_ct(tmp_path, today='2026-11-18', make_dirs=False)
+    m, root = setup(tmp_path, monkeypatch)
+    write(root, 'placeholder.jsonl', [])
+    monkeypatch.setattr(ct, 'collect', lambda *a, **kw: dict(
+        billed_usd=0, period_days_utc=['2026-11-18'], quarantined=[], reset_anchored_sessions=[]))
+    assert ct.main(['report', '--combined', '--json']) == 2
+    result = json.loads(capsys.readouterr().out)['shared']
+    assert result['claude_inputs_available'] is False
+    assert 'Claude ledger/history/transcript inputs unavailable' in result['diagnostics']
