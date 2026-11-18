@@ -295,7 +295,7 @@ import glob, importlib.util, json, os
 spec = importlib.util.spec_from_file_location("bt", os.environ["TALLY"])
 bt = importlib.util.module_from_spec(spec); spec.loader.exec_module(bt)
 seen, bad = set(), set()
-paths = sorted(glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")),
+paths = sorted(glob.glob(os.path.join(os.environ["TMP"], "transcripts", "*.jsonl")),
                key=os.path.getmtime, reverse=True)[:25]
 for p in paths:
     try:
