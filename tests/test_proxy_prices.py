@@ -247,5 +247,9 @@ def test_failed_gpt_only_refresh_retains_response_prices(env, monkeypatch):
     good = pp.refresh(GW, force=True)
     monkeypatch.setattr(pp, '_fetch', lambda *args: None)
     failed = pp.refresh(GW, force=True)
+    assert good['source_url'] == 'https://gw.example.test/model/info'
+    assert good['response_price_basis'] == 'canonical model/info table'
+    assert failed['source_url'] == good['source_url']
+    assert failed['response_price_basis'] == good['response_price_basis']
     assert failed['response_models'] == good['response_models']
     assert failed['last_error'] == 'unreachable'

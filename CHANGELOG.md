@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.21.2] — 2026-11-19
+
+- Price Codex GPT usage from the gateway model/info rows verbatim, including context and service tiers. Do not apply the Claude-derived regional markup to canonical GPT prices.
+- Preserve the canonical price-table URL and basis across cache refreshes and failed probes, and expose them in combined reports. Keep Claude gateway inference separate; invalid inferred markup cannot discard valid GPT prices.
+- Add direct-price, custom-price and source-preservation regressions; rebuild the portable package.
+
 ## [0.21.1] — 2026-11-18
 
 - Apply the learned regional gateway markup to GPT base token rates once, matching the Claude pricing axis. Reject invalid cached markup with an incomplete pricing diagnostic.

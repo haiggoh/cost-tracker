@@ -40,9 +40,9 @@ imported history placeholders with zero billable categories do not become new sp
 
 Codex is priced from the existing `proxy-prices.json` cache, using the endpoint's
 published ordinary-input, cache-read, cache-creation and output rates, including
-context and service tiers. GPT base rates receive the cache's learned regional
-gateway markup once; Claude's already adjusted totals retain their factor. The
-combined report displays both factors. If Codex has one priced gateway and the
+context and service tiers. Canonical GPT rows apply verbatim: the Claude-derived
+markup is never multiplied into a listed GPT price. The combined report exposes
+the price-table source and URL, while Claude's own factor remains separate. If Codex has one priced gateway and the
 report lacks Claude connection credentials, it infers Claude's common gateway,
 labels that inference and marks coverage incomplete. An explicit Claude connection
 or credential prevents that inference. Reasoning tokens are already in output and

@@ -243,7 +243,7 @@ def _cost(data, rates):
 
 
 def _gateway_markup(entry):
-    """GPT base rates use the same learned regional premium as Claude on the gateway."""
+    """Learned Claude factor for host inference; never applied to canonical GPT rows."""
     if not entry.get('proxy'):
         return 1.0
     value = entry.get('markup')
@@ -292,6 +292,7 @@ def collect(days, price_tables=None):
         stamps = {}
     total, unpriced, endpoints = 0.0, 0, set()
     gateway_markups = {}
+    price_sources, price_urls = {}, {}
     by_day, by_session = {}, {}
     for rid, day, raw in rows:
         data = json.loads(raw)
@@ -304,26 +305,39 @@ def collect(days, price_tables=None):
             rates = price_tables.get(host, {}).get(data['model'])
             try:
                 if not rates: raise ValueError('missing published model price')
-                factor = _gateway_markup(cache.get(host, {}))
-                cost = _cost(data, rates) * factor
-                if cache.get(host, {}).get('proxy'):
-                    gateway_markups[host] = factor
+                # model/info already supplies this model's canonical prices.
+                cost = _cost(data, rates)
             except ValueError as e:
                 unpriced += 1
                 diagnostics.append(str(e) + ': ' + data['model'])
                 continue
+            entry = cache.get(host, {})
+            price_sources[host] = 'canonical model/info table'
+            if entry.get('source_url'):
+                price_urls[host] = entry['source_url']
+            elif entry.get('path'):
+                parsed = urlparse(endpoint)
+                price_urls[host] = parsed._replace(
+                    path=entry['path'], params='', query='', fragment='').geturl()
+            if entry.get('proxy'):
+                try:
+                    gateway_markups[host] = _gateway_markup(entry)
+                except ValueError as e:
+                    # Invalid Claude inference must not discard valid GPT prices.
+                    diagnostics.append(str(e) + ' (Claude inference only): ' + host)
         total += cost
         by_day[day] = by_day.get(day, 0.0) + cost
         sid = data['session']
         by_session[sid] = by_session.get(sid, 0.0) + cost
     return dict(codex_usd=round(total, 6), responses=len(rows), unpriced_responses=unpriced,
                 legacy_estimated_responses=len(legacy_rows), gateway_markups=gateway_markups,
+                price_sources=price_sources, price_urls=price_urls,
                 days_utc=days, by_day=by_day, by_session=by_session,
                 complete=not diagnostics, diagnostics=sorted(set(diagnostics)),
                 refreshed_at=datetime.now(timezone.utc).isoformat(), price_fetched_at=stamps,
                 ledger=dbpath, endpoints=sorted(endpoints), key_scope_verified=False,
                 scope='all locally available Codex responses; historical endpoints inferred from current provider config; key membership unverified',
-                basis='native response tokens x published GPT base rates x learned gateway regional markup; legacy cumulative deltas separately estimated', gateway_confirmed_usd=None,
+                basis='native response tokens x canonical model/info token rates; legacy cumulative deltas separately estimated', gateway_confirmed_usd=None,
                 reserved_spend_usd=None)
 
 
@@ -379,7 +393,9 @@ def render_table(data):
              'Claude Code USD | Codex USD | Combined USD',
              f"{data['claude_code_usd']:.6f} | {data['codex_usd']:.6f} | {data['combined_usd']:.6f}",
              'Refreshed: ' + data['refreshed_at'],
-             'Gateway factors: Claude ' + str(data['claude_gateway_factor']) + '; Codex ' + str(data.get('gateway_markups', {})),
+             'Claude gateway factor: ' + str(data['claude_gateway_factor']),
+             'Codex pricing: ' + ', '.join(sorted(set(data.get('price_sources', {}).values()))),
+             'Price URLs: ' + ', '.join(sorted(set(data.get('price_urls', {}).values()))),
              'Coverage: ' + ('available records priced' if data['complete'] else 'INCOMPLETE'),
              'Scope: ' + data['scope'],
              'Gateway-confirmed billing and reserved spend: unknown']

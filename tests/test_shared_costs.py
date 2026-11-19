@@ -267,7 +267,7 @@ def test_missing_claude_inputs_cannot_claim_complete_zero(tmp_path, monkeypatch,
     assert 'Claude ledger/history/transcript inputs unavailable' in result['diagnostics']
 
 
-def test_cached_gateway_markup_applies_to_both_hosts_once(tmp_path, monkeypatch):
+def test_canonical_gpt_rows_ignore_claude_markup_and_keep_claude_inference(tmp_path, monkeypatch):
     m, root = setup(tmp_path, monkeypatch)
     write(root, 'a.jsonl', records())
     cfg = tmp_path / 'config'
@@ -275,7 +275,10 @@ def test_cached_gateway_markup_applies_to_both_hosts_once(tmp_path, monkeypatch)
     (cfg / 'proxy-prices.json').write_text(json.dumps({'example.test': {
         'proxy': True, 'markup': 1.1, 'response_models': prices(m), 'fetched_at': 1}}))
     codex = m.collect(['2026-11-18'])
-    assert codex['codex_usd'] == pytest.approx(round(.000467 * 1.1, 6))
+    assert codex['codex_usd'] == pytest.approx(.000467)
+    assert codex['price_sources']['example.test'] == 'canonical model/info table'
+    assert 'Codex pricing: canonical model/info table' in m.render_table(m.combine(
+        dict(billed_usd=0, markup=1, connection='gateway'), codex))
     for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'):
         monkeypatch.delenv(key, raising=False)
     claude = dict(billed_usd=2.0, markup=1.0, connection='first-party',
@@ -294,7 +297,7 @@ def test_cached_gateway_markup_applies_to_both_hosts_once(tmp_path, monkeypatch)
             assert direct['claude_gateway_inferred'] is False
 
 
-def test_invalid_cached_gateway_markup_never_silently_priced(tmp_path, monkeypatch):
+def test_invalid_claude_markup_does_not_discard_canonical_gpt_price(tmp_path, monkeypatch):
     m, root = setup(tmp_path, monkeypatch)
     write(root, 'a.jsonl', records())
     cfg = tmp_path / 'config'; cfg.mkdir()
@@ -302,5 +305,21 @@ def test_invalid_cached_gateway_markup_never_silently_priced(tmp_path, monkeypat
         'proxy': True, 'markup': -1, 'response_models': prices(m)}}))
     result = m.collect(['2026-11-18'])
     assert not result['complete']
-    assert result['unpriced_responses'] == 1
+    assert result['unpriced_responses'] == 0
+    assert result['codex_usd'] == pytest.approx(.000467)
     assert any('invalid gateway markup' in d for d in result['diagnostics'])
+
+
+def test_custom_canonical_gpt_row_and_price_url_are_preserved(tmp_path, monkeypatch):
+    m, root = setup(tmp_path, monkeypatch)
+    write(root, "a.jsonl", records())
+    cfg = tmp_path / "config"; cfg.mkdir()
+    rows = prices(m)
+    rows["gpt-test"]["input_cost_per_token"] = 9e-6
+    (cfg / "proxy-prices.json").write_text(json.dumps({"example.test": {
+        "proxy": True, "markup": 1.25, "response_models": rows,
+        "source_url": "https://example.test/custom/model/info"}}))
+    result = m.collect(["2026-11-18"])
+    assert result["codex_usd"] == pytest.approx(.000957)
+    assert result["price_urls"] == {"example.test": "https://example.test/custom/model/info"}
+    assert result["price_sources"] == {"example.test": "canonical model/info table"}
