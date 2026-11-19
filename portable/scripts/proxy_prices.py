@@ -285,6 +285,7 @@ def refresh(env=None, force=False):
         entry = {"proxy": bool(models), "checked_at": now, "fetched_at": now,
                  "path": urlparse(url).path or "/", "models": models,
                  "response_models": _response_prices(doc),
+                 "source_url": url, "response_price_basis": "canonical model/info table",
                  "markup": markup, "matched": matched, "custom": custom,
                  "official_verified_at": _official_verified_at()}
     os.makedirs(config_dir(), exist_ok=True)
