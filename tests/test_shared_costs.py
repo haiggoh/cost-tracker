@@ -310,6 +310,53 @@ def test_invalid_claude_markup_does_not_discard_canonical_gpt_price(tmp_path, mo
     assert any('invalid gateway markup' in d for d in result['diagnostics'])
 
 
+def _legacy_event(stamp, total):
+    return dict(type='event_msg', timestamp=stamp,
+                payload=dict(type='token_count', info=dict(total_token_usage=total,
+                                                           last_token_usage=total)))
+
+
+TOKEN = dict(input_tokens=100, output_tokens=30, cached_input_tokens=20, cache_write_input_tokens=10)
+
+
+def test_legacy_day_survives_later_native_day(tmp_path, monkeypatch):
+    """Known-bad: a legacy-only day must not be erased by a later native day of the same session."""
+    m, root = setup(tmp_path, monkeypatch)
+    rows = records()[:2] + [_legacy_event('2026-11-18T01:00:00Z', TOKEN)]
+    rows += records('native-next-day', '2026-11-19T01:00:00Z')
+    write(root, 'a.jsonl', rows)
+    r = m.collect(['2026-11-18'], price_tables={'example.test': prices(m)})
+    assert r['responses'] == 1 and r['legacy_estimated_responses'] == 1
+    assert r['codex_usd'] == pytest.approx(.000467)
+    r19 = m.collect(['2026-11-19'], price_tables={'example.test': prices(m)})
+    assert r19['responses'] == 1 and r19['legacy_estimated_responses'] == 0
+
+
+def test_mixed_day_nonoverlap_retained(tmp_path, monkeypatch):
+    """Known-bad: a trailing legacy-only interval on a mixed day is retained, not suppressed."""
+    m, root = setup(tmp_path, monkeypatch)
+    rows = records('native-1', '2026-11-18T01:00:00Z')
+    later = dict(TOKEN, input_tokens=TOKEN['input_tokens'] + 100, output_tokens=TOKEN['output_tokens'] + 30)
+    rows.append(_legacy_event('2026-11-18T02:00:00Z', later))
+    write(root, 'a.jsonl', rows)
+    r = m.collect(['2026-11-18'], price_tables={'example.test': prices(m)})
+    assert r['responses'] == 2 and r['legacy_estimated_responses'] == 1
+    assert r['codex_usd'] == pytest.approx(.000467 + .0005)
+
+
+def test_ambiguous_overlap_marks_incomplete(tmp_path, monkeypatch):
+    """Known-bad: legacy usage covered by the native stream on the same day is suppressed
+    visibly (diagnostic + INCOMPLETE), never silently."""
+    m, root = setup(tmp_path, monkeypatch)
+    rows = records()[:2] + [_legacy_event('2026-11-18T00:30:00Z', TOKEN)]
+    rows += records('native-1', '2026-11-18T01:00:00Z')
+    write(root, 'a.jsonl', rows)
+    r = m.collect(['2026-11-18'], price_tables={'example.test': prices(m)})
+    assert r['responses'] == 1 and r['legacy_estimated_responses'] == 0
+    assert not r['complete']
+    assert any('overlap' in d for d in r['diagnostics'])
+
+
 def test_custom_canonical_gpt_row_and_price_url_are_preserved(tmp_path, monkeypatch):
     m, root = setup(tmp_path, monkeypatch)
     write(root, "a.jsonl", records())
