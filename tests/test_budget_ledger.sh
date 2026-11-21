@@ -392,6 +392,39 @@ case "$H" in
   *) bad "--help documents the env vars" "COST_TRACKER_CAP_USD" "$H" ;;
 esac
 # The tell that it did not RUN: a real run always prints "today's spend ... $<digit>".
+# --- shared-scope snapshot (A4): the warning consumes the SAME cached snapshot -------
+# With one shared scope configured and a fresh cached snapshot, the budget warning's
+# headline is the shared-access day amount (what the cap actually measures), labelled —
+# not the Claude-only ledger sum. Control: no scope config -> ledger-only figure.
+SHCFG="$TMP/shared-config"; mkdir -p "$SHCFG/shared-snapshots"
+TODAY_UTC="$(date -u +%F)"
+cat > "$SHCFG/budget-scopes.json" <<'JSON'
+{"scopes": [{"id": "joyia-shared", "label": "JoyIA shared key"}]}
+JSON
+cat > "$SHCFG/shared-snapshots/joyia-shared-$TODAY_UTC.json" <<JSON
+{"schema":"cost-tracker/shared-snapshot/1","snapshot_id":"t1234","scope_id":"joyia-shared","scope_label":"JoyIA shared key","day_utc":"$TODAY_UTC","estimated_usd":"31.370000","combined_usd":31.37,"by_host":{"claude_code":30.9,"codex":0.47,"claude_desktop":null,"other":null},"unassigned_usd":null,"gateway_confirmed_usd":null,"gateway_observed_at":null,"gateway_source":null,"reserved_usd":null,"cap_usd":40.0,"discrepancy_usd":null,"last_refreshed_at":"$(date -u +%FT%TZ)","pricing_sources":{},"coverage":{"complete":true,"missing_sources":[],"unpriced_requests":0,"ambiguous_overlap":false,"inferred_bindings":false,"freshness":"live-at-write"},"diagnostics":[],"primary_amount_usd":31.37,"primary_basis":"local estimate (coverage complete)","budget_state":"unknown","headroom_usd":null}
+JSON
+tally_shared() {  # $1 = COST_TRACKER_CONFIG_DIR
+  HOME="$TMP" BUDGET_TALLY_LEDGER_DIR="$FREE_LEDGER" BUDGET_TALLY_PROJECTS_DIR="$TMP/none" \
+    BUDGET_TALLY_STAMP="$TMP/stamp-$RANDOM" COST_TRACKER_MARKUP=1 BUDGET_TALLY_CAP_USD=40 \
+    COST_TRACKER_CONFIG_DIR="$1" ANTHROPIC_BASE_URL="" \
+    python3 "$TALLY" 2>&1
+}
+OUT="$(tally_shared "$SHCFG")"
+case "$OUT" in
+  *'$31.37'*'shared'*) ok "warning shows the shared-scope snapshot amount, labelled" ;;
+  *) bad "warning shows the shared-scope snapshot amount, labelled" "'\$31.37' + 'shared'" "$OUT" ;;
+esac
+OUT="$(tally_shared "$TMP/no-config")"
+case "$OUT" in
+  *'$36.00'*) ok "control: no scope config keeps the ledger-only figure" ;;
+  *) bad "control: no scope config keeps the ledger-only figure" "'\$36.00'" "$OUT" ;;
+esac
+case "$OUT" in
+  *shared*) bad "control: no 'shared' label without a scope" "no 'shared'" "$OUT" ;;
+  *) ok "control: no 'shared' label without a scope" ;;
+esac
+
 if printf '%s' "$H" | grep -q "today's spend"; then
   bad "--help does not print a live tally" "no live tally" "printed one"
 else

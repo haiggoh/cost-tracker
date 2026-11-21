@@ -198,6 +198,39 @@ has "a SUBSCRIPTION session's dollar figure is labelled api-equiv (rate_limits r
 hasnt "…with no dollar denominator" "$(seg_line "$OUT")" '/$'
 has "…and the renderer still shows the 5h window" "$OUT" "5h 24%"
 
+# --- the shared-scope segment (A4): ONE cached snapshot, labelled -------------
+# The ordinary render must show the shared-access day amount (what the $40 cap
+# actually measures against), read from the cached snapshot, and label it.
+TMPD="$(mktemp -d)"
+mkdir -p "$TMPD/ledger" "$TMPD/shared-config/shared-snapshots"
+TODAY_UTC="$(date -u +%F)"
+printf '%s 30.12 0\n' "$TODAY_UTC" > "$TMPD/ledger/aaaaaaaa-0000-0000-0000-000000000001"
+printf '%s 5.00 5.00\n' "$TODAY_UTC" > "$TMPD/ledger/aaaaaaaa-0000-0000-0000-000000000002"
+cat > "$TMPD/shared-config/budget-scopes.json" <<'JSON'
+{"scopes": [{"id": "joyia-shared", "label": "JoyIA shared key"}]}
+JSON
+cat > "$TMPD/shared-config/shared-snapshots/joyia-shared-$TODAY_UTC.json" <<JSON
+{"schema":"cost-tracker/shared-snapshot/1","snapshot_id":"t1234","scope_id":"joyia-shared","scope_label":"JoyIA shared key","day_utc":"$TODAY_UTC","estimated_usd":"31.370000","combined_usd":31.37,"by_host":{"claude_code":30.9,"codex":0.47,"claude_desktop":null,"other":null},"unassigned_usd":null,"gateway_confirmed_usd":null,"gateway_observed_at":null,"gateway_source":null,"reserved_usd":null,"cap_usd":40.0,"discrepancy_usd":null,"last_refreshed_at":"$(date -u +%FT%TZ)","pricing_sources":{},"coverage":{"complete":true,"missing_sources":[],"unpriced_requests":0,"ambiguous_overlap":false,"inferred_bindings":false,"freshness":"live-at-write"},"diagnostics":[],"primary_amount_usd":31.37,"primary_basis":"local estimate (coverage complete)","budget_state":"unknown","headroom_usd":null}
+JSON
+shared_render() {
+    printf '%s' "$1" | env COST_TRACKER_STATUSLINE=1 \
+        COST_TRACKER_LEDGER_DIR="$TMPD/ledger" \
+        COST_TRACKER_HISTORY="$TMPD/nonexistent-history.log" \
+        COST_TRACKER_CONFIG_DIR="$TMPD/shared-config" \
+        COST_TRACKER_PROJECTS_DIR="$TMPD/no-transcripts" \
+        LOCAL_AGENTS_LEDGER_DIR="$TMPD/no-savings" \
+        sh "$RENDER" 2>/dev/null | sed $'s/\033\[[0-9;]*m//g'
+}
+OUT="$(shared_render "$PAY")"
+has "the ordinary statusline shows the SHARED-scope day amount from the snapshot" \
+    "$(seg_line "$OUT")" "today: \$31.37/\$40 shared"
+has "…and labels the figure as the shared-access amount" "$(seg_line "$OUT")" "shared"
+# No scope config (the earlier no-config case) must render exactly as before: the
+# shared segment is opt-in by configuration, never invented.
+OUT="$(seg_render "$PAY" 40)"
+has "no scope config keeps the plain today segment" "$(seg_line "$OUT")" "today: \$30.12/\$40"
+hasnt "…and adds no shared label" "$(seg_line "$OUT")" "shared"
+
 # THE SYMLINK CASE, which is how the renderer is actually reached once wired: via
 # ~/.claude/scripts/statusline-render.sh pointing into the plugin. A plain
 # dirname "$0" resolves to the symlink's directory, where the sibling CLI is NOT,

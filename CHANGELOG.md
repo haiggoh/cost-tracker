@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.21.3] — 2026-11-21 — Shared-key budget snapshot and legacy-coverage hotfix
+
+- Hotfix the shared combined estimate: legacy-only Codex days and trailing legacy intervals of a session are no longer suppressed by a later native day; native records stay authoritative for covered intervals and any suppressed overlap is flagged INCOMPLETE instead of vanishing. Cumulative legacy deltas are anchored on native responses so mixed transcripts are not double-counted.
+- Add one cached shared budget snapshot (`cost-tracker/shared-snapshot/1`) per configured scope and UTC day: `report --combined` produces it, and the ordinary `statusline --fast`, `statusline --combined --fast` and the budget-tally warnings consume the same generation, labelled `shared` / `(INCOMPLETE)` / `(stale)` / `CAP REACHED`. The fast path never imports or scans; a detached single-flight `--refresh-shared` worker keeps the cache fresh. Scope config: `budget-scopes.json`; explicit unknown `--scope` fails loudly.
+- Add `bin/shared_snapshot.py` (read-only cache inspector, `--help`), tests for the snapshot contract, render/warning assertions, and rebuild the portable package including the new module.
 ## [0.21.2] — 2026-11-19
 
 - Price Codex GPT usage from the gateway model/info rows verbatim, including context and service tiers. Do not apply the Claude-derived regional markup to canonical GPT prices.

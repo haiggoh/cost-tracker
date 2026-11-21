@@ -88,6 +88,14 @@ def _day(stamp):
     return dt.astimezone(timezone.utc).date().isoformat()
 
 
+def _ts(stamp):
+    """Normalized UTC instant (…Z) so stored timestamps compare lexicographically."""
+    dt = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        raise ValueError('usage timestamp lacks timezone')
+    return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
 def _usage(value):
     if not isinstance(value, dict):
         raise ValueError('invalid usage object')
@@ -160,10 +168,16 @@ def _import(conn, root, config):
                         if day not in ctx['event_days']: ctx['event_days'].append(day)
                         try:
                             cumulative = _usage(cumulative)
-                            previous = ctx.get('previous_usage') or {k: 0 for k in cumulative}
+                            # Anchor the cumulative delta on native responses seen so far: a
+                            # mixed transcript's first legacy event would otherwise replay
+                            # every native-covered turn and double-count them.
+                            previous = (ctx.get('previous_usage')
+                                        or ctx.get('native_cum')
+                                        or {k: 0 for k in cumulative})
                             reset = any(cumulative[k] < previous.get(k, 0) for k in cumulative)
                             if reset:
                                 ctx['generation'] += 1
+                                ctx['native_cum'] = {k: 0 for k in cumulative}
                                 usage = _usage(info.get('last_token_usage'))
                             else:
                                 usage = {k: cumulative[k] - previous.get(k, 0) for k in cumulative}
@@ -177,7 +191,8 @@ def _import(conn, root, config):
                             signature = json.dumps([ctx['session'], ctx['generation'], cumulative], sort_keys=True)
                             rid = 'legacy:' + hashlib.sha256(signature.encode()).hexdigest()
                             data = dict(usage=usage, model=ctx['model'], provider=provider,
-                                        endpoint=endpoint, tier=ctx.get('tier', 'default'), session=ctx['session'])
+                                        endpoint=endpoint, tier=ctx.get('tier', 'default'),
+                                        session=ctx['session'], ts=_ts(r['timestamp']))
                             conn.execute('INSERT OR IGNORE INTO legacy VALUES (?,?,?)',
                                          (rid, day, json.dumps(data, sort_keys=True)))
                         except (TypeError, ValueError):
@@ -196,7 +211,12 @@ def _import(conn, root, config):
                         data = dict(usage=usage, model=payload.get('model') or ctx['model'],
                                     provider=provider, endpoint=endpoint,
                                     tier=payload.get('service_tier') or ctx.get('tier', 'default'),
-                                    session=payload.get('session_id') or ctx['session'])
+                                    session=payload.get('session_id') or ctx['session'],
+                                    ts=_ts(r['timestamp']))
+                        cum = ctx.get('native_cum') or {k: 0 for k in usage}
+                        for k in usage:
+                            cum[k] = cum.get(k, 0) + usage[k]
+                        ctx['native_cum'] = cum
                         raw = json.dumps(data, sort_keys=True)
                         existing = conn.execute('SELECT day, data FROM responses WHERE id=?', (rid,)).fetchone()
                         previous = json.loads(existing[1]) if existing else None
@@ -271,9 +291,32 @@ def collect(days, price_tables=None):
                 diagnostics.append('no native response records for some Codex usage')
         placeholders = ','.join('?' for _ in days)
         rows = conn.execute('SELECT id, day, data FROM responses WHERE day IN (' + placeholders + ')', days).fetchall()
-        native_sessions = {json.loads(raw)['session'] for (raw,) in conn.execute('SELECT data FROM responses')}
+        # Coverage-aware native/legacy selection. A session's legacy deltas are authoritative
+        # only where the native response stream does not cover that session-day: if any
+        # native record exists for (session, day), the native stream is authoritative up to
+        # its LAST record timestamp and legacy deltas after that point (turns whose usage
+        # record was never captured) are retained. Everything else is suppressed and
+        # flagged as an ambiguous overlap — never silently dropped, never summed on top.
+        native_cover = {}
+        for day, raw in conn.execute('SELECT day, data FROM responses'):
+            d = json.loads(raw)
+            native_cover.setdefault(day, {}).setdefault(d['session'], []).append(d.get('ts'))
         legacy_rows = conn.execute('SELECT id, day, data FROM legacy WHERE day IN (' + placeholders + ')', days).fetchall()
-        legacy_rows = [r for r in legacy_rows if json.loads(r[2])['session'] not in native_sessions]
+        kept, suppressed = [], 0
+        for r in legacy_rows:
+            d = json.loads(r[2])
+            stamps = native_cover.get(r[1], {}).get(d['session'])
+            if not stamps:
+                kept.append(r)
+                continue
+            last_native = max((t for t in stamps if t), default=None)
+            if last_native is None or d.get('ts') is None or d['ts'] <= last_native:
+                suppressed += 1
+            else:
+                kept.append(r)
+        if suppressed:
+            diagnostics.append(str(suppressed) + ' legacy usage record(s) suppressed as ambiguous native/legacy overlap')
+        legacy_rows = kept
         rows.extend(legacy_rows)
         diagnostics.extend(row[0] for row in conn.execute(
             'SELECT DISTINCT reason FROM issues WHERE day IN (' + placeholders + ') OR day="*"', days))

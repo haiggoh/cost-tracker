@@ -170,6 +170,8 @@ def test_cli_json_and_statusline_use_shared_total(tmp_path, monkeypatch, capsys)
     config = tmp_path / 'config'
     config.mkdir(exist_ok=True)
     (config / 'proxy-prices.json').write_text(json.dumps({'example.test': dict(response_models=prices(m))}))
+    (config / 'budget-scopes.json').write_text(
+        json.dumps({'scopes': [{'id': 'joyia-shared', 'label': 'JoyIA shared key'}]}))
     monkeypatch.setattr(ct, 'collect', lambda *a, **kw: dict(
         billed_usd=1.25, period_days_utc=['2026-11-18'], quarantined=[], reset_anchored_sessions=[]))
     pathlib.Path(ct.HISTORY_PATH).write_text('')

@@ -50,6 +50,31 @@ are not added again. To refresh prices, run `cost-tracker report --combined --re
 The credential comes from the Codex provider's `env_key` (normally
 `OPENAI_API_KEY`) or an explicit `COST_TRACKER_CODEX_TOKEN`. No inference is sent.
 
+### Shared budget scope and the one cached snapshot (0.21.3)
+
+The daily cap counts every endpoint that uses the same access, so the combined
+figure — not the Claude-only one — is what the statusline should show. Configure
+one shared scope in `~/.claude/cost-tracker/budget-scopes.json`:
+
+```json
+{"scopes": [{"id": "joyia-shared", "label": "JoyIA shared key"}]}
+```
+
+With exactly one scope configured, `cost-tracker report --combined` (and a
+detached single-flight `statusline --refresh-shared` worker the statusline arms
+when the cache is missing or stale) writes ONE cached snapshot per scope and UTC
+day under `~/.claude/cost-tracker/shared-snapshots/` (schema
+`cost-tracker/shared-snapshot/1`). The ordinary `statusline --fast --payload -`
+render, `statusline --combined --fast` and the budget-tally warnings all read
+that SAME generation: the segment shows `today: $X/$cap shared` (labelled
+`(INCOMPLETE)`/`(stale)`/`CAP REACHED` when true), and the fast path never imports
+or scans transcripts — it answers from the cache only. `--scope <id>` selects a
+scope explicitly and fails loudly on an unknown id. No scope configured means the
+previous unscoped behaviour, unchanged. Key membership across endpoints is still
+reported as unverified; the snapshot never invents headroom or a correction
+factor. Legacy-only Codex days and trailing legacy intervals are no longer
+suppressed by a later native day of the same session (0.21.3 hotfix).
+
 These are **token-derived estimates**, not gateway-confirmed billing or reserved
 spend. Historical endpoint attribution uses current Codex provider configuration;
 Claude's old ledger carries no endpoint/key attribution. Per-key membership is

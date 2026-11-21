@@ -1055,6 +1055,31 @@ SIDE_SPENDERS = (
 _SIDE_LABEL = {s["id"]: s["label"] for s in SIDE_SPENDERS}
 LAST_BY_SOURCE = {}   # set by compute(); read by format_line
 LAST_RECON_LINES = {}   # set by compute(); permanent reconstructed lines, read by format_line
+LAST_SHARED_SNAP = None   # set by compute(); the shared-scope snapshot, read by format_line
+
+
+def _shared_snapshot_today():
+    """The cached shared-scope snapshot for TODAY, or None. When one shared budget
+    scope is configured and its snapshot is fresh, that snapshot's primary amount is
+    what the daily cap actually measures against (every endpoint on the same access),
+    so the warning consumes it instead of the Claude-only ledger sum. Missing, stale,
+    unconfigured or unreadable -> None: the warning then keeps its local figure and
+    never presents a combined amount as verified. Never raises."""
+    try:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "shared_snapshot.py")
+        spec = importlib.util.spec_from_file_location("shared_snapshot", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        scope = mod.resolve_scope(None, config_dir=CONFIG_DIR)
+        if scope is None:
+            return None
+        snap = mod.read_cached_snapshot(scope["id"], TODAY, config_dir=CONFIG_DIR)
+        if snap is None or mod.is_stale(snap):
+            return None
+        return snap
+    except Exception:
+        return None
 
 
 def _remember_dirs():
@@ -1314,6 +1339,13 @@ def compute():
     recon_total += recon_lines_total
 
     total = ledger_total + recon_total
+    # When a fresh shared-scope snapshot exists, its primary amount is what the daily
+    # cap measures against (every endpoint on the same access), so cap arithmetic uses
+    # it; format_line labels the line accordingly and applies no further markup to it.
+    global LAST_SHARED_SNAP
+    LAST_SHARED_SNAP = _shared_snapshot_today()
+    if LAST_SHARED_SNAP is not None and LAST_SHARED_SNAP.get("primary_amount_usd") is not None:
+        total = float(LAST_SHARED_SNAP["primary_amount_usd"])
     priced_any = recon_priced or bool(ledger)
     pct = total / EFFECTIVE_CAP_USD if EFFECTIVE_CAP_USD else 0.0
     remaining = (EFFECTIVE_CAP_USD - total) if EFFECTIVE_CAP_USD else None
@@ -1439,6 +1471,22 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
     # Report the basis honestly: authoritative ledger vs token reconstruction
     # (reconstruction over-counts, so flag when any is mixed in).
     basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES)
+    snap = LAST_SHARED_SNAP
+    if snap and snap.get("primary_amount_usd") is not None:
+        # One snapshot generation, same as the statusline/CLI: the shared-access day
+        # amount, labelled, never re-marked-up here (the snapshot is already combined).
+        amt = float(snap["primary_amount_usd"])
+        label = f"shared {snap.get('scope_label')} snapshot ({snap.get('scope_id')}, {snap.get('day_utc')})"
+        incomplete = "" if snap["coverage"]["complete"] else " INCOMPLETE"
+        reached = " CAP REACHED" if snap.get("budget_state") == "cap-reached" else ""
+        if not CAP_USD:
+            return (f"budget-tally: today's spend ({session_scope}) ≈ ${amt:.2f} "
+                    f"({label}{incomplete}{reached}; no cap known){note}")
+        pct_snap = amt / EFFECTIVE_CAP_USD if EFFECTIVE_CAP_USD else 0.0
+        prefix = (f"⚠️ WARNING — {pct_snap * 100:.0f}% of daily cap used: "
+                  if warn and pct_snap >= WARN_PCT else "budget-tally: ")
+        return (f"{prefix}today's spend ({session_scope}) ≈ ${amt:.2f} of ${CAP_USD:.0f} cap "
+                f"(~${CAP_USD - amt:.2f} left) — {label}{incomplete}{reached}{note}")
     kind = CONNECTION.get("kind") or ""
     if not CAP_USD:
         # No dollar cap applies to this connection (subscription windows, a Console key's

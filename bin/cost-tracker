@@ -944,6 +944,64 @@ def _spawn_estimate_refresh():
         pass
 
 
+def _shared_refresh_lock_path():
+    return os.path.join(CONFIG_DIR, "shared-snapshots", ".refresh.lock")
+
+
+def _spawn_shared_refresh():
+    """Rebuild the cached shared-scope snapshot in a detached child. Best-effort;
+    COST_TRACKER_NO_SPAWN=1 disables it. ONE at a time: the lock file carries the
+    single-flight, exactly like the estimate refresh."""
+    if os.environ.get("COST_TRACKER_NO_SPAWN") == "1":
+        return
+    lock = _shared_refresh_lock_path()
+    try:
+        if (os.path.exists(lock) and datetime.now(timezone.utc).timestamp()
+                - os.path.getmtime(lock) < _SHARED_SNAPSHOT_TTL_S):
+            return
+        os.makedirs(os.path.dirname(lock), exist_ok=True)
+        open(lock, "w").close()
+        subprocess.Popen([sys.executable, os.path.realpath(__file__), "statusline",
+                          "--refresh-shared"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def _write_shared_snapshot(scope, data, combined):
+    """Persist the ONE snapshot generation every consumer reads. Single-day periods
+    only: the snapshot is a (scope, UTC day) record and a multi-day report is not."""
+    if scope is None or combined is None or len(data.get("period_days_utc") or []) != 1:
+        return
+    try:
+        snap = _shared_snapshot().build_snapshot(
+            scope, data["period_days_utc"][0], claude_billed=data.get("billed_usd"),
+            shared_result=combined, cap_usd=data.get("cap_usd"))
+        _shared_snapshot().write_snapshot(snap)
+    except (OSError, ValueError) as e:
+        print("cost-tracker: shared snapshot not cached: " + str(e), file=sys.stderr)
+
+
+def _refresh_shared_snapshot(scope):
+    """The detached worker: full non-fast build for TODAY, then cache write. Silent."""
+    if scope is None:
+        return 0
+    try:
+        data = collect("today", None, fast=False)
+        shared = _shared_costs()
+        combined = shared.combine(data, shared.collect(data["period_days_utc"]))
+        _write_shared_snapshot(scope, data, combined)
+        lock = _shared_refresh_lock_path()
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+    except Exception:
+        return 0  # a failed refresh must never break the caller; the cache stays as-is
+    return 0
+
+
 def estimate_unseen(days, covered_sids, fast=False):
     """Sum of budget-tally's per-day estimates over `days`. Never raises.
 
@@ -1786,6 +1844,23 @@ def render_statusline(data):
     if not saved:
         saved = None
     what = "cloud " if saved is not None else ""
+    # The shared-scope snapshot (A4) is the PRIMARY spend when it exists: the cap the
+    # user is measured against counts every endpoint on that access, so the day figure
+    # is the snapshot's, labelled. Its own cap rides along; without one the segment
+    # keeps the local-only denominator rules below.
+    shared_snap = data.get("shared_snapshot")
+    if shared_snap and shared_snap.get("primary_amount_usd") is not None:
+        shown = float(shared_snap["primary_amount_usd"])
+        scap = shared_snap.get("cap_usd")
+        seg = f"{label}: {what}${shown:.2f}"
+        if scap:
+            seg += f"/${scap:.0f}"
+        seg += " shared"
+        if not shared_snap["coverage"]["complete"]:
+            seg += " (INCOMPLETE)"
+        if shared_snap.get("budget_state") == "cap-reached":
+            seg += " CAP REACHED"
+        return seg
     if data.get("connection") == "subscription":
         # A subscription is metered in percent windows, never dollars; the dollar figure is an
         # API-equivalent estimate that "isn't relevant for billing" (code.claude.com/docs/en/
@@ -2233,6 +2308,18 @@ def _shared_costs():
     return module
 
 
+_SHARED_SNAPSHOT_TTL_S = 900
+
+
+def _shared_snapshot():
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "shared_snapshot.py")
+    spec = importlib.util.spec_from_file_location("shared_snapshot", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="cost-tracker",
@@ -2257,6 +2344,8 @@ def main(argv=None):
     rep = sub.add_parser("report", help="per-session breakdown table for a period")
     add_period(rep)
     rep.add_argument("--combined", action="store_true", help="refresh shared Claude Code + Codex estimate")
+    rep.add_argument("--scope", metavar="SCOPE_ID", default=None,
+                     help="shared budget scope id (see budget-scopes.json); explicit id must exist")
     rep.add_argument("--refresh-prices", action="store_true", help="with --combined, refresh Codex endpoint prices without inference")
     rep.add_argument("--full-ids", action="store_true", help="print full session UUIDs")
     rep.add_argument("--days", type=int, metavar="N", dest="ndays",
@@ -2273,6 +2362,11 @@ def main(argv=None):
     st = sub.add_parser("statusline", help="one-line statusline segment (today)")
     st.add_argument("--combined", action="store_true", help="refresh and show shared Claude Code + Codex estimate")
     st.add_argument("--refresh-prices", action="store_true", help="with --combined, refresh Codex endpoint prices without inference")
+    st.add_argument("--scope", metavar="SCOPE_ID", default=None,
+                    help="shared budget scope id (see budget-scopes.json); explicit id must exist")
+    st.add_argument("--refresh-shared", action="store_true", dest="refresh_shared",
+                    help="rebuild the cached shared-scope snapshot and exit (the statusline "
+                         "spawns this in the background)")
     st.add_argument("--json", action="store_true")
     st.add_argument("--fast", action="store_true",
                     help="skip the history log and read savings from the derived rollup; "
@@ -2374,6 +2468,18 @@ def main(argv=None):
     if ndays is not None and ndays > MAX_WINDOW_DAYS:
         ap.error(f"--days is capped at {MAX_WINDOW_DAYS} (one row per UTC day); "
                  f"use --since YYYY-MM-DD for a longer span")
+
+    # Resolve the shared budget scope BEFORE any work: an explicit id that is not
+    # configured must fail loudly here, never fall through to an unscoped run.
+    scope = None
+    if cmd in ("report", "statusline"):
+        try:
+            scope = _shared_snapshot().resolve_scope(getattr(args, "scope", None))
+        except ValueError as e:
+            ap.error(str(e))
+
+    if getattr(args, "refresh_shared", False):
+        return _refresh_shared_snapshot(scope)
 
     if cmd == "calibrate":
         data = calibrate(since_days=args.since_days, tolerance=args.tolerance)
@@ -2539,6 +2645,34 @@ def main(argv=None):
     basis_flag = getattr(args, "phantom_basis", None)
     if basis_flag:
         os.environ["COST_TRACKER_PHANTOM_BASIS"] = basis_flag
+    # FAST + --combined answers ONLY from the cached snapshot generation: the per-render
+    # path must never launch a full import (a 20s stall), never scan, never infer. A
+    # missing or stale cache arms the detached single-flight refresh and is LABELLED,
+    # never presented as a verified figure.
+    if getattr(args, "combined", False) and getattr(args, "fast", False):
+        snap_mod = _shared_snapshot()
+        if scope is None:
+            print("cost-tracker: no shared scope configured (budget-scopes.json)",
+                  file=sys.stderr)
+            return 2
+        snap = snap_mod.read_cached_snapshot(scope["id"], TODAY)
+        if snap is None or snap_mod.is_stale(snap):
+            _spawn_shared_refresh()
+        if snap is None:
+            print("today combined estimate: unavailable (no cached snapshot; run "
+                  "cost-tracker report --combined) (INCOMPLETE); key scope unverified")
+            return 2
+        amount = snap.get("primary_amount_usd")
+        complete = bool(snap["coverage"]["complete"])
+        line = ("today combined estimate: $" + format(float(amount), ".2f")
+                + ("" if complete else " (INCOMPLETE)")
+                + "; scope " + snap.get("scope_label", scope["id"])
+                + (" (stale)" if snap_mod.is_stale(snap) else "")
+                + ("; cap reached" if snap.get("budget_state") == "cap-reached" else "")
+                + "; key scope unverified")
+        print(line)
+        return 0 if complete else 2
+
     # The per-day series is a second pass over the merged records, so it is requested only when
     # the breakdown will actually draw it — never for a plain report, and never for the statusline.
     data = collect(period, since, fast=getattr(args, "fast", False) and not getattr(args, "combined", False),
@@ -2562,9 +2696,24 @@ def main(argv=None):
                 combined["complete"] = False
                 combined["diagnostics"].append("Claude ledger/history/transcript inputs unavailable")
             data["shared"] = combined
+            # The producer writes the ONE snapshot generation consumers read (A4).
+            _write_shared_snapshot(scope, data, combined)
         except Exception as e:
             print("cost-tracker: combined report unavailable: " + str(e), file=sys.stderr)
             return 2
+    if (cmd == "statusline" and getattr(args, "fast", False)
+            and not getattr(args, "combined", False)):
+        # The ORDINARY render: when a shared scope is configured, its cached snapshot
+        # is the primary day figure. No cache (or a stale one) arms the detached
+        # refresh and the segment keeps its local-only figure — never a guess.
+        snap_mod = _shared_snapshot()
+        if scope is not None:
+            snap = snap_mod.read_cached_snapshot(scope["id"], TODAY)
+            if snap is not None:
+                data["shared_snapshot"] = snap
+            if snap is None or snap_mod.is_stale(snap):
+                _spawn_shared_refresh()
+
     if combined and not getattr(args, "json", False):
         if cmd == "statusline":
             print(f"today combined estimate: $" + format(combined["combined_usd"], ".2f")
