@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Add a dedicated cost panel as a pane mod (`/cost-panel`, hooks/cost-panel-register.tsx): renders the same cached shared-scope snapshot as the statusline, CLI and budget-tally warnings, with cap-reached/INCOMPLETE/stale states, per-host subtotals and diagnostics. No MCP server is created for the plugin; the pane reads the snapshot via the read-only shared_snapshot.py inspector and refreshes through the bounded single-flight producer, only while mounted. View-model tests run via node --test in the ship gate.
+
 ## [0.21.3] — 2026-11-21 — Shared-key budget snapshot and legacy-coverage hotfix
 
 - Hotfix the shared combined estimate: legacy-only Codex days and trailing legacy intervals of a session are no longer suppressed by a later native day; native records stay authoritative for covered intervals and any suppressed overlap is flagged INCOMPLETE instead of vanishing. Cumulative legacy deltas are anchored on native responses so mixed transcripts are not double-counted.

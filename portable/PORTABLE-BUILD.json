@@ -77,6 +77,30 @@
     {
       "adaptation_class": "mechanical",
       "evidence_level": "source-inspected",
+      "kind": "hook-script",
+      "notes": "pane mod (hooks.json modules); execs the CLI from scripts/ in the portable layout \u2014 same bin/scripts fallback as waypoints",
+      "path": "hooks/cost-panel-register.tsx",
+      "surfaces": {
+        "chat": false,
+        "code": true,
+        "cowork": true
+      }
+    },
+    {
+      "adaptation_class": "native-unchanged",
+      "evidence_level": "source-inspected",
+      "kind": "hook-script",
+      "notes": "pure view model imported by the register module; no engine imports",
+      "path": "hooks/cost-panel-view.ts",
+      "surfaces": {
+        "chat": false,
+        "code": true,
+        "cowork": true
+      }
+    },
+    {
+      "adaptation_class": "mechanical",
+      "evidence_level": "source-inspected",
       "kind": "script",
       "notes": "CLI moved bin/ -> scripts/ per C1; loads its sibling modules from its own dir (scripts/ in portable) \u2014 verbatim copy works",
       "path": "scripts/cost-tracker",
@@ -103,7 +127,9 @@
     ".claude-plugin/plugin.json": "0c13e1e21f84ac061fcd18bf263acc75aeb2bf7a5d114db7f46714abcc7dc32b",
     "commands/cost-today.md": "db4e956d0fb0d5aa48819d52b1e64fa5a8c0600f9f10cde431c03b3b2e2c7f3d",
     "docs/history-and-incidents.md": "e7624dbf940eec702e8d46aa9b38c6eb2d6bf31de4fd55f382dbf542b742319a",
-    "hooks/hooks.json": "b3dc434d530a1f735113b7e6b57a08ae86ff03fccaf3eaa4e5834fc0fdcca910",
+    "hooks/cost-panel-register.tsx": "d1b276952a714d337ed5f47da46de0c3de1ce269e63054c5cd1665ccb32e0c12",
+    "hooks/cost-panel-view.ts": "c067033bb3152b452ca5a9dbd337dfa6c63e0b5b5b647da2dc9a1051063a5f7e",
+    "hooks/hooks.json": "344b8b900cd2f5ad8b5e0aab5e5e5d61b03d3b0eae98408975a78b5ad1d075f5",
     "hooks/session-end-reconcile.py": "91835e3a623f3be564786528a5c038e6c1abd9598fd0d1a116812ed74de3e174",
     "scripts/budget-tally.py": "9cdc853955aed45e9de91b47368ec8bdd67258ac0e295b98e5d6e9258942d285",
     "scripts/cost-tracker": "899454a7d0b989512b4615dfb796eb1622c8eba3f95cc1ccb11d6531e92df26d",
@@ -115,7 +141,7 @@
     "skills/cost-tracker/SKILL.md": "e68fb18e08d9e0c6f4fe2a6c709818f98133ff3e410d4ae0eccc72b3de556f02"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "a4c2176a2a0f6999981ab5c7542ef0a23dfde5ac",
+  "source_commit": "141f605c12747c1cb1da661c0337d3565aabc75b",
   "source_repo": "haiggoh/cost-tracker",
   "transform_version": "1"
 }

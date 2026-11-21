@@ -10,5 +10,6 @@
         ]
       }
     ]
-  }
+  },
+  "modules": ["./cost-panel-register.tsx"]
 }

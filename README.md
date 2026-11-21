@@ -75,6 +75,17 @@ reported as unverified; the snapshot never invents headroom or a correction
 factor. Legacy-only Codex days and trailing legacy intervals are no longer
 suppressed by a later native day of the same session (0.21.3 hotfix).
 
+### Dedicated cost panel (pane mod, no MCP server)
+
+`/cost-panel` opens a **Cost** pane wherever the surface seats it — Claude Code
+terminal, the Claude desktop app's Code tab, and ChatGPT desktop's Codex mode where
+mods run. The pane renders the SAME cached snapshot as the statusline/CLI/warnings
+(read via the bundled read-only `shared_snapshot.py` inspector; refresh via the
+bounded single-flight `statusline --refresh-shared`, at most one in-flight and only
+while the pane is mounted). No MCP server is created for this plugin. States shown:
+cap-reached / INCOMPLETE / stale, per-host subtotals, missing sources, diagnostics,
+snapshot id and refresh time; unknown amounts stay "unknown", never $0.00.
+
 These are **token-derived estimates**, not gateway-confirmed billing or reserved
 spend. Historical endpoint attribution uses current Codex provider configuration;
 Claude's old ledger carries no endpoint/key attribution. Per-key membership is
