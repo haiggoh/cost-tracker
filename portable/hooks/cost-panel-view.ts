@@ -75,3 +75,19 @@ export function panelRows(reply: SnapshotReply): PanelRow[] {
   rows.push(...s.diagnostics.map(d => ({ text: `⚠ ${d}`, dim: true })));
   return rows;
 }
+
+/** One-line glance for surfaces that seat the pane as a widget (clicks may not
+ * reach it, so no button): "💸 $31.37/$40 · shared · INCOMPLETE". */
+export function glanceRow(reply: SnapshotReply): string {
+  const s = reply.snapshot;
+  if (!s) return "💸 cost panel: no snapshot yet";
+  const amount = fmt(s.primary_amount_usd);
+  const cap = s.cap_usd !== null ? `/${fmt(s.cap_usd)}` : "";
+  const flags: [boolean, string][] = [
+    [s.budget_state === "cap-reached", " CAP REACHED"],
+    [!s.coverage.complete, " INCOMPLETE"],
+    [reply.stale === true, " stale"],
+  ];
+  const state = flags.find(([on]) => on)?.[1] ?? "";
+  return `💸 ${amount}${cap} · ${s.scope_label}${state}`;
+}

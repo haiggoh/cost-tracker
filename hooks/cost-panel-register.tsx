@@ -5,7 +5,7 @@
 // desktop app's Code tab, and ChatGPT desktop's Codex mode where mods run.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import { panelRows, type SnapshotReply } from './cost-panel-view'
+import { glanceRow, panelRows, type SnapshotReply } from './cost-panel-view'
 
 const PANE = 'cost-panel'
 const REFRESH_MS = 30_000 // only while the pane is mounted; one in-flight max
@@ -61,6 +61,14 @@ export const register: Register = (on) => {
       name: 'cost-panel',
       description: 'Open/close the shared budget cost panel (same snapshot as the statusline)',
     })
+    // Seat-aware launch (user 2026-11-22): the engine's session.start event carries the
+    // surface. Desktop apps (Claude desktop Code tab, ChatGPT desktop Codex mode where
+    // mods run) get the pane ON by default; the terminal TUI keeps it optional —
+    // /cost-panel opens it on demand there.
+    if (e.surface === 'desktop') {
+      update($, snap, () => load($) as never)
+      await $.ui.open({ id: PANE, title: 'Cost', rows: PANE_ROWS })
+    }
     return next(e)
   })
 
@@ -83,6 +91,10 @@ export const register: Register = (on) => {
     // Refresh at most every REFRESH_MS and only while mounted; never a standing poller.
     if (!read($, refreshing) && Date.now() - read($, lastRefresh) > REFRESH_MS) {
       void refresh($)
+    }
+    // A desktop widget is a glance: clicks may not reach it, so no refresh button.
+    if (e.props.placement === 'widget') {
+      return <Text dimColor>{glanceRow(reply)}</Text>
     }
     const rows = panelRows(reply)
     return (

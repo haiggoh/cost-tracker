@@ -86,6 +86,12 @@ while the pane is mounted). No MCP server is created for this plugin. States sho
 cap-reached / INCOMPLETE / stale, per-host subtotals, missing sources, diagnostics,
 snapshot id and refresh time; unknown amounts stay "unknown", never $0.00.
 
+The mod is seat-aware (the engine's `session.start` event carries `surface`): in the
+**desktop apps** (Claude desktop Code tab, ChatGPT desktop Codex mode where mods run)
+the pane opens **on by default** at launch — a widget seat renders a one-line glance
+instead of the full pane. In the **terminal TUI** the pane stays **optional** and opens
+only via `/cost-panel`.
+
 These are **token-derived estimates**, not gateway-confirmed billing or reserved
 spend. Historical endpoint attribution uses current Codex provider configuration;
 Claude's old ledger carries no endpoint/key attribution. Per-key membership is

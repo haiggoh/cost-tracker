@@ -126,3 +126,29 @@ test('portable layout: scripts/ is probed when bin/ is absent', async ($, on) =>
   const inspector = rec.runs.filter(a => a.some(x => x.endsWith('shared_snapshot.py')))
   expect(inspector.some(a => a.some(x => x.includes('/scripts/')))).toBe(true)
 })
+
+test('desktop surface auto-opens the pane at launch', async ($, on) => {
+  const rec = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  expect(rec.opens.map(o => o.id)).toContain('cost-panel') // on by default in desktop apps
+  expect(rec.runs.some(a => a.some(x => x.endsWith('shared_snapshot.py')))).toBe(true)
+})
+
+test('terminal surface keeps the pane optional (opens only via /cost-panel)', async ($, on) => {
+  const rec = engine(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true } as never)
+  expect(rec.opens.map(o => o.id)).not.toContain('cost-panel') // no auto-open in the TUI
+  await runPanel($ as never)
+  expect(rec.opens.map(o => o.id)).toContain('cost-panel') // still opens on demand
+})
+
+test('widget placement renders the glance line, not the full pane with button', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true } as never)
+  const mounted = (await $.ui.mount({
+    plugin: 'cost-tracker', surface: 'desktop', component: 'Pane', requestId: 'cost-panel',
+    props: { title: 'Cost', isFocused: false, bodyColumns: 40, placement: 'widget',
+             scroll: { offset: 0, bodyRows: 1 }, view: {} },
+  } as never)) as { unmount: () => Promise<void>; text?: () => string }
+  await mounted.unmount()
+})

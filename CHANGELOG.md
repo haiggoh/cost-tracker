@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Add a dedicated cost panel as a pane mod (`/cost-panel`, hooks/cost-panel-register.tsx): renders the same cached shared-scope snapshot as the statusline, CLI and budget-tally warnings, with cap-reached/INCOMPLETE/stale states, per-host subtotals and diagnostics. No MCP server is created for the plugin; the pane reads the snapshot via the read-only shared_snapshot.py inspector and refreshes through the bounded single-flight producer, only while mounted. View-model tests run via node --test in the ship gate.
+- Seat-aware launch: the pane opens on by default in the desktop apps (session.start surface=desktop; widget seats get a one-line glance) and stays optional in the terminal TUI (opens only via /cost-panel).
 
 ## [0.21.3] — 2026-11-21 — Shared-key budget snapshot and legacy-coverage hotfix
 

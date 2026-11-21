@@ -3,7 +3,7 @@
    test fixtures: the amounts ARE the fixture; assertion regexes need no prose examples */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { panelRows, type Snapshot, type SnapshotReply } from "../hooks/cost-panel-view.ts";
+import { glanceRow, panelRows, type Snapshot, type SnapshotReply } from "../hooks/cost-panel-view.ts";
 
 const base: Snapshot = {
   schema: "cost-tracker/shared-snapshot/1",
@@ -66,4 +66,13 @@ test("missing snapshot renders the error, never a $0.00", () => {
   const t = texts({ snapshot: null, error: "no cached snapshot yet; refresh first" });
   assert.match(t, /no cached snapshot yet/);
   assert.doesNotMatch(t, /\$0\.00/);
+});
+
+test("widget glance line: amount/cap, scope, state flag, no button", () => {
+  assert.equal(
+    glanceRow({ snapshot: base }),
+    "💸 $31.37/$40.00 · JoyIA shared key");
+  assert.match(glanceRow({ snapshot: { ...base, budget_state: "cap-reached" } }), /CAP REACHED/);
+  assert.match(glanceRow({ snapshot: base, stale: true }), /stale/);
+  assert.equal(glanceRow({ snapshot: null, error: "x" }), "💸 cost panel: no snapshot yet");
 });
