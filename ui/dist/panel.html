@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cost-tracker panel</title>
+<style>
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 12px; color: inherit; }
+  h1 { font-size: 15px; margin: 0 0 6px; }
+  .amount { font-size: 22px; font-weight: 700; margin: 4px 0; }
+  .basis, .meta { opacity: .75; font-size: 12px; margin: 2px 0; }
+  .state { font-size: 12px; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
+  .state.cap { background: #b91c1c; color: #fff; }
+  .state.incomplete { background: #b45309; color: #fff; }
+  .state.stale { background: #a16207; color: #fff; }
+  .state.error, p.error { color: #b91c1c; }
+  table.hosts { border-collapse: collapse; margin: 8px 0; }
+  table.hosts td, table.hosts th { border: 1px solid #8884; padding: 2px 8px; text-align: left; }
+  .diags { color: #b45309; font-size: 12px; }
+  .missing { color: #b45309; font-size: 12px; }
+  footer { margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="root"><p>loading snapshot…</p></div>
+<script>(()=>{var e=n=>n.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"),u=n=>n==null?"unknown":`$${n.toFixed(2)}`;function d(n){let s=n.snapshot;if(!s)return`<p class="state error">${e(n.error??"no snapshot available")}</p>`;let r=s.cap_usd!==null?` / ${u(s.cap_usd)} cap`:"",t=u(s.primary_amount_usd),i=s.budget_state==="cap-reached"?'<span class="state cap">CAP REACHED</span>':s.coverage.complete?n.stale?'<span class="state stale">stale</span>':"":'<span class="state incomplete">INCOMPLETE</span>',o=Object.entries(s.by_host).map(([a,p])=>`<tr><td>${e(a)}</td><td>${p===null?"unknown":u(p)}</td></tr>`).join(""),l=s.diagnostics.length?`<ul class="diags">${s.diagnostics.map(a=>`<li>${e(a)}</li>`).join("")}</ul>`:"",c=s.coverage.missing_sources.length?`<p class="missing">missing sources: ${e(s.coverage.missing_sources.join(", "))}</p>`:"";return`
+<header>
+  <h1>${e(s.scope_label)} \u2014 ${e(s.day_utc)} (UTC)</h1>
+  <p class="amount">${t}${r} ${i}</p>
+  <p class="basis">basis: ${e(s.primary_basis)}${s.gateway_confirmed_usd!==null?` \xB7 gateway-confirmed ${e(s.gateway_confirmed_usd)}`:""}</p>
+  <p class="meta">snapshot ${e(s.snapshot_id)} \xB7 refreshed ${e(s.last_refreshed_at)} \xB7 headroom ${s.headroom_usd===null?"unknown":u(s.headroom_usd)}</p>
+</header>
+<table class="hosts"><thead><tr><th>host</th><th>today</th></tr></thead><tbody>${o}</tbody></table>
+${c}${l}
+<footer>
+  <button id="refresh" type="button">refresh (cached snapshot; bounded, no inference)</button>
+  <span id="refresh-note"></span>
+</footer>`}function g(n,s){let r=o=>{n.innerHTML=d(o);let l=n.querySelector?.("#refresh"),c=n.querySelector?.("#refresh-note");l&&c&&(l.onclick=async()=>{c.textContent="refreshing\u2026";let a=await s.callTool("refresh_cost_snapshot",{});n.innerHTML=d(JSON.parse(a))})},t=s,i=t.toolOutput!==void 0?JSON.parse(t.toolOutput):null;i?r(i):t.callTool("get_cost_snapshot",{}).then(o=>r(JSON.parse(o)))}typeof window<"u"&&window.openai&&g(window.document.getElementById("root")??window.document.body,window.openai);})();
+</script>
+</body>
+</html>
