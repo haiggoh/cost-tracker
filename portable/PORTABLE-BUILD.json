@@ -115,7 +115,7 @@
     "skills/cost-tracker/SKILL.md": "e68fb18e08d9e0c6f4fe2a6c709818f98133ff3e410d4ae0eccc72b3de556f02"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "deeef6a99d35ec90432205f729603ca8bcbd2c69",
+  "source_commit": "a4c2176a2a0f6999981ab5c7542ef0a23dfde5ac",
   "source_repo": "haiggoh/cost-tracker",
   "transform_version": "1"
 }
