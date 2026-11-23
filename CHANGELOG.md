@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.5] — 2026-11-23 — Restored-cloud resume no longer re-books yesterday; INCOMPLETE scoped to the period
+
+- Fix the local→cloud re-anchor in `cost-ledger-capture.sh`: when a session resumes on the gateway and Claude Code restores the frozen cloud cumulative (the local stretch's phantom is smaller than that cumulative, so it cannot contain it), the baseline already in force is kept. Before, `phantom − frozen + base` dropped it to the phantom and booked the whole pre-switch lifetime to the new day (measured 2026-11-23: $33 of 11-22 spend shown as today, `today: $43.83/$40`). Logged as `local->cloud-restored`.
+- An empty `$(date)` no longer writes malformed rows: the history/transition timestamp and the UTC day are taken once and retried once; still empty → that render's log line (or ledger write) is skipped instead of shifting every column (58 quarantined rows, 2026-11-19..22).
+- Quarantined records are scoped to the reported period: a malformed row whose UTC day is recoverable and outside the period no longer marks it INCOMPLETE. `doctor` still lists every quarantined record.
+- The statusline segment drops the `(INCOMPLETE)` label (user decision); coverage stays stated in `report`, the cost panel and the SessionStart line.
+
 ## [0.21.4] — 2026-11-22 — Cost panel pane mod (no MCP server), seat-aware desktop launch
 
 - Add a dedicated cost panel as a pane mod (`/cost-panel`, hooks/cost-panel-register.tsx): renders the same cached shared-scope snapshot as the statusline, CLI and budget-tally warnings, with cap-reached/INCOMPLETE/stale states, per-host subtotals and diagnostics. No MCP server is created for the plugin; the pane reads the snapshot via the read-only shared_snapshot.py inspector and refreshes through the bounded single-flight producer, only while mounted. View-model tests run via node --test in the ship gate.

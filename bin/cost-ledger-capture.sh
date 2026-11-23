@@ -60,11 +60,15 @@ if command -v jq >/dev/null 2>&1; then
     http://localhost*|http://127.0.0.1*|https://localhost*|https://127.0.0.1*)
       COST="0"; IS_LOCAL=1 ;;
   esac
-  if [ -n "$SID" ] && [ -n "$COST" ] && [ "$COST" != "null" ]; then
+  # The UTC day, retried once: an empty $(date) (see NOW_TS below) would otherwise write a
+  # dateless ledger record. Still empty -> skip this render's ledger write entirely; the
+  # statusline still renders, and the next render records the cumulative.
+  TODAY_UTC=$(date -u +%F 2>/dev/null)
+  [ -n "$TODAY_UTC" ] || TODAY_UTC=$(date -u +%F 2>/dev/null)
+  if [ -n "$SID" ] && [ -n "$COST" ] && [ "$COST" != "null" ] && [ -n "$TODAY_UTC" ]; then
     LEDGER="$HOME/.claude/cost-ledger"
     mkdir -p "$LEDGER" 2>/dev/null || true
     DEST="$LEDGER/$SID"
-    TODAY_UTC=$(date -u +%F)
     # Establish today's BASELINE = the cumulative cost carried into today for this
     # session. Read the prior record (own file only -> no cross-session race):
     #   - no file / brand-new session      -> baseline 0 (session starts today)
@@ -100,8 +104,16 @@ if command -v jq >/dev/null 2>&1; then
     # and deliberately OUTSIDE "$LEDGER" like the history log below (readers scan that
     # directory as sessions; see the note there).
     TRANS_LOG="$HOME/.claude/cost-ledger-transitions.log"
+    # ONE timestamp per render, retried once (0.21.5). `$(date ...)` intermittently came back
+    # EMPTY (58 history rows 2026-11-19..22, across 15 sessions, no torn writes): the row then
+    # starts with a blank field, every column shifts left, and readers quarantine it. An empty
+    # stamp now SKIPS the log lines instead — history rows are cumulative snapshots, so the
+    # next render supersedes a skipped one; a malformed row is worse than a missing one.
+    NOW_TS=$(date -u +%FT%TZ 2>/dev/null)
+    [ -n "$NOW_TS" ] || NOW_TS=$(date -u +%FT%TZ 2>/dev/null)
     log_transition() {
-      printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$SID" "$1" >> "$TRANS_LOG" 2>/dev/null || true
+      [ -n "$NOW_TS" ] || return 0
+      printf '%s %s %s\n' "$NOW_TS" "$SID" "$1" >> "$TRANS_LOG" 2>/dev/null || true
     }
     # CLOUD -> LOCAL (added 0.10.1). A local render must not ERASE the cloud cumulative the
     # session already reached: it FREEZES it. Before this, the gate wrote 0 and the record's
@@ -147,7 +159,18 @@ if command -v jq >/dev/null 2>&1; then
       # (cloud -> local -> cloud). With no earlier cloud stretch this reduces to the phantom.
       # Clamped at 0: a resume can restart the counter below the frozen figure, and a negative
       # baseline would be quarantined by every reader; the clamp undercounts only that case.
-      if LC_ALL=C awk -v p="$PRIOR_PHANTOM" -v c="$COST" \
+      #
+      # RESTORED-CLOUD RESUME (0.21.5, measured 2026-11-23 on ec04ea46). The formula above assumes
+      # the phantom INCLUDES the frozen cloud stretch. When the phantom is SMALLER than the frozen
+      # cloud cumulative it cannot — the local counter restarted at 0 — and if the resumed cloud
+      # counter is back at (or past) the frozen figure, Claude Code restored the cloud lifetime:
+      # the phantom is not in it at all, so the baseline already in force (same-day, or the
+      # rolled-over prior cumulative) is correct and must be kept. The formula here produced
+      # 1.21 - 33.43 + 33.43 = 1.21 and booked the whole pre-switch $33 to the new day.
+      if LC_ALL=C awk -v p="$PRIOR_PHANTOM" -v f="$PRIOR_CUM" -v c="$COST" \
+           'BEGIN{ exit !(p+0 > 0 && p+0 < f+0 && c+0 >= f+0) }' 2>/dev/null; then
+        log_transition "local->cloud-restored prior_phantom=$PRIOR_PHANTOM prior_cum=$PRIOR_CUM kept_base=$BASE"
+      elif LC_ALL=C awk -v p="$PRIOR_PHANTOM" -v c="$COST" \
            'BEGIN{ exit !(p+0 > 0 && c+0 > 0) }' 2>/dev/null; then
         if LC_ALL=C awk -v f="$PRIOR_CUM" 'BEGIN{ exit !(f+0 > 0) }' 2>/dev/null; then
           BASE=$(LC_ALL=C awk -v p="$PRIOR_PHANTOM" -v f="$PRIOR_CUM" -v b="$BASE" \
@@ -175,7 +198,8 @@ if command -v jq >/dev/null 2>&1; then
     # Field 6 (RAW_COST, added 2026-08-29) is what Claude Code reported before the local gate —
     # so the history shows the phantom accruing while local instead of a flat run of zeros, and
     # a handoff is legible after the fact rather than looking like a sudden spike.
-    printf '%s %s %s %s %s %s\n' "$(date -u +%FT%TZ)" "$SID" "$TODAY_UTC" "$COST" "$BASE" "$RAW_COST" \
+    [ -n "$NOW_TS" ] && [ -n "$TODAY_UTC" ] && \
+      printf '%s %s %s %s %s %s\n' "$NOW_TS" "$SID" "$TODAY_UTC" "$COST" "$BASE" "$RAW_COST" \
       >> "$HIST" 2>/dev/null || true
     # Keep it bounded: trim to the most recent 20000 lines (~weeks of renders) when it grows past
     # 25000, so an append-only file cannot grow without limit.

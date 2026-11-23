@@ -525,6 +525,31 @@ def _valid_date(s):
     return True
 
 
+def quarantine_day(raw):
+    """The UTC day a quarantined record still names, or None when none is recoverable.
+
+    A history row whose timestamp came out EMPTY (58 rows, 2026-11-19..22) shifts every
+    field one column left — the day is still there, one token early. Taking the first
+    token that is a real bare date recovers it; an ISO timestamp never matches DATE_RE."""
+    for tok in (raw or "").split():
+        if _valid_date(tok):
+            return tok
+    return None
+
+
+def scope_quarantine(quarantined, days):
+    """Only the quarantined records that can belong to `days`. A record whose day is
+    recoverable and OUTSIDE the period cannot affect it, so it must not mark the period
+    incomplete; a record with no recoverable day is kept (it might belong here)."""
+    days = set(days)
+    out = []
+    for q in quarantined:
+        d = quarantine_day(q.get("raw"))
+        if d is None or d in days:
+            out.append(q)
+    return out
+
+
 def parse_ledger_fields(session_id, fields, raw):
     """Apply the validation rules in a fixed order, so a record with two
     problems always reports the same one."""
@@ -1246,7 +1271,10 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
         # computed for a render that will not show it.
         "daily_series": (daily_totals(sorted(days)) if want_series and len(days) > 1 else None),
         "phantom_basis": phantom_basis_name(),
-        "quarantined": quarantined,
+        # Period-scoped (0.21.5): a malformed row from another day cannot change this
+        # period's figure, so it no longer marks it INCOMPLETE. `doctor` lists them all.
+        "quarantined": scope_quarantine(quarantined, days),
+        "quarantined_all": quarantined,
     }
 
 
@@ -1856,8 +1884,9 @@ def render_statusline(data):
         if scap:
             seg += f"/${scap:.0f}"
         seg += " shared"
-        if not shared_snap["coverage"]["complete"]:
-            seg += " (INCOMPLETE)"
+        # No "(INCOMPLETE)" here (user decision 2026-11-23): coverage is still stated in
+        # `report`, the cost panel and the SessionStart line — the one-line segment is the
+        # figure only.
         if shared_snap.get("budget_state") == "cap-reached":
             seg += " CAP REACHED"
         return seg
@@ -2227,7 +2256,7 @@ def render_doctor(data):
         lines.append("  exist before 2026-08-29, so older records are reported as `zero` rather")
         lines.append("  than asserted to be local. Both contribute $0 either way.")
         lines.append("")
-    q = data["quarantined"]
+    q = data.get("quarantined_all", data["quarantined"])   # doctor shows every day's
     if not q:
         lines.append("No quarantined records. Every record parsed as a valid session-day.")
         return "\n".join(lines)

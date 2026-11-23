@@ -251,6 +251,56 @@ printf '{"session_id":"%s","cost":{"total_cost_usd":1.0}}' "$SID12" \
 is "cloud-only session logs no transition" "$(grep -c " $SID11 " "$TR" 2>/dev/null || true)" "0"
 is "a session's FIRST render logs no transition" "$(grep -c " $SID12 " "$TR" 2>/dev/null || true)" "0"
 
+# --- A17: RESUMED ON CLOUD WITH THE CLOUD LIFETIME RESTORED (measured 2026-11-23, ec04ea46).
+# Cloud to $33.43, then a LOCAL stretch whose counter restarted at 0 (phantom only $1.21), then a
+# resume on cloud the next UTC day that reports the frozen cloud cumulative ($33.43) verbatim.
+# The phantom is smaller than the frozen figure, so it cannot contain the cloud stretch: the
+# re-anchor formula (phantom - frozen + base) dropped the baseline to $1.21 and booked the whole
+# pre-switch $33 to the new day. The counter restored the cloud lifetime: keep the baseline.
+SID13="dddddddd-0000-0000-0000-000000000001"
+L13="$TMP/.claude/cost-ledger/$SID13"
+render13() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID13" "$1" \
+  | HOME="$TMP" ANTHROPIC_BASE_URL="${2:-}" sh "$WRAPPER" > /dev/null; }
+printf '%s\n' "2000-01-01 33.426108 4.944170800000002 1.206540000000001 0" > "$L13"
+render13 33.426108 ""                     # resumed on cloud: restored cloud lifetime
+# shellcheck disable=SC2046
+set -- $(cat "$L13")
+is "restored-cloud resume keeps the rolled-over baseline" "$3" "33.426108"
+render13 42.42932979999997 ""
+# shellcheck disable=SC2046
+set -- $(cat "$L13")
+delta="$(awk -v c="$2" -v b="$3" 'BEGIN{printf "%.2f", c-b}')"
+is "restored-cloud resume books only today's cloud spend" "$delta" "9.00"
+if grep -q " $SID13 local->cloud-restored " "$TR" 2>/dev/null; then
+  ok "restored-cloud resume is logged as its own transition"
+else
+  bad "restored-cloud resume is logged as its own transition" "a local->cloud-restored line" \
+    "$(grep " $SID13 " "$TR" 2>/dev/null)"
+fi
+
+# --- A18: an EMPTY $(date) must never write a malformed row (58 rows, 2026-11-19..22).
+FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"
+SID14="eeeeeeee-0000-0000-0000-000000000001"
+HISTF="$TMP/.claude/cost-ledger-history.log"
+render14() { printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$SID14" "$1" \
+  | HOME="$TMP" PATH="$FAKEBIN:$PATH" ANTHROPIC_BASE_URL="" sh "$WRAPPER"; }
+# (a) only the timestamp format comes back empty: ledger written, NO history row.
+cat > "$FAKEBIN/date" <<'EOF'
+#!/bin/sh
+case "$*" in *T*) exit 0 ;; esac
+exec /bin/date "$@"
+EOF
+chmod +x "$FAKEBIN/date"
+render14 2.5 > /dev/null
+is "empty timestamp: ledger record still written" "$(cut -d' ' -f2 "$TMP/.claude/cost-ledger/$SID14")" "2.5"
+is "empty timestamp: no history row for the render" "$(grep -c "$SID14" "$HISTF" 2>/dev/null || true)" "0"
+is "no history row ever starts blank" "$(grep -c '^ ' "$HISTF" 2>/dev/null || true)" "0"
+# (b) date fails entirely: no dateless ledger record, statusline still renders.
+printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/date"
+out="$(render14 3.0)"
+is "date unavailable: statusline still renders" "$out" "RENDERED_OK"
+is "date unavailable: prior ledger record left intact" "$(cut -d' ' -f2 "$TMP/.claude/cost-ledger/$SID14")" "2.5"
+
 # --- A7: fail-safe. The passthrough must survive a ledger it cannot write.
 chmod 500 "$TMP/.claude/cost-ledger"
 out="$(render 99 "")"

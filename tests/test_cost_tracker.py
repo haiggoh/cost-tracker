@@ -321,6 +321,46 @@ def test_incompatible_savings_json_is_unmeasured_not_zero(tmp_path):
     assert ct.render_statusline(data) == "today: $5.00/$40"
 
 
+def test_quarantine_is_scoped_to_the_period(tmp_path):
+    """Measured 2026-11-23: 58 history rows with an EMPTY timestamp (fields shifted one
+    left) from 11-19..22 marked every later day INCOMPLETE. A malformed row whose day is
+    recoverable and outside the period cannot change it; doctor still lists all."""
+    ct, ledger = load_ct(tmp_path, today="2026-09-03", cap=40)
+    (ledger / "ffffffff-0000-0000-0000-000000000003").write_text("2026-09-03 5 0")
+    (tmp_path / "history.log").write_text(
+        " aaaaaaaa-0000-0000-0000-000000000001 2026-09-01 4.1 0 4.1\n"   # other day
+        " bbbbbbbb-0000-0000-0000-000000000001 2026-09-03 1.0 0 1.0\n"   # today
+        "garbage-without-any-day\n")                                    # unattributable
+    data = ct.collect("today")
+    raws = [q["raw"] for q in data["quarantined"]]
+    assert not any("2026-09-01" in r for r in raws)
+    assert any("2026-09-03" in r for r in raws)
+    assert any("garbage" in r for r in raws)
+    assert len(data["quarantined_all"]) == 3
+    assert "2026-09-01" in ct.render_doctor(data)
+
+
+def test_quarantine_outside_period_leaves_coverage_complete(tmp_path):
+    ct, ledger = load_ct(tmp_path, today="2026-09-03", cap=40)
+    (ledger / "ffffffff-0000-0000-0000-000000000004").write_text("2026-09-03 5 0")
+    (tmp_path / "history.log").write_text(
+        " aaaaaaaa-0000-0000-0000-000000000001 2026-09-01 4.1 0 4.1\n")
+    assert ct.collect("today")["quarantined"] == []
+
+
+def test_statusline_shared_segment_omits_the_incomplete_label(tmp_path):
+    """User decision 2026-11-23: the one-line statusline carries no "(INCOMPLETE)"
+    caveat. Coverage stays visible in report, the cost panel and SessionStart."""
+    ct, ledger = load_ct(tmp_path, cap=40)
+    (ledger / "ffffffff-0000-0000-0000-000000000002").write_text("2026-09-03 5 0")
+    data = ct.collect("today")
+    data["shared_snapshot"] = {"primary_amount_usd": 12.5, "cap_usd": 40.0,
+                               "coverage": {"complete": False}, "budget_state": "unknown"}
+    assert ct.render_statusline(data) == "today: $12.50/$40 shared"
+    data["shared_snapshot"]["budget_state"] = "cap-reached"
+    assert ct.render_statusline(data) == "today: $12.50/$40 shared CAP REACHED"
+
+
 def test_non_json_savings_output_is_unmeasured(tmp_path):
     fake = tmp_path / "chatty"
     fake.write_text('#!/bin/sh\necho "savings: about five dollars"\n')
