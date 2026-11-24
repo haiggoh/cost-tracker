@@ -357,7 +357,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.probe_claude_cli:
         out = probe_claude_cli(dict(os.environ))
-        print((out["host"] + " " + out["hint"]) if out else "")
+        if out and HINT_RE.match(out["hint"]):
+            print(out["host"] + " " + out["hint"])
+        else:
+            print("")
         return 0
     if not args.probe:
         ap.print_help()

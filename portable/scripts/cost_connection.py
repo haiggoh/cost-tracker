@@ -40,7 +40,9 @@ ANTHROPIC_HOSTS = ("api.anthropic.com",)
 IDENTITY = 1.0
 
 # --- key identity (last-4 hint) — the single home; key_identity.py aliases these ---
-HINT_RE = re.compile(r"^[A-Za-z0-9_-]{4}$")
+# hint_of takes the last 4 chars of an arbitrary secret, so any non-whitespace
+# 4-char string is a valid hint (real keys have ended in "=", e.g. "u1c=").
+HINT_RE = re.compile(r"^\S{4}$")
 DISPLAY_PREFIX = "sk-..."
 
 
