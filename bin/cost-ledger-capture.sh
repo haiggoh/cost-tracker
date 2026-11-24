@@ -27,6 +27,13 @@
 # "~$427 saved today" statusline). Legacy 4-field lines have no field 5 and self-heal at
 # the next UTC midnight, like the 2-field legacy rule above.
 #
+# A gateway render appends one more token, `k=<last4>` (field 6 on the session line,
+# field 7 on the history row): the last-4 hint of the key that paid at this render,
+# probed read-only from this process's env via bin/key_identity.py next to this script.
+# Old readers ignore trailing tokens (budget-tally reads fields 1-3; cost-tracker's
+# parser peels a trailing k= token), so the format stays append-only. Local renders
+# never carry it — free compute is no key's gateway spend.
+#
 # FAIL-SAFE: every capture step is guarded; the passthrough ALWAYS runs, so a
 # bug here can never blank the statusline.
 
@@ -182,6 +189,28 @@ if command -v jq >/dev/null 2>&1; then
         log_transition "local->cloud prior_phantom=$PRIOR_PHANTOM prior_cum=$PRIOR_CUM old_base=$OLD_BASE new_base=$BASE"
       fi
     fi
+    # KEY HINT (per-key budgets). When this render's endpoint is a KNOWN gateway and a
+    # token env is present, the paying key's last-4 hint is appended as a trailing
+    # `k=<hint>` token. The allowlist (provider registry + host_map + price cache) is
+    # evaluated inside bin/key_identity.py, so a key paired with e.g. api.openai.com is
+    # never tagged. Best-effort: any failure (no python3, probe error, odd token) leaves
+    # the line in its legacy shape; local renders never carry a hint.
+    KEY_HINT=""
+    HINT_TOK=""
+    if [ "$IS_LOCAL" = "0" ] && command -v python3 >/dev/null 2>&1; then
+      KISELF="$0"; HOPS=0
+      while [ -L "$KISELF" ] && [ "$HOPS" -lt 10 ]; do
+        LINK="$(readlink "$KISELF")"
+        case "$LINK" in /*) KISELF="$LINK" ;; *) KISELF="$(dirname "$KISELF")/$LINK" ;; esac
+        HOPS=$(( HOPS + 1 ))
+      done
+      KEY_HINT="$(python3 "$(dirname "$KISELF")/key_identity.py" --probe-claude-cli 2>/dev/null | awk '{print $2}')"
+      # exactly 4 hint chars, nothing else — never trust a weird token
+      case "$KEY_HINT" in
+        [A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]) HINT_TOK=" k=$KEY_HINT" ;;
+        *) HINT_TOK="" ;;
+      esac
+    fi
     # HISTORY (added 2026-08-18): the per-session file is OVERWRITTEN every render, so when a
     # figure looks wrong the state that produced it is already gone. That is exactly why the
     # 2026-08-08 over-report ($33.41 reported vs $8.37 authoritative) could not be root-caused:
@@ -199,7 +228,7 @@ if command -v jq >/dev/null 2>&1; then
     # so the history shows the phantom accruing while local instead of a flat run of zeros, and
     # a handoff is legible after the fact rather than looking like a sudden spike.
     [ -n "$NOW_TS" ] && [ -n "$TODAY_UTC" ] && \
-      printf '%s %s %s %s %s %s\n' "$NOW_TS" "$SID" "$TODAY_UTC" "$COST" "$BASE" "$RAW_COST" \
+      printf '%s %s %s %s %s %s%s\n' "$NOW_TS" "$SID" "$TODAY_UTC" "$COST" "$BASE" "$RAW_COST" "$HINT_TOK" \
       >> "$HIST" 2>/dev/null || true
     # Keep it bounded: trim to the most recent 20000 lines (~weeks of renders) when it grows past
     # 25000, so an append-only file cannot grow without limit.
@@ -235,10 +264,10 @@ if command -v jq >/dev/null 2>&1; then
       log_transition "local->cloud-zero carried_phantom=$PRIOR_PHANTOM frozen_cum=$PRIOR_CUM"
     fi
     if [ "$IS_LOCAL" = "1" ] || [ -n "$CARRY" ]; then
-      printf '%s %s %s %s %s\n' "$TODAY_UTC" "$COST" "$BASE" "${CARRY:-$RAW_COST}" "$PHBASE" > "$DEST.tmp" 2>/dev/null \
+      printf '%s %s %s %s %s%s\n' "$TODAY_UTC" "$COST" "$BASE" "${CARRY:-$RAW_COST}" "$PHBASE" "$HINT_TOK" > "$DEST.tmp" 2>/dev/null \
         && mv "$DEST.tmp" "$DEST" 2>/dev/null || true
     else
-      printf '%s %s %s\n' "$TODAY_UTC" "$COST" "$BASE" > "$DEST.tmp" 2>/dev/null \
+      printf '%s %s %s%s\n' "$TODAY_UTC" "$COST" "$BASE" "$HINT_TOK" > "$DEST.tmp" 2>/dev/null \
         && mv "$DEST.tmp" "$DEST" 2>/dev/null || true
     fi
   fi

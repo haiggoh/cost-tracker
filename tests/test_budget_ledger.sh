@@ -483,6 +483,64 @@ fi
 python3 "$TALLY" --nope >/dev/null 2>&1
 if [ "$?" -eq 2 ]; then ok "an unrecognised flag exits 2"; else bad "an unrecognised flag exits 2" "exit 2" "exit $?"; fi
 
+echo "D. per-key hint field (trailing k=<last4>) on session + history rows"
+# The wrapper probes bin/key_identity.py (copied next to it) whose gateway
+# allowlist here is just the host_map in the throwaway config dir.
+cp "$SCRIPTS_DIR/key_identity.py" "$SCRIPTS_DIR/cost_connection.py" "$TMP/bin/"
+KEYCFG="$TMP/.claude/cost-tracker"; mkdir -p "$KEYCFG"
+cat > "$KEYCFG/cap.json" <<'JSON'
+{"contract": 2, "connection": {"host_map": {"gw-key.example.test": "fake-gw"}}}
+JSON
+
+renderk() {  # $1 = sid, $2 = cost, $3 = base url, $4 = token ("" = unset)
+  printf '{"session_id":"%s","cost":{"total_cost_usd":%s}}' "$1" "$2" \
+    | HOME="$TMP" COST_TRACKER_CONFIG_DIR="$KEYCFG" ANTHROPIC_BASE_URL="$3" \
+      ANTHROPIC_AUTH_TOKEN="$4" sh "$WRAPPER"
+}
+
+# --- D1: known gateway + token -> session row gets k=<last4> as field 4, history row as field 7.
+SIDK="12121212-1212-1212-1212-121212121212"
+LK="$TMP/.claude/cost-ledger/$SIDK"
+out="$(renderk "$SIDK" 6.25 "https://gw-key.example.test/v1" "sk-fake-00000000wxyz")"
+is "D1: passthrough still verbatim with a key hint" "$out" "RENDERED_OK"
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$LK")
+is "D1: session row has the hint as a 4th field" "$#" "4"
+is "D1: hint field is k=<last4> only" "${4:-MISSING}" "k=wxyz"
+is "D1: booked cumulative unchanged" "$2" "6.25"
+hist_line="$(grep " $SIDK " "$TMP/.claude/cost-ledger-history.log" | tail -1)"
+# shellcheck disable=SC2086  # word splitting IS the record parser (as in A6)
+set -- $hist_line
+is "D1: history row has the hint as field 7" "${7:-MISSING}" "k=wxyz"
+
+# --- D2: api.openai.com pairing is NOT tagged (URL allowlist, not key shape).
+SIDK2="13131313-1313-1313-1313-131313131313"
+renderk "$SIDK2" 1.5 "https://api.openai.com/v1" "sk-fake-00000000wxyz" > /dev/null
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$TMP/.claude/cost-ledger/$SIDK2")
+is "D2: direct-provider URL gets no hint (3 fields)" "$#" "3"
+
+# --- D3: local lane + token -> no hint (local spend is never a gateway key's).
+SIDK3="14141414-1414-1414-1414-141414141414"
+renderk "$SIDK3" 8.0 "http://127.0.0.1:4000" "sk-fake-00000000wxyz" > /dev/null
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$TMP/.claude/cost-ledger/$SIDK3")
+is "D3: local render keeps the 5-field shape, no hint" "$#" "5"
+
+# --- D4: known gateway but no token -> no hint.
+SIDK4="15151515-1515-1515-1515-151515151515"
+renderk "$SIDK4" 2.0 "https://gw-key.example.test/v1" "" > /dev/null
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$TMP/.claude/cost-ledger/$SIDK4")
+is "D4: gateway without a token env writes no hint" "$#" "3"
+
+# --- D5: unknown host (not in the allowlist) + token -> no hint.
+SIDK5="16161616-1616-1616-1616-161616161616"
+renderk "$SIDK5" 2.0 "https://unknown.example.net" "sk-fake-00000000wxyz" > /dev/null
+# shellcheck disable=SC2046  # word splitting IS the record parser (as in A1)
+set -- $(cat "$TMP/.claude/cost-ledger/$SIDK5")
+is "D5: unknown host is not a gateway (no hint)" "$#" "3"
+
 
 echo
 printf 'passed %s, failed %s\n' "$PASS" "$FAIL"

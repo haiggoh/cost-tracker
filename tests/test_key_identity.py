@@ -80,11 +80,30 @@ def test_is_gateway_host_is_an_allowlist_not_a_shape():
     # a direct-provider API host is NEVER a gateway, even gateway-shaped keys aside
     assert ki.is_gateway_host("api.openai.com", known=known) is False
     assert ki.is_gateway_host("api.openai.com", known=set()) is False
+    # ...and NOT even if a user maps it into host_map by accident (dispatch finding 2026-11-24)
+    assert ki.is_gateway_host("api.openai.com", known={"api.openai.com"}) is False
     # local and first-party Anthropic are excluded even if listed
     assert ki.is_gateway_host("localhost", known={"localhost"}) is False
     assert ki.is_gateway_host("127.0.0.1", known=set()) is False
     assert ki.is_gateway_host("api.anthropic.com", known={"api.anthropic.com"}) is False
     assert ki.is_gateway_host("", known=known) is False
+
+
+def test_malformed_providers_registry_never_raises(tmp_path):
+    """Dispatch finding: providers.json = [] or {"providers": null} must not
+    crash the probe (best-effort: None, never raise)."""
+    ki = load_ki()
+    cfg = _cfg(tmp_path)
+    reg = tmp_path / "providers.json"
+    reg.write_text("[]")
+    env = {"COST_TRACKER_CONFIG_DIR": str(cfg), "COST_TRACKER_PROVIDERS": str(reg)}
+    assert GW in ki.known_gateway_hosts(env)          # host_map still read
+    reg.write_text('{"providers": null}')
+    assert GW in ki.known_gateway_hosts(env)
+    reg.write_text('{"providers": ["not", "a", "dict"]}')
+    assert GW in ki.known_gateway_hosts(env)
+    reg.write_text("{ not json")
+    assert GW in ki.known_gateway_hosts(env)
 
 
 def test_known_gateway_hosts_unions_registry_hostmap_and_price_cache(tmp_path):
@@ -264,6 +283,20 @@ def test_registry_save_is_atomic_and_private(tmp_path):
 
 
 # --- label resolution precedence ----------------------------------------------
+
+def test_probe_claude_cli_subcommand_prints_host_and_hint_only(tmp_path, monkeypatch, capsys):
+    ki = load_ki()
+    monkeypatch.setenv("COST_TRACKER_CONFIG_DIR", str(_cfg(tmp_path)))
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://" + GW)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", K1)
+    assert ki.main(["--probe-claude-cli"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out == GW + " aaaa"
+    assert K1 not in out and "00000000" not in out
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.openai.com/v1")
+    assert ki.main(["--probe-claude-cli"]) == 0
+    assert capsys.readouterr().out.strip() == ""
+
 
 def test_resolve_labels_precedence_joyia_then_refusal_then_file(tmp_path):
     ki = load_ki()

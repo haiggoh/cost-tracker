@@ -441,15 +441,39 @@ def cap_usd(auto_learn=False):
 
 # --- parsing -----------------------------------------------------------------
 
+_KI_MODULE = None
+
+
+def _key_identity():
+    """bin/key_identity.py, loaded by path (same loader shape as _connection()).
+    Owns the last-4-hint format (HINT_RE) so the ledger parser and the probe
+    module cannot drift apart."""
+    global _KI_MODULE
+    if _KI_MODULE is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        loader = SourceFileLoader("key_identity", os.path.join(here, "key_identity.py"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        if spec is None or spec.loader is None:
+            raise ImportError("cannot load key_identity.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _KI_MODULE = mod
+    return _KI_MODULE
+
+
 class Record:
     """One parsed ledger record. `valid` False means QUARANTINED with a reason."""
 
     __slots__ = ("session_id", "valid", "reason", "day", "cum", "baseline",
-                 "phantom", "phantom_base", "axis", "raw", "reset_anchored")
+                 "phantom", "phantom_base", "axis", "raw", "reset_anchored",
+                 "key_hint")
 
     def __init__(self, session_id, raw, valid, reason="", day=None, cum=0.0,
                  baseline=0.0, phantom=None, axis="", reset_anchored=False,
-                 phantom_base=None):
+                 phantom_base=None, key_hint=None):
         self.session_id = session_id
         self.raw = raw
         self.valid = valid
@@ -459,6 +483,9 @@ class Record:
         self.baseline = baseline
         self.phantom = phantom
         self.axis = axis
+        # The last-4 hint of the key that paid at record time (trailing `k=`
+        # token), or None on legacy rows — legacy spend is `unattributed`.
+        self.key_hint = key_hint
         # True when the session's own cumulative RESET below its carried-in baseline —
         # a resumed session, whose spend is anchored at the reset instead.
         self.reset_anchored = reset_anchored
@@ -552,7 +579,19 @@ def scope_quarantine(quarantined, days):
 
 def parse_ledger_fields(session_id, fields, raw):
     """Apply the validation rules in a fixed order, so a record with two
-    problems always reports the same one."""
+    problems always reports the same one.
+
+    A trailing `k=<hint>` token (the paying key's last 4 chars, appended by
+    cost-ledger-capture.sh) is peeled off FIRST, so even an all-digit hint can
+    never be mistaken for a numeric field. Legacy lines without the token parse
+    byte-for-byte as before; old prefix readers (budget-tally reads fields
+    0..2) never see the token at all."""
+    fields = list(fields)
+    key_hint = None
+    if fields and fields[-1].startswith("k="):
+        key_hint = fields.pop()[2:]
+        if not _key_identity().HINT_RE.match(key_hint or ""):
+            return Record(session_id, raw, False, "bad-key-hint")
     if len(fields) < 2:
         return Record(session_id, raw, False, "too-few-fields")
     if len(fields) > 5:
@@ -598,7 +637,8 @@ def parse_ledger_fields(session_id, fields, raw):
     else:
         axis = "cloud"
     return Record(session_id, raw, True, "", fields[0], cum, baseline, phantom, axis,
-                  reset_anchored=counter_reset, phantom_base=phantom_base)
+                  reset_anchored=counter_reset, phantom_base=phantom_base,
+                  key_hint=key_hint)
 
 
 def parse_ledger_line(session_id, text):
@@ -669,8 +709,15 @@ def read_history():
             if len(parts) < 5:
                 quarantined.append((lineno, "too-few-fields", line))
                 continue
+            if len(parts) > 7:
+                # 7 fields is the new maximum: TS SID DATE CUM BASE RAW [k=HINT]
+                quarantined.append((lineno, "too-many-fields", line))
+                continue
             _ts, sid, day = parts[0], parts[1], parts[2]
-            rec = parse_ledger_fields(sid, [day] + parts[3:5], line)
+            # parts[5] is RAW (pre-gate cost, used below); parts[6], when
+            # present, is the trailing k=<hint> token for the paying key.
+            rec = parse_ledger_fields(
+                sid, [day] + parts[3:5] + (parts[6:7] if len(parts) >= 7 else []), line)
             if not rec.valid:
                 quarantined.append((lineno, rec.reason, line))
                 continue

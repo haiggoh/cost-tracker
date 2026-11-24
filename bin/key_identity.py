@@ -31,6 +31,11 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 
 HINT_RE = re.compile(r"^[A-Za-z0-9_-]{4}$")
 DISPLAY_PREFIX = "sk-..."
+# Well-known DIRECT-provider API hosts. Excluded even if a user maps one into
+# host_map: a key paired with one of these is never a gateway key (the
+# 2026-11-24 gotcha — pair by the gateway's URL, and never let a direct API
+# host be classified as a gateway by config accident).
+FIRST_PARTY_API_HOSTS = ("api.openai.com",)
 
 
 def _connection_hosts():
@@ -73,10 +78,13 @@ def known_gateway_hosts(env=None, config_dir=None):
     try:
         with open(reg) as f:
             doc = json.load(f)
-        for p in (doc.get("providers") or {}).values():
-            if isinstance(p, dict):
-                hosts.update(h for h in (p.get("hosts") or []) if isinstance(h, str))
-    except (OSError, ValueError):
+        providers = doc.get("providers") if isinstance(doc, dict) else None
+        if isinstance(providers, dict):
+            for p in providers.values():
+                if isinstance(p, dict):
+                    hosts.update(h for h in (p.get("hosts") or [])
+                                 if isinstance(h, str))
+    except (OSError, ValueError, AttributeError):
         pass
     try:
         with open(os.path.join(config_dir, "cap.json")) as f:
@@ -107,6 +115,9 @@ def is_gateway_host(host, known=None, env=None):
     for p in cc.ANTHROPIC_HOSTS:
         if host == p or host.endswith("." + p):
             return False
+    for p in FIRST_PARTY_API_HOSTS:
+        if host == p or host.endswith("." + p):
+            return False
     if known is None:
         known = known_gateway_hosts(env)
     return host in known
@@ -134,10 +145,13 @@ def probe_claude_cli(env):
     host = _host(env.get("ANTHROPIC_BASE_URL", ""))
     if not is_gateway_host(host, env=env):
         return None
+    # Slice at the call site: the env value itself is process memory (os.environ
+    # already holds it), but no named local ever carries more than the last 4.
     tok = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or ""
-    if not tok:
+    hint = hint_of(tok)
+    if not hint:
         return None
-    return {"app": "claude-code", "host": host, "hint": hint_of(tok)}
+    return {"app": "claude-code", "host": host, "hint": hint}
 
 
 def probe_codex(codex_home=None, env=None):
@@ -165,16 +179,16 @@ def probe_codex(codex_home=None, env=None):
     if not is_gateway_host(host, env=env):
         return None
     env_key = p.get("env_key")
-    tok = env.get(env_key, "") if isinstance(env_key, str) and env_key else ""
-    if not tok:
+    hint = hint_of(env.get(env_key, "")) if isinstance(env_key, str) and env_key else ""
+    if not hint:
         try:
             auth = json.loads((root / "auth.json").read_text())
-            tok = ((auth.get("tokens") or {}).get("access_token") or "")
+            hint = hint_of((auth.get("tokens") or {}).get("access_token") or "")
         except (OSError, ValueError, AttributeError):
-            tok = ""
-    if not tok:
+            hint = ""
+    if not hint:
         return None
-    return {"app": "codex", "host": host, "hint": hint_of(tok)}
+    return {"app": "codex", "host": host, "hint": hint}
 
 
 def _desktop_library(env=None):
@@ -201,8 +215,10 @@ def probe_desktop(config_library=None, env=None):
             continue
         host = _host(doc.get("inferenceGatewayBaseUrl") or "")
         key = doc.get("inferenceGatewayApiKey")
-        if is_gateway_host(host, env=env) and isinstance(key, str) and key:
-            return {"app": "desktop", "host": host, "hint": hint_of(key)}
+        if is_gateway_host(host, env=env) and isinstance(key, str):
+            hint = hint_of(key)
+            if hint:
+                return {"app": "desktop", "host": host, "hint": hint}
     return None
 
 
@@ -334,8 +350,16 @@ def main(argv=None):
                     "COST_TRACKER_CONFIG_DIR.")
     ap.add_argument("--probe", action="store_true",
                     help="run all probes against this machine's live config (hints only)")
+    ap.add_argument("--probe-claude-cli", action="store_true",
+                    help="print '<host> <hint>' for THIS process's env, or an empty line "
+                         "when the endpoint is not a known gateway — the capture wrapper "
+                         "calls this once per statusline render")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    if args.probe_claude_cli:
+        out = probe_claude_cli(dict(os.environ))
+        print((out["host"] + " " + out["hint"]) if out else "")
+        return 0
     if not args.probe:
         ap.print_help()
         return 0
