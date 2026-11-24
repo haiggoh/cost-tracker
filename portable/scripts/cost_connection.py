@@ -28,6 +28,7 @@ never folded into the fee: a fitted constant once hid real unseen spend for week
 """
 import json
 import os
+import re
 import sys
 from urllib.parse import urlparse
 
@@ -37,6 +38,24 @@ REGISTRY_PATH = os.environ.get("COST_TRACKER_PROVIDERS",
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 ANTHROPIC_HOSTS = ("api.anthropic.com",)
 IDENTITY = 1.0
+
+# --- key identity (last-4 hint) — the single home; key_identity.py aliases these ---
+HINT_RE = re.compile(r"^[A-Za-z0-9_-]{4}$")
+DISPLAY_PREFIX = "sk-..."
+
+
+def hint_of(secret):
+    """The last 4 chars of a secret — the ONLY slice ever kept, printed or stored."""
+    return (secret or "")[-4:]
+
+
+def hint_display(hint):
+    return DISPLAY_PREFIX + hint
+
+
+def hint_from_display(s):
+    s = (s or "").strip()
+    return s[len(DISPLAY_PREFIX):] if s.startswith(DISPLAY_PREFIX) else s
 
 
 def config_path():
@@ -62,26 +81,32 @@ def read_registry():
 
 
 def migrate_config(cfg):
-    """Legacy single `markup` -> `fee` (when it was set by hand: a stated charge) or `gap` (when
-    `calibrate --learn-markup` measured it: an observation). Returns a NEW dict; `markup` is gone,
-    so no reader can apply both."""
-    m = cfg.get("markup")
-    if not isinstance(m, dict) or not m.get("factor"):
-        return dict(cfg)
-    out = {k: v for k, v in cfg.items() if k != "markup"}
-    try:
-        f = float(m["factor"])
-    except (TypeError, ValueError):
-        return out
-    if f <= 0:
-        return out
-    by_hand = "hand" in str(m.get("basis", "")) or not m.get("n_days")
-    if by_hand:
-        out.setdefault("fee", {"factor": f, "source": "set by hand (migrated from markup)",
-                               "set_at": m.get("measured_at")})
-    else:
-        out.setdefault("gap", {"factor": f, "n_days": m.get("n_days"), "cv": m.get("cv"),
-                               "measured_at": m.get("measured_at")})
+    """Legacy migrations, each returning a NEW dict:
+    - single `markup` -> `fee` (set by hand: a stated charge) or `gap` (measured by
+      calibrate: an observation); `markup` is gone, so no reader can apply both.
+    - contract-1 cap.json: the single `key` slot lifts into `keys` (per-key caps,
+      contract 2). The `key` slot itself is KEPT as 'newest key refusal overall',
+      so old readers and the local-branch cap context below are untouched."""
+    out = dict(cfg)
+    m = out.get("markup")
+    if isinstance(m, dict) and m.get("factor"):
+        out.pop("markup")
+        try:
+            f = float(m["factor"])
+        except (TypeError, ValueError):
+            f = 0.0
+        if f > 0:
+            by_hand = "hand" in str(m.get("basis", "")) or not m.get("n_days")
+            if by_hand:
+                out.setdefault("fee", {"factor": f, "source": "set by hand (migrated from markup)",
+                                       "set_at": m.get("measured_at")})
+            else:
+                out.setdefault("gap", {"factor": f, "n_days": m.get("n_days"), "cv": m.get("cv"),
+                                       "measured_at": m.get("measured_at")})
+    if isinstance(out.get("key"), dict) and not isinstance(out.get("keys"), dict):
+        out["keys"] = {hint_from_display(out["key"].get("key_hint") or ""): out["key"]}
+    if isinstance(out.get("keys"), dict):
+        out["contract"] = 2
     return out
 
 
