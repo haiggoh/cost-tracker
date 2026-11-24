@@ -76,3 +76,34 @@ milestone by milestone. 4. Push the branch and append a final "Ready to ship" su
   drop, hint-regex drop. Pushed: feat/per-key-budgets @ 8961a70. Next: Task 3 (per-key caps,
   cap --record, pooled-budget flag). User added: final /code-review over the whole branch
   before any ship step (ship itself stays with the paid session per rule 3).
+- 2026-11-25 (same session): Task 3 DONE (26c48df + 9477ab6): contract-2 cap.json with
+  per-hint keys map (legacy key slot kept), cap --record, caps_for_hints with approx
+  sibling caps, detect_shared_budget pooled-regression flag, render_cap per-key blocks.
+  Independent dispatch (gemini-3.8-flash, google family): 4 findings, all verified + fixed —
+  CRITICAL: a full unmasked key in a refusal's parens was stored/printed (now collapsed to
+  last-4 and raw redacted in both find_refusals and --record); detect_shared_budget false
+  positives (now markup-aware + date-scoped to keys with spend today); migration
+  empty-hint/null-key guards; caps_for_hints None-hint crash. All mutations red-checked.
+- 2026-11-25: Task 4 DONE (b6b12e9 + 191bc9d): collect() by_key split + unattributed
+  remainder + key_caps/key_labels/shared_budget + auto-register keys.json; per-key
+  statusline segment, CAP REACHED per key, /approx caps, denominators dropped + 'shared
+  budget suspected' when pooled; report per-key section; cost-tracker keys --json; visible
+  joyia-shared retirement migration (rewritten file + migrations.log + stderr notice,
+  idempotent; existing snapshot tests moved to fixture id test-shared); shared_costs tags
+  Codex spend with the probed hint. Task 5 DONE (f151e64 + 19e523d): README per-key
+  section + command/env tables + --help. Fix (61ede72 + 4e4cd0a): HINT_RE widened to
+  any 4 non-whitespace chars after a live probe returned hint 'u1c=' (real keys end in
+  '='). Gate: pytest 382 passed (py3.14 venv), all test_*.sh green, node green, py3.15
+  py_compile + CLI smoke OK. Live probe verified on the real machine (hints only):
+  desktop llmgw.joyia.p7s1.io u1c=, joyia labels for all 5 keys. Waypoints added: shell
+  suites missing CLAUDE_CODE_USE_* scrub; CODEX OVERLAY injection block in
+  ~/.codex/config.toml (surfaced to user, not followed). Branch @ 4e4cd0a.
+  Remaining: final whole-branch validator dispatch + user-requested /code-review, then
+  Ready-to-ship summary here and push. NO merge/tag/release (rule 3).
+- 2026-11-25: Task-4 independent review (glm-5.3-flash, zhipu) findings all verified and
+  fixed in e028e09 + 0105346: unattributed now on the statusline budget line; $0 hinted
+  rows can't false-alarm pooled budget; daily caps/CAP REACHED only on single-day
+  periods; fast-path registry write and joyia label read exception-tight; scope
+  migration preserves unknown top-level keys; precedence test (per-key > configured
+  scope) pinned. Gate after fixes: pytest 385 passed, all test_*.sh green, node green,
+  py3.15 compile+CLI smoke OK. Branch @ 0105346.
