@@ -160,20 +160,22 @@ def test_full_unmasked_key_in_refusal_collapses_to_hint_and_is_redacted(tmp_path
     """Dispatch finding (critical): a gateway may print the FULL key in the parens.
     The learner must collapse it to the last-4 hint and redact `raw` — the full
     secret must appear nowhere in the learned config."""
+    # the canary is assembled so no key-shaped literal is ever committed
+    canary = "sk-ant-" + "api03-" + "FAKE" * 6 + "9999"
     full = "API Error: Request rejected (422) · Budget has been exceeded! " \
-           "Key=Fake-C (sk-ant-api03-SECRETVALUE9999) Current cost: 40.1, Max budget: 40.0"
+           "Key=Fake-C (" + canary + ") Current cost: 40.1, Max budget: 40.0"
     _transcripts(tmp_path, [_rec(full, "2026-09-03T02:00:00.000Z")])
     ct, _ = _load(tmp_path)
     out = ct.learn_cap()
     assert set(out["keys"]) == {"9999"}
     assert out["keys"]["9999"]["key_hint"] == "sk-...9999"
     blob = json.dumps(out)
-    assert "SECRETVALUE" not in blob and "sk-ant-api03" not in blob
+    assert "FAKE" not in blob and "sk-ant-" not in blob
     # and via --record
     rc = ct.main(["cap", "--record", full])
     assert rc == 0
     cfg_blob = pathlib.Path(ct.CONFIG_PATH).read_text()
-    assert "SECRETVALUE" not in cfg_blob
+    assert "FAKE" not in cfg_blob and "sk-ant-" not in cfg_blob
     cfg = json.loads(cfg_blob)
     assert cfg["keys"]["9999"]["cap_usd"] == 40.0
 
