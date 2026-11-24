@@ -114,6 +114,43 @@ figure here names what it sums, the total fills only the period column (summing
 overlapping lifetime cumulatives across sessions is a meaningless number), and the
 per-session table is printed so a reader can audit the label instead of trusting it.
 
+## Per-key budgets
+
+When a gateway caps PER KEY (not per account), cost-tracker attributes every spend
+record to the last-4 hint of the key that paid at record time and shows each key
+against its own cap — numbers from different keys are never mixed.
+
+- **Identity = last-4 hint only** (`sk-...xxxx`, the gateway's own refusal format).
+  The capture wrapper appends it to ledger rows as a trailing `k=<hint>` token
+  (append-only: old readers ignore it). A full key value is never read beyond the
+  last-4 slice, printed, logged or stored.
+- **Pairing is by URL, never by key shape**: a key counts toward a gateway budget
+  only when the probed app config pairs it with that gateway's base URL (known via
+  the provider registry, `host_map`, or the cached price tables). A key under
+  `api.openai.com` is never tagged as a gateway key.
+- **Probed per app at capture/refresh time**: Claude Code CLI (statusline process
+  env), Codex (`~/.codex/config.toml` provider `base_url`/`env_key`, else
+  `auth.json`), Claude Desktop 3P (`configLibrary/*.json`
+  `inferenceGatewayBaseUrl`/`inferenceGatewayApiKey`). Unprobeable apps are
+  `unattributed` — never guessed.
+- **Caps come only from refusal text** (`Budget has been exceeded! Key=… Current
+  cost: X, Max budget: Y`, matched as text, not status code), newest per key wins;
+  `cost-tracker cap --record "<pasted refusal>"` records one you saw. A key with
+  spend but no refusal of its own shows the newest sibling cap marked `≈`. No
+  refusal anywhere → spend with no denominator, never an invented one.
+- **Pooled-budget regression**: if a refusal quotes a cost far above the key's own
+  ledger spend, or two keys quote the same cost inconsistent with their own spends,
+  the report/statusline flag "keys appear to share one budget" and per-key headroom
+  stops being shown as real.
+- **Labels are display sugar**, resolved in order: joyia's native key store
+  (`joyia keys list` / read-only `ai_keys` last-4), the refusal's `Key=` label, an
+  optional `key-labels.json` in the config dir; no label → the bare hint.
+- The legacy `joyia-shared` scope is retired by a visible migration (the
+  `budget-scopes.json` rewrite is on disk, logged in `migrations.log`).
+
+Known limitations: two keys with the same last-4 merge (documented); days before
+the release are not retro-split — only days after the release are per-key.
+
 ## Commands
 
 | Command | Does |
@@ -146,7 +183,8 @@ normalises a `v`-prefixed tag, preserves the file's mode, and `--check` gates a 
 | `cost-tracker statusline` | `today: cloud $30.12/$40 · local saved $4.80` |
 | `cost-tracker doctor` | quarantined records grouped by (reason, session) + resolved config |
 | `cost-tracker connection [--map-host HOST PROVIDER] [--json]` | how this session connects, and which limit, fee and gap apply |
-| `cost-tracker cap [--learn] [--set USD]` | a gateway's daily cap and the refusal it was read from |
+| `cost-tracker cap [--learn] [--set USD] [--record TEXT]` | per-key daily caps and the refusals they were read from; `--record` parses a pasted `Key=…` refusal (newest per key wins) |
+| `cost-tracker keys [--json]` | per-key registry, today's spend per key, caps, labels, and the pooled-budget flag — hints only |
 | `cost-tracker fee [--set F] [--clear] [--json]` | the gateway's published fee, its source, and why a direct account has none |
 | `cost-tracker calibrate [--json] [--tolerance USD] [--since-days N] [--learn-gap]` | our daily total (list × fee) vs the gateway's own figure; **exits 1 on a measured undercount** |
 | `cost-tracker markup [--set F] [--clear] [--json]` | pre-0.12 name: fee and measured gap together |
@@ -375,5 +413,8 @@ that figure and never recomputes or rewrites it.
 | `COST_TRACKER_TODAY` | today, UTC — override for tests |
 | `COST_TRACKER_SAVINGS_CMD` | auto-discovered `local-agents` savings ledger |
 | `COST_TRACKER_STATUSLINE` | `1` — set `0` to keep the `today:` segment out of the status line |
+| `COST_TRACKER_CODEX_HOME` | `~/.codex` — Codex home probed for the per-app key |
+| `COST_TRACKER_JOYIA_HOME` | `~/.joyia` — joyia key store read (last-4 only) for labels |
+| `COST_TRACKER_DESKTOP_CONFIG_LIBRARY` | `~/Library/Application Support/Claude-3p/configLibrary` — Desktop 3P probe |
 
 MIT.
