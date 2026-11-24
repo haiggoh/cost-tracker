@@ -64,6 +64,16 @@ def test_too_many_fields_still_quarantined_with_hint(tmp_path):
     assert rec.reason == "too-many-fields"
 
 
+def test_hint_may_contain_equals_sign(tmp_path):
+    """Real keys have ended in '=' (seen live 2026-11-25: desktop key hint
+    'u1c=') — hint_of takes any last-4, so the ledger token k=u1c= must parse."""
+    ct, _ = load_ct(tmp_path)
+    assert ct._key_identity().HINT_RE.match("u1c=")
+    rec = ct.parse_ledger_fields("sid6", "2026-09-03 7.5 2.5 k=u1c=".split(), "raw")
+    assert rec.valid, rec.reason
+    assert rec.key_hint == "u1c="
+
+
 def test_legacy_lines_have_no_hint(tmp_path):
     ct, _ = load_ct(tmp_path)
     for line in ("2026-09-03 7.5 2.5", "2026-09-03 0 2.5 9.9 1.0", "2026-09-03 7.5"):

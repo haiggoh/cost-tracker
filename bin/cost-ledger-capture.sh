@@ -205,10 +205,10 @@ if command -v jq >/dev/null 2>&1; then
         HOPS=$(( HOPS + 1 ))
       done
       KEY_HINT="$(python3 "$(dirname "$KISELF")/key_identity.py" --probe-claude-cli 2>/dev/null | awk '{print $2}')"
-      # exactly 4 hint chars, nothing else — never trust a weird token
+      # exactly 4 non-whitespace chars (anything hint_of can produce), nothing else
       case "$KEY_HINT" in
-        [A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-][A-Za-z0-9_-]) HINT_TOK=" k=$KEY_HINT" ;;
-        *) HINT_TOK="" ;;
+        ""|*[[:space:]]*) HINT_TOK="" ;;
+        *) if [ "${#KEY_HINT}" -eq 4 ]; then HINT_TOK=" k=$KEY_HINT"; else HINT_TOK=""; fi ;;
       esac
     fi
     # HISTORY (added 2026-08-18): the per-session file is OVERWRITTEN every render, so when a
