@@ -132,17 +132,17 @@
     "hooks/hooks.json": "344b8b900cd2f5ad8b5e0aab5e5e5d61b03d3b0eae98408975a78b5ad1d075f5",
     "hooks/session-end-reconcile.py": "91835e3a623f3be564786528a5c038e6c1abd9598fd0d1a116812ed74de3e174",
     "scripts/budget-tally.py": "9cdc853955aed45e9de91b47368ec8bdd67258ac0e295b98e5d6e9258942d285",
-    "scripts/cost-tracker": "c4e307c00b03c9777c02866154809a6da45a0d26a4e9148e5a8c4c137c874da0",
-    "scripts/cost_connection.py": "c36a9883f7d29fdb99c7122dd12c74f44e7203aa81c73ba7a3382092e3e334cf",
+    "scripts/cost-tracker": "d007e75e5ea78e88fef02848f2c185a066131b3007d14c4a74a5ecb5911bf46a",
+    "scripts/cost_connection.py": "7514746bb7e3da945c6f7d4caeb86110b8de27529934b8433b71e41bb49f8a02",
     "scripts/cost_tracker_menu.py": "97dcceddc283bfee2a3a2f75570fa4b5d6a081ae16086961498e65b919512c95",
     "scripts/key_identity.py": "80a99428526b39ceee8ced21ee883036f3b427f9c43dcdbad721b778e94855a1",
     "scripts/proxy_prices.py": "0feba1ff110474915dd462817e6537e781f901d0f25bf34fc87c0c5ff33f877c",
-    "scripts/shared_costs.py": "0cf09043d5da1389d79043734deb7ba2808fc860ea57b9a1562a1e9ab9c92c18",
-    "scripts/shared_snapshot.py": "10abd51340c895094b7004511635698984562eb68ca3c43945565185bf2a4496",
+    "scripts/shared_costs.py": "bb4769fd069c527245a330c9f09313881265bcf550d5f9de75ccc4c62eec3a01",
+    "scripts/shared_snapshot.py": "6276f26946097ba88a32eda67e75bf78d60d36d4120036cb63434ae4c066cea8",
     "skills/cost-tracker/SKILL.md": "e68fb18e08d9e0c6f4fe2a6c709818f98133ff3e410d4ae0eccc72b3de556f02"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "26c48dfd298e09fa28e9a054934dcfac69911d58",
+  "source_commit": "b6b12e93a9b584417b8bb18f03ac0c849afab5f8",
   "source_repo": "haiggoh/cost-tracker",
   "transform_version": "1"
 }

@@ -180,15 +180,24 @@ def find_refusals(max_files=500, since_days=365):
                     continue
                 ts = d.get("timestamp") or ""
                 scope = m.group("scope").lower()
+                # The parenthesized token may be a FULL key on some gateways — collapse
+                # to the last-4 hint ALWAYS, and redact the raw text the same way, so no
+                # full secret can land in cap.json or in any printed output.
+                ki = _key_identity()
+                hint = ki.hint_of(m.group("keyhint") or "")
+                disp = ki.hint_display(hint) if hint else ""
+                raw = m.group(0)
+                if m.group("keyhint"):
+                    raw = raw.replace(m.group("keyhint"), disp or "<redacted>", 1)
                 obs = {
                     "cap_usd": float(m.group("cap")),
                     "cost_at_kill_usd": float(m.group("cost")),
                     "scope": scope,
                     "label": m.group("label"),
-                    "key_hint": m.group("keyhint") or "",
+                    "key_hint": disp,
                     "observed_at": ts,
                     "source_file": os.path.basename(path),
-                    "raw": m.group(0)[:300],
+                    "raw": raw[:300],
                 }
                 # The age limit the docstring promises: an observation older than the
                 # cutoff is not evidence about the cap we are under today.
@@ -258,16 +267,18 @@ def caps_for_hints(cfg=None, hints_with_spend=None):
                 cap = None
             if cap is not None:
                 for h in hints_with_spend:
-                    if h not in out:
+                    if h and h not in out:      # None/empty hints are legacy rows
                         out[h] = {"cap_usd": cap, "approx": True}
     return out
 
 
-def detect_shared_budget(observations, per_key_day_usd):
+def detect_shared_budget(observations, per_key_day_usd, markup=1.0):
     """Pooled-budget REGRESSION detection (spec 5b): if admins pool the keys again,
-    a key's first refusal quotes a Current cost far above that key's own ledger
-    spend today, or two keys' refusals quote the same cost while their own spends
-    differ. Returns {"suspected": bool, "detail": [...]} — hints only."""
+    a key's refusal quotes a Current cost far above that key's own ledger spend
+    (own ledger is LIST price, the refusal is GATEWAY dollars — hence the markup),
+    or two keys' refusals quote the same cost that is inconsistent with at least
+    one of their own spends. Two keys hitting the same cap boundary honestly
+    (cost ≈ own x markup for both) must NOT flag. Returns hints only."""
     ki = _key_identity()
     detail = []
     suspected = False
@@ -275,29 +286,33 @@ def detect_shared_budget(observations, per_key_day_usd):
     for o in observations or []:
         if not isinstance(o, dict):
             continue
-        hint = ki.hint_from_display(o.get("key_hint") or "")
+        hint = ki.hint_of(o.get("key_hint") or "")
         if not hint:
+            continue
+        # only keys with spend TODAY are comparable — a refusal for a key that
+        # spent nothing today may be old and must not flag (date scope)
+        if hint not in (per_key_day_usd or {}):
             continue
         try:
             cost = float(o.get("cost_at_kill_usd") or 0.0)
         except (TypeError, ValueError):
             continue
-        own = float((per_key_day_usd or {}).get(hint, 0.0))
+        own = float(per_key_day_usd[hint])
         per_hint.append((hint, cost, own))
-        if cost > own + 1.0 and cost > own * 1.5:
+        if cost > own * markup * 1.5 + 1.0:
             suspected = True
             detail.append("key " + ki.hint_display(hint) + " refused at $"
-                          + f"{cost:.2f} but its own ledger spend today is ${own:.2f}")
+                          + f"{cost:.2f} but its own ledger spend today is ${own:.2f} (list)")
     by_cost = {}
     for hint, cost, own in per_hint:
         by_cost.setdefault(cost, []).append((hint, own))
     for cost, group in by_cost.items():
-        hints = [h for h, _ in group]
-        owns = [o for _, o in group]
-        if len(set(hints)) > 1 and max(owns) - min(owns) >= 1.0:
+        hints = sorted({h for h, _ in group})
+        if len(hints) > 1 and any(cost > own * markup * 1.5 + 1.0 for _, own in group):
             suspected = True
-            detail.append("keys " + ", ".join(ki.hint_display(h) for h in sorted(set(hints)))
-                          + f" quote the same Current cost ${cost:.2f} with different own spend")
+            detail.append("keys " + ", ".join(ki.hint_display(h) for h in hints)
+                          + f" quote the same Current cost ${cost:.2f} far above at least "
+                            "one key's own spend")
     return {"suspected": suspected, "detail": detail}
 
 
@@ -1256,6 +1271,19 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
             s["reset_anchored"] = True
         if rec.axis in ("local", "zero") and s["period_usd"] == 0.0:
             s["axis"] = rec.axis
+        if rec.key_hint:
+            s["key_hint"] = rec.key_hint
+
+    # Per-key split of the period's cloud spend (spec): records carrying a k= hint
+    # count toward that key; everything else (legacy rows, unprobeable apps) is the
+    # explicit unattributed remainder — never folded into any key's figure.
+    by_key = defaultdict(float)
+    unattributed = 0.0
+    for (_sid, _day), rec in per_session_day.items():
+        if rec.key_hint:
+            by_key[rec.key_hint] += rec.day_usd
+        else:
+            unattributed += rec.day_usd
 
     cloud_total = sum(s["period_usd"] for s in sessions.values())
     est = estimate_unseen(days, {sid for (sid, _d) in per_session_day}, fast=fast)
@@ -1311,6 +1339,26 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
     markup = float(conn.get("fee") or MARKUP_IDENTITY)
     markup_source = conn.get("fee_source") or "none (list price)"
     gap = conn.get("gap") if os.environ.get("COST_TRACKER_APPLY_GAP", "1") != "0" else None
+    # Per-key view (spec decisions 2-7): caps per hint, labels, pooled-budget flag,
+    # and auto-registration of newly seen keys (written only when something changed).
+    cfg_keys = read_config() or {}
+    key_caps = caps_for_hints(cfg_keys, hints_with_spend=set(by_key))
+    ki = _key_identity()
+    key_labels = ki.resolve_labels(sorted(by_key), cap_cfg=cfg_keys, config_dir=CONFIG_DIR,
+                                   joyia=ki.joyia_labels())
+    shared_budget = detect_shared_budget(list((cfg_keys.get("keys") or {}).values()),
+                                         dict(by_key), markup=markup)
+    reg = ki.load_registry(CONFIG_DIR)
+    reg_changed = False
+    for h in by_key:
+        if h not in (reg.get("keys") or {}):
+            ki.register(reg, h, "claude-code")
+            reg_changed = True
+    if reg_changed:
+        try:
+            ki.save_registry(CONFIG_DIR, reg)
+        except OSError:
+            pass
     return {
         "contract": CONTRACT,
         "period": label,
@@ -1360,8 +1408,14 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
         "sessions": {sid: {"period_usd": round(s["period_usd"], 4),
                            "lifetime_usd": round(s["lifetime_usd"], 4),
                            "days": s["days"], "axis": s["axis"],
-                           "reset_anchored": s["reset_anchored"]}
+                           "reset_anchored": s["reset_anchored"],
+                           "key_hint": s.get("key_hint")}
                      for sid, s in sorted(sessions.items())},
+        "by_key": {h: round(v, 4) for h, v in sorted(by_key.items())},
+        "unattributed_usd": round(unattributed, 4),
+        "key_caps": key_caps,
+        "key_labels": key_labels,
+        "shared_budget": shared_budget,
         "local_sessions": sorted(local_sessions),
         "zero_sessions": sorted(zero_sessions),
         "reset_anchored_sessions": sorted(reset_sessions),
@@ -1879,6 +1933,25 @@ def render_table(data, short_ids=True):
         lines.append(f"{'+ classifier':<{idw}}  {'est':<6}  "
                      f"{data['estimated_classifier_usd']:>14.2f}  "
                      f"{'(' + str(data['estimated_classifier_calls']) + ' auto-mode calls)':>18}")
+    by_key = data.get("by_key") or {}
+    if by_key:
+        caps = data.get("key_caps") or {}
+        klabels = data.get("key_labels") or {}
+        lines.append("")
+        lines.append("  per key (gateway budget):")
+        for h, v in sorted(by_key.items(), key=lambda kv: (-kv[1], kv[0])):
+            ci = caps.get(h) or {}
+            name = klabels.get(h) or h
+            if ci:
+                cap_s = f"/≈${ci['cap_usd']:.0f}" if ci.get("approx") else f"/${ci['cap_usd']:.0f}"
+                mark = " CAP REACHED" if not ci.get("approx") and v >= float(ci["cap_usd"]) else ""
+            else:
+                cap_s, mark = "", ""
+            lines.append(f"    {name:<18} ${v:>7.2f}{cap_s}{mark}")
+        if data.get("unattributed_usd"):
+            lines.append(f"    {'unattributed':<18} ${data['unattributed_usd']:>7.2f}")
+        if (data.get("shared_budget") or {}).get("suspected"):
+            lines.append("    ⚠ keys appear to share one budget — per-key headroom is not real")
     cap = data["cap_usd"]
     markup = data.get("markup") or MARKUP_IDENTITY
     if markup != MARKUP_IDENTITY:
@@ -1995,6 +2068,38 @@ def render_statusline(data):
     if not saved:
         saved = None
     what = "cloud " if saved is not None else ""
+    # Per-key segment (spec decision 6): every key used today against its OWN cap,
+    # biggest spend first. No hints at all -> the legacy single-figure path below
+    # (non-gateway users are unchanged). A suspected shared budget drops the
+    # denominators: per-key headroom is then not real (spec 5b).
+    by_key = data.get("by_key") or {}
+    if by_key:
+        markup = float(data.get("markup") or MARKUP_IDENTITY)
+        caps = data.get("key_caps") or {}
+        klabels = data.get("key_labels") or {}
+        suspected = bool((data.get("shared_budget") or {}).get("suspected"))
+        parts = []
+        for h, v in sorted(by_key.items(), key=lambda kv: (-kv[1], kv[0])):
+            shown = v * markup
+            name = klabels.get(h) or _key_identity().hint_display(h)
+            ci = caps.get(h)
+            if suspected:
+                parts.append(f"{name} ${shown:.2f}")
+            elif ci:
+                cap = float(ci["cap_usd"])
+                denom = f"/≈${cap:.0f}" if ci.get("approx") else f"/${cap:.0f}"
+                piece = f"{name} ${shown:.2f}{denom}"
+                if shown >= cap:
+                    piece += " CAP REACHED"
+                parts.append(piece)
+            else:
+                parts.append(f"{name} ${shown:.2f}")
+        seg = f"{label}: " + " · ".join(parts)
+        if suspected:
+            seg += " · shared budget suspected"
+        if saved is not None:
+            seg += f" · local saved ${saved:.2f}"
+        return seg
     # The shared-scope snapshot (A4) is the PRIMARY spend when it exists: the cap the
     # user is measured against counts every endpoint on that access, so the day figure
     # is the snapshot's, labelled. Its own cap rides along; without one the segment
@@ -2595,6 +2700,11 @@ def main(argv=None):
                          "the same regex; the newest refusal per key wins")
     cp.add_argument("--json", action="store_true")
 
+    ks = sub.add_parser("keys",
+                        help="per-key registry, today's spend per key, caps, labels, "
+                             "and the pooled-budget flag (hints only)")
+    ks.add_argument("--json", action="store_true")
+
     sub.add_parser("menu",
                    help="interactive selector for the routine subcommands (an interactive "
                         "terminal only; COST_TRACKER_NO_MENU=1 forces the plain CLI)")
@@ -2761,11 +2871,14 @@ def main(argv=None):
                       "Current cost: X, Max budget: Y')", file=sys.stderr)
                 return 2
             ki = _key_identity()
-            hint = ki.hint_from_display(m.group("keyhint"))
+            # collapse a possibly-FULL pasted key to the last-4 hint, and redact raw
+            hint = ki.hint_of(m.group("keyhint"))
+            disp = ki.hint_display(hint)
             now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            raw = m.group(0).replace(m.group("keyhint"), disp, 1)
             obs = {"cap_usd": float(m.group("cap")), "cost_at_kill_usd": float(m.group("cost")),
-                   "scope": "key", "label": m.group("label"), "key_hint": m.group("keyhint"),
-                   "observed_at": now, "source_file": "(reported)", "raw": m.group(0)[:300]}
+                   "scope": "key", "label": m.group("label"), "key_hint": disp,
+                   "observed_at": now, "source_file": "(reported)", "raw": raw[:300]}
             cfg = read_config() or {}
             cfg["contract"] = 2
             keys = cfg.setdefault("keys", {})
@@ -2817,6 +2930,32 @@ def main(argv=None):
             return 0
         measured = collect("today", fast=True)["cloud_usd"]
         print(render_cap(cfg, resolved, measured_today=measured))
+        return 0
+
+    if cmd == "keys":
+        data = collect("today", fast=True)
+        ki = _key_identity()
+        out = {"registry": ki.load_registry(CONFIG_DIR),
+               "by_key": data.get("by_key") or {},
+               "unattributed_usd": data.get("unattributed_usd"),
+               "caps": data.get("key_caps") or {},
+               "labels": data.get("key_labels") or {},
+               "shared_budget": data.get("shared_budget")
+                                or {"suspected": False, "detail": []}}
+        if args.json:
+            print(json.dumps(out, indent=2, sort_keys=True))
+            return 0
+        for h, v in sorted(out["by_key"].items(), key=lambda kv: (-kv[1], kv[0])):
+            ci = out["caps"].get(h) or {}
+            cap_s = (f"/≈${ci['cap_usd']:.0f}" if ci.get("approx")
+                     else f"/${ci['cap_usd']:.0f}" if ci else "")
+            print(f"  {out['labels'].get(h, h):<18} ${v:>7.2f}{cap_s}")
+        if out["unattributed_usd"]:
+            print(f"  {'unattributed':<18} ${out['unattributed_usd']:>7.2f}")
+        if out["shared_budget"]["suspected"]:
+            print("  ⚠ keys appear to share one budget — per-key headroom is not real")
+            for d in out["shared_budget"]["detail"]:
+                print("    " + d)
         return 0
 
     if getattr(args, "payload", None) == "-":
@@ -2896,6 +3035,13 @@ def main(argv=None):
                 combined["complete"] = False
                 combined["diagnostics"].append("Claude ledger/history/transcript inputs unavailable")
             data["shared"] = combined
+            # Codex spend joins the per-key view under the key Codex actually sent
+            # (probed from its own config, paired by base URL — never by key shape).
+            ck = combined.get("codex_key_hint")
+            if ck:
+                data.setdefault("by_key", {})
+                data["by_key"][ck] = round(
+                    data["by_key"].get(ck, 0.0) + (combined.get("codex_usd") or 0.0), 4)
             # The producer writes the ONE snapshot generation consumers read (A4).
             _write_shared_snapshot(scope, data, combined)
         except Exception as e:

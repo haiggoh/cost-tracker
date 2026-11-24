@@ -404,8 +404,40 @@ def refresh_prices(proxy_prices):
     return entry
 
 
+_KI_MODULE = None
+
+
+def _key_identity():
+    """bin/key_identity.py loaded by path, so Codex spend can be tagged with the
+    hint of the key Codex actually sent (probed from its own config, paired by
+    base URL — never by key shape)."""
+    global _KI_MODULE
+    if _KI_MODULE is None:
+        import importlib.util
+        import sys
+        from importlib.machinery import SourceFileLoader
+        here = os.path.dirname(os.path.realpath(__file__))
+        loader = SourceFileLoader("key_identity_for_shared_costs",
+                                  os.path.join(here, "key_identity.py"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        if spec is None or spec.loader is None:
+            raise ImportError("cannot load key_identity.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _KI_MODULE = mod
+    return _KI_MODULE
+
+
 def combine(claude, codex):
     result = dict(codex)
+    try:
+        probe = _key_identity().probe_codex()
+        result['codex_key_hint'] = probe['hint'] if probe else None
+    except Exception:
+        result['codex_key_hint'] = None
+    if result['codex_key_hint']:
+        result['codex_by_key'] = {result['codex_key_hint']: round(result.get('codex_usd') or 0.0, 6)}
     result['claude_code_usd'] = claude['billed_usd']
     result['claude_gateway_factor'] = claude.get('markup', 1.0)
     result['claude_gateway_inferred'] = False
