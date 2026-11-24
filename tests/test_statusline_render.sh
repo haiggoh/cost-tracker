@@ -207,10 +207,10 @@ TODAY_UTC="$(date -u +%F)"
 printf '%s 30.12 0\n' "$TODAY_UTC" > "$TMPD/ledger/aaaaaaaa-0000-0000-0000-000000000001"
 printf '%s 5.00 5.00\n' "$TODAY_UTC" > "$TMPD/ledger/aaaaaaaa-0000-0000-0000-000000000002"
 cat > "$TMPD/shared-config/budget-scopes.json" <<'JSON'
-{"scopes": [{"id": "joyia-shared", "label": "JoyIA shared key"}]}
+{"scopes": [{"id": "test-shared", "label": "JoyIA shared key"}]}
 JSON
-cat > "$TMPD/shared-config/shared-snapshots/joyia-shared-$TODAY_UTC.json" <<JSON
-{"schema":"cost-tracker/shared-snapshot/1","snapshot_id":"t1234","scope_id":"joyia-shared","scope_label":"JoyIA shared key","day_utc":"$TODAY_UTC","estimated_usd":"31.370000","combined_usd":31.37,"by_host":{"claude_code":30.9,"codex":0.47,"claude_desktop":null,"other":null},"unassigned_usd":null,"gateway_confirmed_usd":null,"gateway_observed_at":null,"gateway_source":null,"reserved_usd":null,"cap_usd":40.0,"discrepancy_usd":null,"last_refreshed_at":"$(date -u +%FT%TZ)","pricing_sources":{},"coverage":{"complete":true,"missing_sources":[],"unpriced_requests":0,"ambiguous_overlap":false,"inferred_bindings":false,"freshness":"live-at-write"},"diagnostics":[],"primary_amount_usd":31.37,"primary_basis":"local estimate (coverage complete)","budget_state":"unknown","headroom_usd":null}
+cat > "$TMPD/shared-config/shared-snapshots/test-shared-$TODAY_UTC.json" <<JSON
+{"schema":"cost-tracker/shared-snapshot/1","snapshot_id":"t1234","scope_id":"test-shared","scope_label":"JoyIA shared key","day_utc":"$TODAY_UTC","estimated_usd":"31.370000","combined_usd":31.37,"by_host":{"claude_code":30.9,"codex":0.47,"claude_desktop":null,"other":null},"unassigned_usd":null,"gateway_confirmed_usd":null,"gateway_observed_at":null,"gateway_source":null,"reserved_usd":null,"cap_usd":40.0,"discrepancy_usd":null,"last_refreshed_at":"$(date -u +%FT%TZ)","pricing_sources":{},"coverage":{"complete":true,"missing_sources":[],"unpriced_requests":0,"ambiguous_overlap":false,"inferred_bindings":false,"freshness":"live-at-write"},"diagnostics":[],"primary_amount_usd":31.37,"primary_basis":"local estimate (coverage complete)","budget_state":"unknown","headroom_usd":null}
 JSON
 shared_render() {
     printf '%s' "$1" | env COST_TRACKER_STATUSLINE=1 \

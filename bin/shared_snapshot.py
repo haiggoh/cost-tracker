@@ -56,10 +56,14 @@ def _validate(scope_id, day_utc):
         raise ValueError("invalid UTC day: " + repr(day_utc))
 
 
+RETIRED_SCOPE_IDS = ("joyia-shared",)
+
+
 def read_scopes(config_dir=None):
     config_dir = config_dir or _config_dir()
+    path = os.path.join(config_dir, "budget-scopes.json")
     try:
-        with open(os.path.join(config_dir, "budget-scopes.json")) as f:
+        with open(path) as f:
             doc = json.load(f)
     except (OSError, ValueError):
         return []
@@ -71,6 +75,35 @@ def read_scopes(config_dir=None):
         if (isinstance(s, dict) and isinstance(s.get("id"), str)
                 and SCOPE_RE.match(s["id"]) and isinstance(s.get("label"), str)):
             out.append({"id": s["id"], "label": s["label"]})
+    # VISIBLE migration (no-hidden-changes): the legacy joyia-shared scope is retired —
+    # per-key budgets replace the shared-scope model. The rewrite is on disk, appended
+    # to migrations.log, and announced once on stderr; it is idempotent.
+    if any(s["id"] in RETIRED_SCOPE_IDS for s in out):
+        retired = [s for s in out if s["id"] in RETIRED_SCOPE_IDS]
+        keep = [s for s in out if s["id"] not in RETIRED_SCOPE_IDS]
+        now = datetime.now(timezone.utc).isoformat()
+        newdoc = {"scopes": keep,
+                  "retired_scopes": [dict(s, retired_at=now,
+                                          reason="per-key budgets replace the "
+                                                 "shared-scope model")
+                                     for s in retired],
+                  "migrated_at": now}
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(newdoc, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp, path)
+            with open(os.path.join(config_dir, "migrations.log"), "a") as f:
+                f.write(now + " retired scope(s) "
+                        + ", ".join(s["id"] for s in retired)
+                        + " from budget-scopes.json -> retired_scopes (per-key budgets)\n")
+            print("shared_snapshot: retired legacy scope(s) "
+                  + ", ".join(s["id"] for s in retired)
+                  + " — per-key budgets are now the model", file=sys.stderr)
+        except OSError:
+            pass
+        return keep
     return out
 
 

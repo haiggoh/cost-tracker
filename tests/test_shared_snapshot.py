@@ -18,7 +18,7 @@ from conftest import load_ct
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 SCHEMA = "cost-tracker/shared-snapshot/1"
-SCOPE = {"id": "joyia-shared", "label": "JoyIA shared key"}
+SCOPE = {"id": "test-shared", "label": "JoyIA shared key"}
 
 
 def snapshot_mod():
@@ -70,7 +70,7 @@ def setup(tmp_path, monkeypatch):
     return ct, config
 
 
-def snapshot_path(config, scope_id='joyia-shared', day='2026-11-18'):
+def snapshot_path(config, scope_id='test-shared', day='2026-11-18'):
     return config / 'shared-snapshots' / (scope_id + '-' + day + '.json')
 
 
@@ -89,7 +89,7 @@ def test_snapshot_schema_contract(tmp_path, monkeypatch):
                            gateway_confirmed_usd=None, reserved_spend_usd=None),
         cap_usd=40.0)
     assert snap['schema'] == SCHEMA
-    assert snap['scope_id'] == 'joyia-shared' and snap['day_utc'] == '2026-11-18'
+    assert snap['scope_id'] == 'test-shared' and snap['day_utc'] == '2026-11-18'
     assert snap['estimated_usd'] == '1.250467'
     assert snap['by_host']['claude_code'] == pytest.approx(1.25)
     assert snap['by_host']['codex'] == pytest.approx(0.000467)
@@ -128,7 +128,7 @@ def test_producer_writes_cache_and_statusline_reads_it(tmp_path, monkeypatch, ca
     p = snapshot_path(config)
     assert p.is_file()
     snap = json.loads(p.read_text())
-    assert snap['schema'] == SCHEMA and snap['scope_id'] == 'joyia-shared'
+    assert snap['schema'] == SCHEMA and snap['scope_id'] == 'test-shared'
     assert snap['estimated_usd'] == '1.350000'
     assert snap['cap_usd'] == 40.0
 

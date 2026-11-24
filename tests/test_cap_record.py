@@ -139,17 +139,66 @@ def test_detect_shared_budget_flags_pooled_and_identical_cost(tmp_path):
              "observed_at": "2026-11-24T10:00:00Z"}
     obs_b = {"key_hint": "sk-...bbbb", "cost_at_kill_usd": 40.11, "cap_usd": 40.0,
              "observed_at": "2026-11-24T10:05:00Z"}
-    # pooled: key a's refusal quotes a cost far above its own ledger spend
+    # pooled: key a's refusal quotes a cost far above its own ledger spend (list)
     r = ct.detect_shared_budget([obs_a], {"aaaa": 3.10})
     assert r["suspected"] is True
-    # two keys quoting the SAME cost = shared bucket
-    r = ct.detect_shared_budget([obs_a, obs_b], {"aaaa": 39.0, "bbbb": 38.0})
+    # pooled: two keys quoting the SAME cost far above BOTH own spends
+    r = ct.detect_shared_budget([obs_a, obs_b], {"aaaa": 3.0, "bbbb": 2.0})
     assert r["suspected"] is True
+    # HONEST boundary case: both keys hit the same $40 cap, own spends near it
+    # (refusal cost = own list x markup) -> must NOT flag
+    r = ct.detect_shared_budget([obs_a, obs_b], {"aaaa": 39.0, "bbbb": 38.0}, markup=1.1)
+    assert r["suspected"] is False
     # honest per-key refusals: each cost near its own spend -> quiet
     r = ct.detect_shared_budget([obs_a, obs_b], {"aaaa": 40.11, "bbbb": 40.11})
     assert r["suspected"] is False
     r = ct.detect_shared_budget([], {})
     assert r["suspected"] is False
+
+
+def test_full_unmasked_key_in_refusal_collapses_to_hint_and_is_redacted(tmp_path):
+    """Dispatch finding (critical): a gateway may print the FULL key in the parens.
+    The learner must collapse it to the last-4 hint and redact `raw` — the full
+    secret must appear nowhere in the learned config."""
+    full = "API Error: Request rejected (422) · Budget has been exceeded! " \
+           "Key=Fake-C (sk-ant-api03-SECRETVALUE9999) Current cost: 40.1, Max budget: 40.0"
+    _transcripts(tmp_path, [_rec(full, "2026-09-03T02:00:00.000Z")])
+    ct, _ = _load(tmp_path)
+    out = ct.learn_cap()
+    assert set(out["keys"]) == {"9999"}
+    assert out["keys"]["9999"]["key_hint"] == "sk-...9999"
+    blob = json.dumps(out)
+    assert "SECRETVALUE" not in blob and "sk-ant-api03" not in blob
+    # and via --record
+    rc = ct.main(["cap", "--record", full])
+    assert rc == 0
+    cfg_blob = pathlib.Path(ct.CONFIG_PATH).read_text()
+    assert "SECRETVALUE" not in cfg_blob
+    cfg = json.loads(cfg_blob)
+    assert cfg["keys"]["9999"]["cap_usd"] == 40.0
+
+
+def test_migration_ignores_null_key_and_empty_hint(tmp_path):
+    ct, _ = _load(tmp_path)
+    cfg_path = pathlib.Path(ct.CONFIG_PATH)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({"contract": 1, "key": None}))
+    cfg = ct.read_config()
+    assert cfg["keys"] == {} and cfg["contract"] == 2
+    cfg_path.write_text(json.dumps({"contract": 1, "key": {
+        "cap_usd": 40.0, "key_hint": "", "label": "x", "scope": "key"}}))
+    cfg = ct.read_config()
+    assert cfg["keys"] == {}          # empty hint never inserted
+
+
+def test_caps_for_hints_ignores_none_hints(tmp_path):
+    _transcripts(tmp_path, [
+        _rec(KILL_A.format(cost="40.1", cap="40.0"), "2026-09-01T02:00:00.000Z")])
+    ct, _ = _load(tmp_path)
+    ct.write_config(ct.learn_cap())
+    caps = ct.caps_for_hints(hints_with_spend={None, "", "aaaa"})
+    assert None not in caps and "" not in caps
+    assert caps["aaaa"]["cap_usd"] == 40.0
 
 
 def test_caps_for_hints_marks_sibling_cap_approx(tmp_path):

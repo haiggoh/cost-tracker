@@ -103,10 +103,14 @@ def migrate_config(cfg):
             else:
                 out.setdefault("gap", {"factor": f, "n_days": m.get("n_days"), "cv": m.get("cv"),
                                        "measured_at": m.get("measured_at")})
-    if isinstance(out.get("key"), dict) and not isinstance(out.get("keys"), dict):
-        out["keys"] = {hint_from_display(out["key"].get("key_hint") or ""): out["key"]}
-    if isinstance(out.get("keys"), dict):
-        out["contract"] = 2
+    if not isinstance(out.get("keys"), dict):
+        out["keys"] = {}
+    if isinstance(out.get("key"), dict):
+        hint = hint_from_display(out["key"].get("key_hint") or "")
+        # never insert an empty/invalid hint (refusal without a parenthesized token)
+        if HINT_RE.match(hint):
+            out["keys"].setdefault(hint, out["key"])
+    out["contract"] = 2
     return out
 
 
