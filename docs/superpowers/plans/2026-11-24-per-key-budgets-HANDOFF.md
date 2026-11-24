@@ -107,3 +107,9 @@ milestone by milestone. 4. Push the branch and append a final "Ready to ship" su
   migration preserves unknown top-level keys; precedence test (per-key > configured
   scope) pinned. Gate after fixes: pytest 385 passed, all test_*.sh green, node green,
   py3.15 compile+CLI smoke OK. Branch @ 0105346.
+- 2026-11-25: canary test literal de-shaped (d510f0b, no key-shaped string committed).
+  FINAL GATE on the finished branch @ d510f0b: pytest 393 passed; shell suites
+  105+23+23+111+version(3 checks)+114 all green; node --test green; py3.15
+  py_compile + CLI smoke OK. Final whole-branch validator dispatch (Step 5 Preview,
+  stepfun family) in flight at wrap time; its findings, if any, land here before the
+  Ready-to-ship push.
