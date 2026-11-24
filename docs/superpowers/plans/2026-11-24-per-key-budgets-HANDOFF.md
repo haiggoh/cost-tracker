@@ -64,3 +64,15 @@ milestone by milestone. 4. Push the branch and append a final "Ready to ship" su
   the scrub, ambient CLAUDE_CODE_USE_VERTEX=0 (truthy string "0") flips _kind() to cloud-provider
   and reds test_budget_ledger.sh + test_statusline_render.sh — pre-existing test-env
   sensitivity, waypointed, not fixed here. Implementation starts at Task 1 (bin/key_identity.py).
+- 2026-11-24 ~23:40 (same session): Task 1 DONE (ea084f6: bin/key_identity.py + 18 tests,
+  mutation-checked; independent validator dispatch = nvidia-step5-preview, 4 findings, all
+  verified against the code and fixed: first-party-API hosts excluded even if mapped,
+  malformed providers.json cannot raise, hint sliced at call site, allowlist-in-host_map
+  test added). Task 2 DONE (0e65a3d + 8961a70 portable regen): capture appends trailing
+  k=<last4> on gateway renders only (field 6 session / field 7 history), parser peels and
+  validates it (bad-key-hint quarantine, legacy lines unchanged, budget-tally prefix read
+  pinned green), key_identity.py ships in portable/scripts/. Gate: pytest 368 passed,
+  shell suites all green (budget_ledger 105), node green. Mutations verified red: allowlist
+  drop, hint-regex drop. Pushed: feat/per-key-budgets @ 8961a70. Next: Task 3 (per-key caps,
+  cap --record, pooled-budget flag). User added: final /code-review over the whole branch
+  before any ship step (ship itself stays with the paid session per rule 3).

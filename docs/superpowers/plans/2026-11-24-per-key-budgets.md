@@ -233,6 +233,7 @@ def resolve_labels(hints, cap_cfg, config_dir) -> dict  # joyia labels → refus
 
 **Steps:**
 - [ ] Full gate, both interpreters: py3.14 and py3.15 runs of pytest -n 8 + all test_*.sh + node --test, each with the env scrub; record exact counts in the handoff Progress.
+- [ ] Final `/code-review` over the WHOLE branch (user request 2026-11-24: "add an additional /code-review at the end of this session before your /ship") — run the code-review skill on the full diff `origin/main..HEAD`, fix or answer every finding inline. Ship itself stays with the paid session (handoff rule 3): this session ends at push + ready-to-ship.
 - [ ] Independent dispatch review after each milestone (Tasks 1–4):
   `python3 ~/ClaudeWorkspace/free-agents/bin/free-agent-tool.py` with
   `{"prompt": …, "files": [<changed files>], "role": "validator", "avoid_family": "mistral"}`;
