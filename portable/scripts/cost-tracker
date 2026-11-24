@@ -1342,12 +1342,24 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
     # Per-key view (spec decisions 2-7): caps per hint, labels, pooled-budget flag,
     # and auto-registration of newly seen keys (written only when something changed).
     cfg_keys = read_config() or {}
+    single_day = len(days) == 1
     key_caps = caps_for_hints(cfg_keys, hints_with_spend=set(by_key))
     ki = _key_identity()
+    try:
+        joyia = ki.joyia_labels()
+    except Exception:
+        joyia = {}          # the statusline hot path must never break on a locked db
     key_labels = ki.resolve_labels(sorted(by_key), cap_cfg=cfg_keys, config_dir=CONFIG_DIR,
-                                   joyia=ki.joyia_labels())
-    shared_budget = detect_shared_budget(list((cfg_keys.get("keys") or {}).values()),
-                                         dict(by_key), markup=markup)
+                                   joyia=joyia)
+    # Pooled-budget detection compares a DAILY refusal cost against today's spend —
+    # only meaningful for a single-day period, and only for keys that actually spent
+    # (a $0 hinted row may be a local render or an old refusal's key).
+    if single_day:
+        shared_budget = detect_shared_budget(
+            list((cfg_keys.get("keys") or {}).values()),
+            {h: v for h, v in by_key.items() if v > 0}, markup=markup)
+    else:
+        shared_budget = {"suspected": False, "detail": []}
     reg = ki.load_registry(CONFIG_DIR)
     reg_changed = False
     for h in by_key:
@@ -1357,8 +1369,8 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
     if reg_changed:
         try:
             ki.save_registry(CONFIG_DIR, reg)
-        except OSError:
-            pass
+        except Exception:
+            pass            # registration is best-effort; never break a render
     return {
         "contract": CONTRACT,
         "period": label,
@@ -1416,6 +1428,7 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
         "key_caps": key_caps,
         "key_labels": key_labels,
         "shared_budget": shared_budget,
+        "per_key_single_day": single_day,
         "local_sessions": sorted(local_sessions),
         "zero_sessions": sorted(zero_sessions),
         "reset_anchored_sessions": sorted(reset_sessions),
@@ -1937,10 +1950,12 @@ def render_table(data, short_ids=True):
     if by_key:
         caps = data.get("key_caps") or {}
         klabels = data.get("key_labels") or {}
+        # caps are daily — never compare a multi-day period sum to one day's cap
+        single_day = bool(data.get("per_key_single_day", len(data["period_days_utc"]) == 1))
         lines.append("")
         lines.append("  per key (gateway budget):")
         for h, v in sorted(by_key.items(), key=lambda kv: (-kv[1], kv[0])):
-            ci = caps.get(h) or {}
+            ci = (caps.get(h) or {}) if single_day else {}
             name = klabels.get(h) or h
             if ci:
                 cap_s = f"/≈${ci['cap_usd']:.0f}" if ci.get("approx") else f"/${ci['cap_usd']:.0f}"
@@ -2078,12 +2093,14 @@ def render_statusline(data):
         caps = data.get("key_caps") or {}
         klabels = data.get("key_labels") or {}
         suspected = bool((data.get("shared_budget") or {}).get("suspected"))
+        # caps are DAILY; a multi-day period must not compare its sum to one day's cap
+        single_day = bool(data.get("per_key_single_day", len(data["period_days_utc"]) == 1))
         parts = []
         for h, v in sorted(by_key.items(), key=lambda kv: (-kv[1], kv[0])):
             shown = v * markup
             name = klabels.get(h) or _key_identity().hint_display(h)
-            ci = caps.get(h)
-            if suspected:
+            ci = caps.get(h) if single_day else None
+            if suspected or not single_day:
                 parts.append(f"{name} ${shown:.2f}")
             elif ci:
                 cap = float(ci["cap_usd"])
@@ -2097,6 +2114,10 @@ def render_statusline(data):
         seg = f"{label}: " + " · ".join(parts)
         if suspected:
             seg += " · shared budget suspected"
+        # the unattributed remainder is part of the day's real spend — the budget
+        # line must not silently drop it (it is never added to any key's figure)
+        if data.get("unattributed_usd"):
+            seg += f" · unattributed ${data['unattributed_usd']:.2f}"
         if saved is not None:
             seg += f" · local saved ${saved:.2f}"
         return seg

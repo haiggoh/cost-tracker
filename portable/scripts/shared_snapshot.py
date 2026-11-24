@@ -82,12 +82,14 @@ def read_scopes(config_dir=None):
         retired = [s for s in out if s["id"] in RETIRED_SCOPE_IDS]
         keep = [s for s in out if s["id"] not in RETIRED_SCOPE_IDS]
         now = datetime.now(timezone.utc).isoformat()
-        newdoc = {"scopes": keep,
-                  "retired_scopes": [dict(s, retired_at=now,
-                                          reason="per-key budgets replace the "
-                                                 "shared-scope model")
-                                     for s in retired],
-                  "migrated_at": now}
+        # unknown top-level keys of the old file are preserved, not dropped
+        newdoc = dict(doc) if isinstance(doc, dict) else {}
+        newdoc["scopes"] = keep
+        newdoc["retired_scopes"] = [dict(s, retired_at=now,
+                                         reason="per-key budgets replace the "
+                                                "shared-scope model")
+                                    for s in retired]
+        newdoc["migrated_at"] = now
         try:
             tmp = path + ".tmp"
             with open(tmp, "w") as f:
