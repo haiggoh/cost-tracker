@@ -201,28 +201,104 @@ def find_refusals(max_files=500, since_days=365):
 
 
 def learn_cap(max_files=500, since_days=365):
-    """The newest refusal per scope, as a cacheable config record.
+    """The newest refusal per scope AND per key hint, as a cacheable config record.
 
-    Returns a dict (never written here — the caller decides) with the observation and its
-    provenance, or a `found: false` record. A file's mtime only approximates its records'
-    timestamps, so the winner is chosen by the RECORD's own timestamp across everything
-    scanned, not by file order.
+    Contract 2: `keys` maps each key's last-4 hint to its newest refusal; the legacy
+    `key` slot stays as "newest key refusal overall" so old readers and every
+    pre-existing test keep working. Returns a dict (never written here — the caller
+    decides). A file's mtime only approximates its records' timestamps, so winners
+    are chosen by the RECORD's own timestamp across everything scanned.
     """
     found = find_refusals(max_files=max_files, since_days=since_days)
     best = {}          # scope -> observation
+    keys = {}          # hint -> observation (scope == "key" only)
+    ki = _key_identity()
     for obs in found["observations"]:
         prev = best.get(obs["scope"])
         if prev is None or (obs["observed_at"] or "") >= (prev["observed_at"] or ""):
             best[obs["scope"]] = obs
+        if obs["scope"] == "key":
+            hint = ki.hint_from_display(obs.get("key_hint") or "")
+            if hint:
+                prevk = keys.get(hint)
+                if prevk is None or (obs["observed_at"] or "") >= (prevk["observed_at"] or ""):
+                    keys[hint] = obs
     return {
-        "contract": 1,
+        "contract": 2,
         "learned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "files_scanned": found["files_scanned"],
         "files_available": found["files_available"],
         "found": bool(best.get("key")),
         "key": best.get("key"),
+        "keys": keys,
         "team": best.get("team"),
     }
+
+
+def caps_for_hints(cfg=None, hints_with_spend=None):
+    """{hint: {"cap_usd", "approx"}}. A hint with spend but no refusal of its own
+    inherits the newest sibling key's cap marked approx (≈) — sibling keys on the
+    same gateway refused at one Max budget (spec decision 5)."""
+    cfg = read_config() if cfg is None else cfg
+    keys = (cfg or {}).get("keys") or {}
+    out = {}
+    for hint, obs in keys.items():
+        if isinstance(obs, dict) and obs.get("cap_usd"):
+            try:
+                out[hint] = {"cap_usd": float(obs["cap_usd"]), "approx": False}
+            except (TypeError, ValueError):
+                continue
+    if hints_with_spend and keys:
+        newest = max((o for o in keys.values() if isinstance(o, dict)),
+                     key=lambda o: o.get("observed_at") or "", default=None)
+        if newest and newest.get("cap_usd"):
+            try:
+                cap = float(newest["cap_usd"])
+            except (TypeError, ValueError):
+                cap = None
+            if cap is not None:
+                for h in hints_with_spend:
+                    if h not in out:
+                        out[h] = {"cap_usd": cap, "approx": True}
+    return out
+
+
+def detect_shared_budget(observations, per_key_day_usd):
+    """Pooled-budget REGRESSION detection (spec 5b): if admins pool the keys again,
+    a key's first refusal quotes a Current cost far above that key's own ledger
+    spend today, or two keys' refusals quote the same cost while their own spends
+    differ. Returns {"suspected": bool, "detail": [...]} — hints only."""
+    ki = _key_identity()
+    detail = []
+    suspected = False
+    per_hint = []
+    for o in observations or []:
+        if not isinstance(o, dict):
+            continue
+        hint = ki.hint_from_display(o.get("key_hint") or "")
+        if not hint:
+            continue
+        try:
+            cost = float(o.get("cost_at_kill_usd") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        own = float((per_key_day_usd or {}).get(hint, 0.0))
+        per_hint.append((hint, cost, own))
+        if cost > own + 1.0 and cost > own * 1.5:
+            suspected = True
+            detail.append("key " + ki.hint_display(hint) + " refused at $"
+                          + f"{cost:.2f} but its own ledger spend today is ${own:.2f}")
+    by_cost = {}
+    for hint, cost, own in per_hint:
+        by_cost.setdefault(cost, []).append((hint, own))
+    for cost, group in by_cost.items():
+        hints = [h for h, _ in group]
+        owns = [o for _, o in group]
+        if len(set(hints)) > 1 and max(owns) - min(owns) >= 1.0:
+            suspected = True
+            detail.append("keys " + ", ".join(ki.hint_display(h) for h in sorted(set(hints)))
+                          + f" quote the same Current cost ${cost:.2f} with different own spend")
+    return {"suspected": suspected, "detail": detail}
 
 
 def learned_cap(auto_learn=False):
@@ -1990,6 +2066,16 @@ def render_cap(cfg, resolved, measured_today=None):
         lines.append(f"  last looked:   {cfg.get('learned_at', 'never')}")
     else:
         lines.append("  never looked. Run `cost-tracker cap --learn`.")
+    keys = (cfg or {}).get("keys") or {}
+    if keys:
+        lines.append("  per key (last-4 hint only):")
+        for hint, obs in sorted(keys.items()):
+            if isinstance(obs, dict) and obs.get("cap_usd"):
+                lines.append(f"    {obs.get('label') or '?'} "
+                             f"({obs.get('key_hint') or 'sk-...' + hint}): "
+                             f"${float(obs['cap_usd']):.2f} "
+                             f"(observed {obs.get('observed_at') or 'unknown'}, "
+                             f"{obs.get('source_file') or '?'})")
     team = (cfg or {}).get("team")
     if team:
         lines.append(f"  (also seen: the SHARED team cap ${team['cap_usd']:.2f} for "
@@ -2498,12 +2584,15 @@ def main(argv=None):
                     help="forget the hand-set fee AND the measured gap")
     mk.add_argument("--json", action="store_true")
 
-    cp = sub.add_parser("cap", help="show the daily cap and where it came from")
+    cp = sub.add_parser("cap", help="show the daily cap(s) and where they came from")
     cp.add_argument("--learn", action="store_true",
-                    help="re-read the cap from the newest budget-kill message now "
+                    help="re-read the caps from the newest budget-kill messages now "
                          "(run this when the daily budget cap has changed)")
     cp.add_argument("--set", metavar="USD", dest="set_cap",
                     help="record a cap by hand instead of learning one")
+    cp.add_argument("--record", metavar="TEXT", dest="record",
+                    help="record a budget-kill refusal you saw (pasted text), parsed by "
+                         "the same regex; the newest refusal per key wins")
     cp.add_argument("--json", action="store_true")
 
     sub.add_parser("menu",
@@ -2660,6 +2749,41 @@ def main(argv=None):
         return 0
 
     if cmd == "cap":
+        if getattr(args, "record", None):
+            # A refusal the user REPORTS later (window closed while transient) is
+            # evidence too — parsed by the same KILL_RE, no isApiErrorMessage needed
+            # because this is not a transcript line. Key= scope only; Team= is the
+            # shared cap and never a per-key denominator. Hints only, never the key.
+            m = KILL_RE.search(args.record)
+            if not m or m.group("scope").lower() != "key" or not m.group("keyhint"):
+                print("cost-tracker: --record needs a Key= refusal text "
+                      "('Budget has been exceeded! Key=<name> (sk-...xxxx) "
+                      "Current cost: X, Max budget: Y')", file=sys.stderr)
+                return 2
+            ki = _key_identity()
+            hint = ki.hint_from_display(m.group("keyhint"))
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            obs = {"cap_usd": float(m.group("cap")), "cost_at_kill_usd": float(m.group("cost")),
+                   "scope": "key", "label": m.group("label"), "key_hint": m.group("keyhint"),
+                   "observed_at": now, "source_file": "(reported)", "raw": m.group(0)[:300]}
+            cfg = read_config() or {}
+            cfg["contract"] = 2
+            keys = cfg.setdefault("keys", {})
+            prev = keys.get(hint)
+            if prev is None or (obs["observed_at"] or "") >= (prev.get("observed_at") or ""):
+                keys[hint] = obs
+                cfg["key"] = obs
+                cfg["found"] = True
+                cfg["learned_at"] = now
+                if not write_config(cfg):
+                    print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
+                    return 1
+                print(f"cost-tracker: recorded cap ${obs['cap_usd']:.2f} for key "
+                      f"{obs['key_hint']} (reported)")
+            else:
+                print(f"cost-tracker: kept the newer refusal already on record for "
+                      f"{obs['key_hint']}")
+            return 0
         if args.set_cap:
             try:
                 manual = float(args.set_cap)

@@ -20,7 +20,6 @@ import argparse
 import json
 import os
 import pathlib
-import re
 import sqlite3
 import sys
 import tomllib
@@ -29,30 +28,46 @@ from urllib.parse import urlparse
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 
-HINT_RE = re.compile(r"^[A-Za-z0-9_-]{4}$")
-DISPLAY_PREFIX = "sk-..."
+_CC = None
+
+
+def _cc():
+    """bin/cost_connection.py loaded once by path (same loader shape as
+    cost-tracker._connection). The hint helpers (HINT_RE, hint_of, ...) and the
+    host lists live THERE as the single home; this module aliases them so the
+    key format cannot drift between the two."""
+    global _CC
+    if _CC is None:
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        path = os.path.join(HERE, "cost_connection.py")
+        loader = SourceFileLoader("cost_connection_for_key_identity", path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        if spec is None or spec.loader is None:
+            raise ImportError("cannot load cost_connection.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _CC = mod
+    return _CC
+
+
+HINT_RE = _cc().HINT_RE
+DISPLAY_PREFIX = _cc().DISPLAY_PREFIX
+hint_of = _cc().hint_of
+hint_display = _cc().hint_display
+hint_from_display = _cc().hint_from_display
+
+
+def _connection_hosts():
+    return _cc()
+
+
 # Well-known DIRECT-provider API hosts. Excluded even if a user maps one into
 # host_map: a key paired with one of these is never a gateway key (the
 # 2026-11-24 gotcha — pair by the gateway's URL, and never let a direct API
 # host be classified as a gateway by config accident).
 FIRST_PARTY_API_HOSTS = ("api.openai.com",)
-
-
-def _connection_hosts():
-    """The host lists from bin/cost_connection.py (loaded by path, same loader
-    shape as cost-tracker._connection) so the gateway/local/anthropic decision
-    cannot drift between the two modules."""
-    import importlib.util
-    from importlib.machinery import SourceFileLoader
-    path = os.path.join(HERE, "cost_connection.py")
-    loader = SourceFileLoader("cost_connection_for_key_identity", path)
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    if spec is None or spec.loader is None:
-        raise ImportError("cannot load cost_connection.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[loader.name] = mod
-    loader.exec_module(mod)
-    return mod
 
 
 def _host(url):
@@ -121,22 +136,6 @@ def is_gateway_host(host, known=None, env=None):
     if known is None:
         known = known_gateway_hosts(env)
     return host in known
-
-
-def hint_of(secret):
-    """The last 4 chars of a secret — the ONLY slice of it this module keeps."""
-    return (secret or "")[-4:]
-
-
-def hint_display(hint):
-    return DISPLAY_PREFIX + hint
-
-
-def hint_from_display(s):
-    s = (s or "").strip()
-    if s.startswith(DISPLAY_PREFIX):
-        return s[len(DISPLAY_PREFIX):]
-    return s
 
 
 def probe_claude_cli(env):
