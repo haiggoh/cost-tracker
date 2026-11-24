@@ -102,7 +102,9 @@ def test_statusline_per_key_segment(tmp_path):
         "s3": "2026-09-03 3 1",
     })
     data = ct.collect("today", fast=True)
-    assert ct.render_statusline(data) == "today: Fake-B $10.00/$25 · Fake-A $5.00/$40"
+    # the unattributed remainder ($2.00 from s3) stays visible on the budget line
+    assert ct.render_statusline(data) == \
+        "today: Fake-B $10.00/$25 · Fake-A $5.00/$40 · unattributed $2.00"
 
 
 def test_statusline_cap_reached_and_approx(tmp_path):
@@ -174,6 +176,58 @@ def test_budget_scopes_joyia_shared_migrates_visibly(tmp_path):
     mtime = (cfg / "budget-scopes.json").stat().st_mtime
     assert ss.read_scopes(str(cfg)) == []
     assert (cfg / "budget-scopes.json").stat().st_mtime == mtime
+
+
+def test_zero_spend_hint_is_not_flagged_as_pooled(tmp_path):
+    """Dispatch finding: a $0 hinted row (local render / not-yet-spent cloud) must
+    not defeat the date-scope guard and false-alarm 'shared budget'."""
+    ct, _ = _load(tmp_path)
+    _write_cap(ct, {"bbbb": B})     # B refused at cost 12.0 (last week, say)
+    _write_ledger(tmp_path, {"s1": "2026-09-03 5 5 k=bbbb"})   # day_usd == 0
+    data = ct.collect("today", fast=True)
+    assert data["by_key"] == {"bbbb": 0.0}
+    assert data["shared_budget"]["suspected"] is False
+
+
+def test_multi_day_report_never_says_cap_reached(tmp_path):
+    """Caps are daily: a --week sum above the cap must not print CAP REACHED."""
+    ct, _ = _load(tmp_path)
+    _write_cap(ct, {"aaaa": A})
+    _write_ledger(tmp_path, {
+        "s1": "2026-09-03 30 0 k=aaaa",
+        "s2": "2026-09-02 30 0 k=aaaa",
+    })
+    # history supplies the older day
+    import pathlib as _pl
+    _pl.Path(ct.HISTORY_PATH).write_text(
+        "2026-09-02T23:00:00Z s2 2026-09-02 30 0 0 k=aaaa\n")
+    data = ct.collect("week")
+    assert data["per_key_single_day"] is False
+    assert data["shared_budget"]["suspected"] is False
+    out = ct.render_table(data)
+    assert "CAP REACHED" not in out
+    assert "Fake-A" in out and "60.00" in out
+    # single-day still shows the denominator
+    data1 = ct.collect("today")
+    assert data1["per_key_single_day"] is True
+    assert "30.00/$40" in ct.render_table(data1)
+
+
+def test_per_key_segment_wins_over_configured_scope(tmp_path):
+    """Precedence pinned: hinted ledger rows -> per-key segment even when a
+    (non-retired) shared scope is also configured."""
+    ct, _ = _load(tmp_path)
+    _write_cap(ct, {"aaaa": A})
+    _write_ledger(tmp_path, {"s1": "2026-09-03 7.5 2.5 k=aaaa"})
+    cfg = pathlib.Path(ct.CONFIG_DIR)
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "budget-scopes.json").write_text(json.dumps(
+        {"scopes": [{"id": "test-shared", "label": "Test"}]}))
+    data = ct.collect("today", fast=True)
+    data["shared_snapshot"] = {"primary_amount_usd": 99.0, "cap_usd": 100.0}
+    out = ct.render_statusline(data)
+    assert out.startswith("today: Fake-A $5.00/$40")
+    assert "99.00" not in out
 
 
 def test_keys_subcommand_json(tmp_path, capsys):
