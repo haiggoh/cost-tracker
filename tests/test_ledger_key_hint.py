@@ -95,6 +95,48 @@ def test_history_row_carries_hint_and_legacy_rows_do_not(tmp_path):
     assert any("sid7" in q[2] for q in quarantined)
 
 
+def test_history_key_rotation_splits_per_key(tmp_path):
+    """Final-review finding: a session that rotated keys mid-day must split the
+    day across both keys — never collapse onto the last row's key."""
+    ct, _ = load_ct(tmp_path)
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        "2026-09-03T10:00:00Z s1 2026-09-03 10 0 10 k=aaaa\n"
+        "2026-09-03T12:00:00Z s1 2026-09-03 40 0 40 k=bbbb\n")
+    groups, _ = ct.read_history()
+    rec = groups[("s1", "2026-09-03")]
+    assert rec.key_hint == "bbbb"                       # last row still wins overall
+    assert rec.key_split == {"aaaa": 10.0, "bbbb": 30.0}  # but the day is split
+    data = ct.collect("today")
+    assert data["by_key"] == {"aaaa": 10.0, "bbbb": 30.0}
+    assert data["unattributed_usd"] == 0.0
+    assert abs(sum(data["by_key"].values()) - data["cloud_usd"]) < 1e-9
+
+
+def test_live_ledger_row_keeps_the_history_rotation_split(tmp_path):
+    """The per-session ledger file is overwritten each render, so it carries only
+    the newest hint — the history group's split must survive the merge."""
+    ct, ledger = load_ct(tmp_path)
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        "2026-09-03T10:00:00Z s1 2026-09-03 10 0 10 k=aaaa\n"
+        "2026-09-03T12:00:00Z s1 2026-09-03 40 0 40 k=bbbb\n")
+    (ledger / "s1").write_text("2026-09-03 40 0 k=bbbb\n")
+    data = ct.collect("today")
+    assert data["by_key"] == {"aaaa": 10.0, "bbbb": 30.0}
+
+
+def test_history_reset_attributes_the_anchored_day_to_the_last_key(tmp_path):
+    ct, _ = load_ct(tmp_path)
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        "2026-09-03T10:00:00Z s1 2026-09-03 10 0 10 k=aaaa\n"
+        "2026-09-03T12:00:00Z s1 2026-09-03 2 10 2 k=bbbb\n")   # counter reset to 2
+    groups, _ = ct.read_history()
+    rec = groups[("s1", "2026-09-03")]
+    assert rec.reset_anchored
+    assert rec.key_split == {"bbbb": 2.0}      # pre-reset spend is the unrecoverable floor
+    data = ct.collect("today")
+    assert data["by_key"] == {"bbbb": 2.0}
+
+
 def test_budget_tally_prefix_reader_survives_the_hint_field(tmp_path, monkeypatch):
     """Old-reader survival, pinned against the real budget-tally code: a hinted
     6-token line must yield the same today figure as without the hint."""

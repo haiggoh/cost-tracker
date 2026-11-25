@@ -560,11 +560,11 @@ class Record:
 
     __slots__ = ("session_id", "valid", "reason", "day", "cum", "baseline",
                  "phantom", "phantom_base", "axis", "raw", "reset_anchored",
-                 "key_hint")
+                 "key_hint", "key_split")
 
     def __init__(self, session_id, raw, valid, reason="", day=None, cum=0.0,
                  baseline=0.0, phantom=None, axis="", reset_anchored=False,
-                 phantom_base=None, key_hint=None):
+                 phantom_base=None, key_hint=None, key_split=None):
         self.session_id = session_id
         self.raw = raw
         self.valid = valid
@@ -583,6 +583,13 @@ class Record:
         # 0.14.0: the phantom carried INTO self.day (ledger field 5). None on legacy
         # 4-field lines, which keep the full-anchor behaviour and self-heal at midnight.
         self.phantom_base = phantom_base
+        # {hint: day_usd} — how THIS record's day spend splits across keys. A
+        # single-row record is one key; a history group that rotated keys mid-day
+        # gets the per-row delta attribution (read_history computes it). Empty =>
+        # unattributed. Invariant: sum(key_split.values()) == day_usd.
+        # Assigned LAST: the default reads day_usd, which needs the fields above.
+        self.key_split = key_split if key_split is not None else (
+            {key_hint: self.day_usd} if key_hint else {})
 
     @property
     def day_usd(self):
@@ -781,6 +788,13 @@ def read_history():
     # reports 0 and would otherwise look like a reset on every single row.
     peak = {}
     reset_seen = set()
+    # Per-key attribution (per-key budgets): rows are cumulative snapshots in file
+    # order, so the delta between consecutive rows of a (session, day) group was
+    # billed under the key of the LATER row. Accumulate those deltas per hint so a
+    # mid-day key rotation splits the day across keys instead of collapsing onto
+    # the last row's key. "" means unattributed.
+    split_acc = {}
+    prev_cum = {}
     # CLOUD -> LOCAL (0.10.1). Before the capture fix, a session that moved from the gateway to a
     # local lane wrote cost 0 on every local render, so "last row wins" booked its real cloud
     # spend as $0 (9bc4ee06 on 2026-10-04: $4.64). The last CLOUD row of the day still holds that
@@ -833,10 +847,40 @@ def read_history():
                 peak[key] = max(peak.get(key, 0.0), rec.cum)
             if rec.reset_anchored:
                 reset_seen.add(key)
+            # per-key delta attribution (see split_acc above)
+            prev = prev_cum.get(key)
+            if prev is None:
+                prev = rec.baseline if rec.baseline is not None else 0.0
+            d = rec.cum - prev
+            if d < 0.0:
+                # counter reset: spend since the reset is the cumulative itself
+                d = rec.cum
+                prev = 0.0
+            else:
+                prev = rec.cum
+            if d > 0.0:
+                acc = split_acc.setdefault(key, {})
+                h = rec.key_hint or ""
+                acc[h] = acc.get(h, 0.0) + d
+            prev_cum[key] = prev
             groups[key] = rec              # later line wins
     for key in reset_seen:
         if key in groups:
             groups[key].reset_anchored = True
+    for key, rec in groups.items():
+        acc = split_acc.get(key)
+        if key in reset_seen:
+            # pre-reset spend is unrecoverable (floor); the anchored day figure
+            # belongs to the last row's key, matching day_usd's reset semantics
+            rec.key_split = {rec.key_hint: rec.day_usd} if rec.key_hint else {}
+        elif acc:
+            total = sum(acc.values())
+            diff = rec.day_usd - total
+            if abs(diff) > 1e-9:
+                # keep the invariant sum(key_split.values()) == day_usd exactly
+                h = rec.key_hint or ""
+                acc[h] = acc.get(h, 0.0) + diff
+            rec.key_split = acc
     return groups, quarantined
 
 
@@ -1012,6 +1056,11 @@ def _merged_records(fast=False):
         if (prior is not None and r.axis == "local" and r.cum == 0.0
                 and prior.axis == "cloud" and prior.cum > 0.0):
             continue
+        if prior is not None and getattr(prior, "key_split", None) and r.key_hint:
+            # The ledger file holds only the LAST render of the day; the history
+            # group saw every render, so its per-key split (including a mid-day
+            # key rotation) is the complete one — keep it over the single-row one.
+            r.key_split = prior.key_split
         merged[key] = r
     return merged, quarantined
 
@@ -1274,14 +1323,20 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
         if rec.key_hint:
             s["key_hint"] = rec.key_hint
 
-    # Per-key split of the period's cloud spend (spec): records carrying a k= hint
-    # count toward that key; everything else (legacy rows, unprobeable apps) is the
-    # explicit unattributed remainder — never folded into any key's figure.
+    # Per-key split of the period's cloud spend (spec): each record's key_split
+    # attributes its day_usd to the key(s) that actually paid — a session that
+    # rotated keys mid-day is split, never collapsed onto the newest key.
+    # Records with an empty split (legacy rows, unprobeable apps) are the explicit
+    # unattributed remainder — never folded into any key's figure.
     by_key = defaultdict(float)
     unattributed = 0.0
     for (_sid, _day), rec in per_session_day.items():
-        if rec.key_hint:
-            by_key[rec.key_hint] += rec.day_usd
+        if rec.key_split:
+            for h, v in rec.key_split.items():
+                if h:
+                    by_key[h] += v
+                else:
+                    unattributed += v
         else:
             unattributed += rec.day_usd
 
