@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.0] — 2026-11-25 — Per-key budgets: each key against its own cap, never mixed
+
+- Ledger rows carry the paying key's last-4 hint as a trailing `k=` token (append-only; old readers ignore it), probed read-only from each app's own config and paired with the gateway's base URL — an allowlist, never key shape, so a key under api.openai.com is never tagged as a gateway key. A session that rotates keys mid-day splits the day across both keys.
+- `cap.json` is contract 2: one learned cap per key hint, newest refusal per key wins (`Team=` never a per-key denominator); `cost-tracker cap --record "<pasted refusal>"` records a refusal you saw; a key with spend but no refusal shows the newest sibling cap marked `≈`; a pooled-budget regression (refusal cost far above a key's own ledger spend, or identical quoted costs) is flagged and per-key headroom stops being shown as real.
+- The statusline, report and the new `cost-tracker keys --json` show every key used today against its own cap (`today: Code4 $19.40/$40 · M4m $40.02/$40 CAP REACHED`), with an explicit `unattributed` line for legacy rows and unprobeable apps — never folded into any key's figure.
+- The legacy `joyia-shared` scope is retired by a visible, idempotent migration (rewritten `budget-scopes.json` + `migrations.log`).
+- A full key printed in a refusal's parentheses is collapsed to the last-4 hint and redacted before it can be stored or printed. Key identity is the last-4 hint everywhere; no full key value is read beyond that slice, logged, or committed.
+
 ## [0.21.5] — 2026-11-23 — Restored-cloud resume no longer re-books yesterday; INCOMPLETE scoped to the period
 
 - Fix the local→cloud re-anchor in `cost-ledger-capture.sh`: when a session resumes on the gateway and Claude Code restores the frozen cloud cumulative (the local stretch's phantom is smaller than that cumulative, so it cannot contain it), the baseline already in force is kept. Before, `phantom − frozen + base` dropped it to the phantom and booked the whole pre-switch lifetime to the new day (measured 2026-11-23: $33 of 11-22 spend shown as today, `today: $43.83/$40`). Logged as `local->cloud-restored`.
