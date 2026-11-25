@@ -153,3 +153,66 @@ def test_alive_stream_wins_over_stale_higher_stream(tmp_path):
          f"2026-09-03T10:20:00Z s1 {D} 5.0 0 5.0",
          f"2026-09-03T10:25:00Z s1 {D} 11.0 0 11.0")
     assert ct.collect("today")["cloud_usd"] == pytest.approx(21.0)
+
+
+def test_untagged_prefix_inherits_streams_first_key_marked_inferred(tmp_path):
+    """0.23.0 backfill: within ONE stream and ONE day, untagged deltas that precede
+    the stream's first tagged row are attributed to that key, labelled inferred."""
+    ct, _ = load_ct(tmp_path)
+    hist(ct,
+         f"2026-09-03T10:00:00Z s1 {D} 8 0 8",
+         f"2026-09-03T11:00:00Z s1 {D} 10 0 10 k=aaaa",
+         f"2026-09-03T12:00:00Z s1 {D} 2 0 2 k=bbbb p=2")
+    data = ct.collect("today")
+    assert data["by_key"] == {"aaaa": 10.0, "bbbb": 2.0}
+    assert data["by_key_inferred"] == {"aaaa": 8.0}
+    assert data["unattributed_usd"] == 0.0
+
+
+def test_untagged_stream_without_any_tag_stays_unattributed(tmp_path):
+    ct, _ = load_ct(tmp_path)
+    hist(ct, f"2026-09-03T10:00:00Z s1 {D} 8 0 8")
+    data = ct.collect("today")
+    assert data["by_key"] == {}
+    assert data["by_key_inferred"] == {}
+    assert data["unattributed_usd"] == 8.0
+
+
+def test_backfill_does_not_cross_days(tmp_path):
+    ct, _ = load_ct(tmp_path)
+    hist(ct,
+         f"2026-09-02T23:00:00Z s1 {Y} 8 0 8",
+         f"2026-09-03T00:30:00Z s1 {D} 10 8 10 k=aaaa")
+    data = ct.collect("today")
+    assert data["by_key"] == {"aaaa": 2.0}
+    assert data["by_key_inferred"] == {}
+    assert data["unattributed_usd"] == 0.0
+
+
+def test_statusline_marks_inferred(tmp_path):
+    ct, _ = load_ct(tmp_path, cap=40)
+    cfgdir = tmp_path / "config"
+    cfgdir.mkdir(exist_ok=True)
+    (cfgdir / "cap.json").write_text(
+        '{"contract": 2, "keys": {"aaaa": {"cap_usd": 40.0, '
+        '"observed_at": "2026-09-03T00:00:00Z"}}}')
+    hist(ct,
+         f"2026-09-03T10:00:00Z s1 {D} 8 0 8",
+         f"2026-09-03T11:00:00Z s1 {D} 10 0 10 k=aaaa",
+         f"2026-09-03T12:00:00Z s1 {D} 2 0 2 k=bbbb p=2")
+    data = ct.collect("today")
+    assert "aaaa $10.00/$40 (≈$8.00 inferred)" in ct.render_statusline(data)
+    assert "of which inferred $8.00" in ct.render_table(data)
+
+
+def test_backfill_does_not_cross_streams(tmp_path):
+    """A tag on a DIFFERENT stream of the same session must not claim another
+    stream's untagged prefix (backfill is per stream AND per day)."""
+    ct, _ = load_ct(tmp_path)
+    hist(ct,
+         f"2026-09-03T10:00:00Z s1 {D} 8 0 8 p=1",
+         f"2026-09-03T11:00:00Z s1 {D} 2 0 2 k=bbbb p=2")
+    data = ct.collect("today")
+    assert data["by_key"] == {"bbbb": 2.0}
+    assert data["by_key_inferred"] == {}
+    assert data["unattributed_usd"] == 8.0

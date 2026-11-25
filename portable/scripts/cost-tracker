@@ -828,6 +828,9 @@ def read_history():
     seen_cum = {}      # sid -> set of cum values ever seen (exact-restore rule)
     sid_nonzero = set()
     day_sum = {}       # (sid, day) -> sum of stream deltas booked on that day
+    pending = {}       # (id(stream), day) -> untagged deltas awaiting a same-stream tag
+    st_tag = {}        # (id(stream), day) -> hint of the stream's first tagged row that day
+    inferred_acc = {}  # (sid, day) -> {hint: usd} backfilled as inferred
     # CLOUD -> LOCAL (0.10.1). Before the capture fix, a session that moved from the gateway to a
     # local lane wrote cost 0 on every local render, so "last row wins" booked its real cloud
     # spend as $0 (9bc4ee06 on 2026-10-04: $4.64). The last CLOUD row of the day still holds that
@@ -960,7 +963,25 @@ def read_history():
                     day_sum[key] = day_sum.get(key, 0.0) + delta
                     acc = split_acc.setdefault(key, {})
                     h = rec.key_hint or ""
-                    acc[h] = acc.get(h, 0.0) + delta
+                    sday = (id(st), key[1])
+                    if h:
+                        if sday not in st_tag:
+                            # first tagged row of this stream on this day: backfill the
+                            # untagged prefix of the SAME stream and day to this hint
+                            st_tag[sday] = h
+                            p = pending.pop(sday, 0.0)
+                            if p > 0.0:
+                                acc[""] = acc.get("", 0.0) - p
+                                if abs(acc.get("", 0.0)) < 1e-12:
+                                    acc.pop("", None)
+                                acc[h] = acc.get(h, 0.0) + p
+                                iacc = inferred_acc.setdefault(key, {})
+                                iacc[h] = iacc.get(h, 0.0) + p
+                        acc[h] = acc.get(h, 0.0) + delta
+                    else:
+                        acc[""] = acc.get("", 0.0) + delta
+                        if sday not in st_tag:
+                            pending[sday] = pending.get(sday, 0.0) + delta
                 st["last"] = rec.cum
                 st["ts"] = row_dt
                 if pid is not None:
@@ -976,6 +997,7 @@ def read_history():
             rec.key_split = dict(split_acc.get(key) or {})
         else:
             rec.key_split = ({rec.key_hint: rec.day_usd} if rec.key_hint else {})
+        rec.key_split_inferred = dict(inferred_acc.get(key) or {})
         rec.reset_recovered = key in reset_seen and key in day_sum
     return groups, quarantined
 
@@ -1434,6 +1456,7 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
     # Records with an empty split (legacy rows, unprobeable apps) are the explicit
     # unattributed remainder — never folded into any key's figure.
     by_key = defaultdict(float)
+    by_key_inferred = defaultdict(float)
     unattributed = 0.0
     for (_sid, _day), rec in per_session_day.items():
         if rec.key_split:
@@ -1442,6 +1465,9 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
                     by_key[h] += v
                 else:
                     unattributed += v
+            for h, v in (getattr(rec, "key_split_inferred", None) or {}).items():
+                if h:
+                    by_key_inferred[h] += v
         else:
             unattributed += rec.day_usd
 
@@ -1585,6 +1611,7 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
                            "key_hint": s.get("key_hint")}
                      for sid, s in sorted(sessions.items())},
         "by_key": {h: round(v, 4) for h, v in sorted(by_key.items())},
+        "by_key_inferred": {h: round(v, 4) for h, v in sorted(by_key_inferred.items())},
         "unattributed_usd": round(unattributed, 4),
         "key_caps": key_caps,
         "key_labels": key_labels,
@@ -2130,6 +2157,9 @@ def render_table(data, short_ids=True):
             else:
                 cap_s, mark = "", ""
             lines.append(f"    {name:<18} ${v:>7.2f}{cap_s}{mark}")
+            inf = (data.get("by_key_inferred") or {}).get(h, 0.0)
+            if inf > 0:
+                lines.append(f"      of which inferred ${inf:.2f}")
         if data.get("unattributed_usd"):
             lines.append(f"    {'unattributed':<18} ${data['unattributed_usd']:>7.2f}")
         if (data.get("shared_budget") or {}).get("suspected"):
@@ -2280,6 +2310,9 @@ def render_statusline(data):
                 cap = float(ci["cap_usd"])
                 denom = f"/≈${cap:.0f}" if ci.get("approx") else f"/${cap:.0f}"
                 piece = f"{name} ${shown:.2f}{denom}"
+                inf = (data.get("by_key_inferred") or {}).get(h, 0.0) * markup
+                if inf > 0:
+                    piece += f" (≈${inf:.2f} inferred)"
                 if shown >= cap:
                     piece += " CAP REACHED"
                 parts.append(piece)
@@ -3137,6 +3170,7 @@ def main(argv=None):
         ki = _key_identity()
         out = {"registry": ki.load_registry(CONFIG_DIR),
                "by_key": data.get("by_key") or {},
+               "by_key_inferred": data.get("by_key_inferred") or {},
                "unattributed_usd": data.get("unattributed_usd"),
                "caps": data.get("key_caps") or {},
                "labels": data.get("key_labels") or {},
