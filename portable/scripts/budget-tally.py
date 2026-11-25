@@ -582,13 +582,18 @@ def _load_cost_tracker():
     key = (LEDGER_DIR, hist, TODAY)
     if key in _CT_CACHE:
         return _CT_CACHE[key]
+    env_keys = ("COST_TRACKER_LEDGER_DIR", "COST_TRACKER_HISTORY",
+                "COST_TRACKER_TODAY", "COST_TRACKER_NO_SPAWN")
+    saved = {k: os.environ.get(k) for k in env_keys}
     try:
         here = os.path.dirname(os.path.realpath(__file__))
         path = os.path.join(here, "cost-tracker")
         if not os.path.isfile(path):
             return None
         # Point the sibling at THIS reader's ledger/history/today so both read the
-        # same files (and a BUDGET_TALLY_LEDGER_DIR redirect applies to both).
+        # same files (and a BUDGET_TALLY_LEDGER_DIR redirect applies to both). The
+        # sibling binds them at import, so the env is restored right after exec —
+        # a permanent set would leak this caller's tmp paths into later imports.
         os.environ["COST_TRACKER_LEDGER_DIR"] = LEDGER_DIR
         os.environ["COST_TRACKER_HISTORY"] = hist
         os.environ["COST_TRACKER_TODAY"] = TODAY
@@ -606,6 +611,12 @@ def _load_cost_tracker():
         return mod
     except Exception:
         return None
+    finally:
+        for k in env_keys:
+            if saved[k] is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = saved[k]
 
 
 def read_ledger_today():
