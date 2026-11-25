@@ -559,6 +559,55 @@ def _session_id_of(path):
     return base[:-6] if base.endswith(".jsonl") else base
 
 
+_CT_CACHE = {}
+_LEDGER_TODAY_SOURCE = "ledger-file"
+
+
+def _ledger_source_note():
+    """Warning-text suffix naming the figure's source when it is a fallback floor."""
+    return " (ledger-file floor)" if _LEDGER_TODAY_SOURCE == "ledger-file" else ""
+
+
+def _load_cost_tracker():
+    """Load the sibling cost-tracker CLI (bin/cost-tracker), walking __file__ THROUGH
+    symlinks exactly like _load_connection does for cost_connection.py — a plain
+    dirname(__file__) would resolve to ~/.claude/scripts when this file runs as the
+    wired symlink and the sibling would silently vanish. Returns None on any failure
+    (fail-open: the caller falls back to the ledger-file read). exec_module, not
+    load_module — the latter is removed in Python 3.15."""
+    # Derive the history path from THIS reader's ledger dir — never from an ambient
+    # COST_TRACKER_HISTORY: conftest leaves that var pointing at another test's tmp
+    # file, and inheriting it would read a foreign history log into today's figure.
+    hist = os.path.join(os.path.dirname(LEDGER_DIR), "cost-ledger-history.log")
+    key = (LEDGER_DIR, hist, TODAY)
+    if key in _CT_CACHE:
+        return _CT_CACHE[key]
+    try:
+        here = os.path.dirname(os.path.realpath(__file__))
+        path = os.path.join(here, "cost-tracker")
+        if not os.path.isfile(path):
+            return None
+        # Point the sibling at THIS reader's ledger/history/today so both read the
+        # same files (and a BUDGET_TALLY_LEDGER_DIR redirect applies to both).
+        os.environ["COST_TRACKER_LEDGER_DIR"] = LEDGER_DIR
+        os.environ["COST_TRACKER_HISTORY"] = hist
+        os.environ["COST_TRACKER_TODAY"] = TODAY
+        os.environ.setdefault("COST_TRACKER_NO_SPAWN", "1")
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        loader = SourceFileLoader("cost_tracker_sibling", path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[loader.name] = mod
+        loader.exec_module(mod)
+        _CT_CACHE[key] = mod
+        return mod
+    except Exception:
+        return None
+
+
 def read_ledger_today():
     """Read the authoritative per-session cost ledger written by the statusLine
     wrapper ~/.claude/scripts/cost-ledger-capture.sh (see memory: cost-ledger-capture).
@@ -587,7 +636,27 @@ def read_ledger_today():
     entries have no baseline -> baseline 0 -> today_spend = full cumulative (the old
     behaviour); such an entry self-heals the first time the capture wrapper re-renders it
     across a UTC midnight. An already-EXITED legacy multi-day entry can only be corrected
-    by hand (we did this once for session 1b225c8c)."""
+    by hand (we did this once for session 1b225c8c).
+
+    0.23.0: when the sibling cost-tracker CLI loads, per-session values come from its
+    merged history+ledger records instead — a counter reset that the history log
+    recovered is then reported in full, not as a floor. On any load failure the
+    ledger-file read below is the fallback and _LEDGER_TODAY_SOURCE says so."""
+    global _LEDGER_TODAY_SOURCE
+    ct = _load_cost_tracker()
+    if ct is not None:
+        try:
+            merged, _quarantined = ct._merged_records(fast=False)
+            out = {}
+            for (sid, day), rec in merged.items():
+                if day == TODAY and rec.valid:
+                    out[sid] = rec.day_usd
+            _dedupe_rewind_pairs(out)
+            _LEDGER_TODAY_SOURCE = "history+ledger"
+            return out
+        except Exception:
+            pass
+    _LEDGER_TODAY_SOURCE = "ledger-file"
     out = {}
     try:
         entries = os.listdir(LEDGER_DIR)
@@ -1450,7 +1519,7 @@ def _format_free_lane(total, unknown_models, ledger_total, recon_total):
         note = f" (unpriced model(s) excluded: {', '.join(sorted(unknown_models))})"
     billed = total * MARKUP
     fee = f" at fee ×{MARKUP:.2f}" if MARKUP != 1.0 else ""
-    basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES)
+    basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES) + _ledger_source_note()
     side = side_spend_note(LAST_BY_SOURCE)
     cap = ""
     if CAP_USD:
@@ -1470,7 +1539,7 @@ def format_line(total, pct, remaining, unknown_models, session_scope,
         session_scope = f"{session_scope}, this session ≈ ${current_session_total:.2f}"
     # Report the basis honestly: authoritative ledger vs token reconstruction
     # (reconstruction over-counts, so flag when any is mixed in).
-    basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES)
+    basis = _basis_wording(ledger_total, recon_total, LAST_RECON_LINES) + _ledger_source_note()
     snap = LAST_SHARED_SNAP
     if snap and snap.get("primary_amount_usd") is not None:
         # One snapshot generation, same as the statusline/CLI: the shared-access day
