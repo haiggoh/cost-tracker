@@ -96,7 +96,9 @@ def test_a_reset_that_climbs_back_above_the_stale_baseline_is_still_detected(tmp
 
 
 def test_a_mid_day_reset_with_no_baseline_is_detected_from_the_sequence(tmp_path):
-    """A reset needs no baseline to be visible: a cumulative that goes DOWN is one."""
+    """A reset needs no baseline to be visible: a cumulative that goes DOWN is one.
+    superseded by counter streams (0.23.0): the pre-reset rows are recovered, so the
+    day is 9.0 + 2.0, not the post-reset 2.0 alone."""
     ct, ledger = load_ct(tmp_path)
     sid = "bbbbbbbb-0000-0000-0000-000000000009"
     pathlib.Path(ct.HISTORY_PATH).write_text(
@@ -105,7 +107,8 @@ def test_a_mid_day_reset_with_no_baseline_is_detected_from_the_sequence(tmp_path
     )
     data = ct.collect("today")
     assert data["sessions"][sid]["reset_anchored"] is True
-    assert data["cloud_usd"] == pytest.approx(2.0)
+    assert data["sessions"][sid]["reset_recovered"] is True
+    assert data["cloud_usd"] == pytest.approx(11.0)
 
 
 def test_a_local_render_is_not_mistaken_for_a_reset(tmp_path):

@@ -58,6 +58,15 @@ from datetime import date, datetime, timedelta, timezone
 CONTRACT = 1
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+PID_RE = re.compile(r"^[0-9]+$")
+
+
+def _parse_ts(ts):
+    """ISO-8601 (Z) timestamp of a history row -> datetime, or None if unparseable."""
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
 
 LEDGER_DIR = os.environ.get(
     "COST_TRACKER_LEDGER_DIR", os.path.expanduser("~/.claude/cost-ledger")
@@ -560,11 +569,13 @@ class Record:
 
     __slots__ = ("session_id", "valid", "reason", "day", "cum", "baseline",
                  "phantom", "phantom_base", "axis", "raw", "reset_anchored",
-                 "key_hint", "key_split")
+                 "key_hint", "key_split", "pid", "reset_recovered",
+                 "key_split_inferred", "day_override")
 
     def __init__(self, session_id, raw, valid, reason="", day=None, cum=0.0,
                  baseline=0.0, phantom=None, axis="", reset_anchored=False,
-                 phantom_base=None, key_hint=None, key_split=None):
+                 phantom_base=None, key_hint=None, key_split=None, pid=None,
+                 reset_recovered=False, key_split_inferred=None, day_override=None):
         self.session_id = session_id
         self.raw = raw
         self.valid = valid
@@ -583,6 +594,14 @@ class Record:
         # 0.14.0: the phantom carried INTO self.day (ledger field 5). None on legacy
         # 4-field lines, which keep the full-anchor behaviour and self-heal at midnight.
         self.phantom_base = phantom_base
+        # 0.23.0 counter streams: p=<pid> tag on history rows; reset_recovered marks a
+        # reset whose pre-drop spend the history streams accounted for; day_override is
+        # the stream-summed day figure for history groups (None on ledger records).
+        # Assigned BEFORE key_split: the default reads day_usd, which reads day_override.
+        self.pid = pid
+        self.reset_recovered = reset_recovered
+        self.key_split_inferred = key_split_inferred if key_split_inferred is not None else {}
+        self.day_override = day_override
         # {hint: day_usd} — how THIS record's day spend splits across keys. A
         # single-row record is one key; a history group that rotated keys mid-day
         # gets the per-row delta attribution (read_history computes it). Empty =>
@@ -611,6 +630,9 @@ class Record:
         floor, and it is labelled as one wherever it is printed."""
         if not self.valid or self.axis in ("local", "zero"):
             return 0.0
+        if self.day_override is not None:
+            # 0.23.0: history groups book the sum of their counter-stream deltas.
+            return self.day_override
         if self.reset_anchored:
             return self.cum
         return self.cum - self.baseline
@@ -775,6 +797,12 @@ def read_history():
     Rows are cumulative snapshots, so summing rows would multiply-count a
     session by however many times its statusline rendered. Grouping is the
     whole point: D15's rule is group by (session_id, UTC day) and sum groups.
+
+    0.23.0 counter streams: within a session the rows form one or more monotone
+    counter streams (a resume/relaunch starts a new one). The day's spend is the
+    sum of every stream's growth on that day, so a mid-day counter reset no longer
+    discards the pre-reset spend. Rows tagged p=<pid> continue their process's
+    stream exactly; legacy untagged rows use the inference rules in the loop.
     """
     groups = {}
     quarantined = []
@@ -794,7 +822,12 @@ def read_history():
     # mid-day key rotation splits the day across keys instead of collapsing onto
     # the last row's key. "" means unattributed.
     split_acc = {}
-    prev_cum = {}
+    # 0.23.0 counter streams (per sid, carried across days in this one pass):
+    streams = {}       # sid -> [ {last, ts, pid, dead} ]
+    pid_stream = {}    # (sid, pid) -> stream
+    seen_cum = {}      # sid -> set of cum values ever seen (exact-restore rule)
+    sid_nonzero = set()
+    day_sum = {}       # (sid, day) -> sum of stream deltas booked on that day
     # CLOUD -> LOCAL (0.10.1). Before the capture fix, a session that moved from the gateway to a
     # local lane wrote cost 0 on every local render, so "last row wins" booked its real cloud
     # spend as $0 (9bc4ee06 on 2026-10-04: $4.64). The last CLOUD row of the day still holds that
@@ -814,18 +847,37 @@ def read_history():
             if len(parts) < 5:
                 quarantined.append((lineno, "too-few-fields", line))
                 continue
-            if len(parts) > 7:
-                # 7 fields is the new maximum: TS SID DATE CUM BASE RAW [k=HINT]
+            if len(parts) > 8:
+                # 8 fields is the maximum: TS SID DATE CUM BASE RAW [k=HINT] [p=PID]
                 quarantined.append((lineno, "too-many-fields", line))
                 continue
             _ts, sid, day = parts[0], parts[1], parts[2]
-            # parts[5] is RAW (pre-gate cost, used below); parts[6], when
-            # present, is the trailing k=<hint> token for the paying key.
+            # parts[5] is RAW (pre-gate cost, used below); parts[6:], when present,
+            # are trailing tokens, order-free: k=<hint> (paying key) and p=<pid>
+            # (owning claude process, 0.23.0).
+            hint_tok = None
+            pid = None
+            bad = None
+            for tok in parts[6:]:
+                if tok.startswith("k="):
+                    hint_tok = tok
+                elif tok.startswith("p="):
+                    pid = tok[2:]
+                    if not PID_RE.match(pid or ""):
+                        bad = "bad-pid"
+                else:
+                    bad = "bad-token"
+                if bad:
+                    break
+            if bad:
+                quarantined.append((lineno, bad, line))
+                continue
             rec = parse_ledger_fields(
-                sid, [day] + parts[3:5] + (parts[6:7] if len(parts) >= 7 else []), line)
+                sid, [day] + parts[3:5] + ([hint_tok] if hint_tok else []), line)
             if not rec.valid:
                 quarantined.append((lineno, rec.reason, line))
                 continue
+            rec.pid = pid
             # field 6 (raw pre-gate cost) marks a local render: cost was zeroed
             # but the phantom kept accruing, so the axis is legible after the fact.
             if len(parts) >= 6:
@@ -847,40 +899,84 @@ def read_history():
                 peak[key] = max(peak.get(key, 0.0), rec.cum)
             if rec.reset_anchored:
                 reset_seen.add(key)
-            # per-key delta attribution (see split_acc above)
-            prev = prev_cum.get(key)
-            if prev is None:
-                prev = rec.baseline if rec.baseline is not None else 0.0
-            d = rec.cum - prev
-            if d < 0.0:
-                # counter reset: spend since the reset is the cumulative itself
-                d = rec.cum
-                prev = 0.0
-            else:
-                prev = rec.cum
-            if d > 0.0:
-                acc = split_acc.setdefault(key, {})
-                h = rec.key_hint or ""
-                acc[h] = acc.get(h, 0.0) + d
-            prev_cum[key] = prev
+            # --- counter streams (0.23.0): book this row's delta to its stream ---
+            if rec.cum > 0.0:
+                seen = seen_cum.setdefault(sid, set())
+                slist = streams.setdefault(sid, [])
+                if (sid not in sid_nonzero and rec.baseline and rec.baseline > 0
+                        and rec.cum >= rec.baseline):
+                    # carry-in from before the history log: seed a DEAD stream at the
+                    # baseline so the carried-in amount is never booked to this day
+                    slist.append({"last": rec.baseline, "ts": None, "pid": None,
+                                  "dead": True})
+                sid_nonzero.add(sid)
+                row_dt = _parse_ts(_ts)
+                st = None
+                if pid is not None:
+                    cand = pid_stream.get((sid, pid))
+                    if cand is not None and rec.cum >= cand["last"]:
+                        st = cand                      # this process's own stream
+                    else:
+                        recent = None
+                        for s in slist:
+                            if s["ts"] is not None and (recent is None
+                                                        or s["ts"] > recent["ts"]):
+                                recent = s
+                        if recent is not None and rec.cum >= recent["last"]:
+                            # restored lifetime counter: continue the most recently
+                            # updated stream and remap this pid onto it
+                            st = recent
+                        elif any(abs(rec.cum - c) < 1e-9 for c in seen):
+                            # restore-to-point: a new stream starting AT cum (delta 0)
+                            st = {"last": rec.cum, "ts": row_dt, "pid": pid,
+                                  "dead": False}
+                            slist.append(st)
+                        else:
+                            # fresh counter: a new stream starting at 0
+                            st = {"last": 0.0, "ts": row_dt, "pid": pid,
+                                  "dead": False}
+                            slist.append(st)
+                else:
+                    cands = [s for s in slist if s["last"] <= rec.cum]
+                    alive = [s for s in cands
+                             if s["ts"] is not None and row_dt is not None
+                             and abs((row_dt - s["ts"]).total_seconds()) <= 900]
+                    if alive:
+                        st = max(alive, key=lambda s: s["last"])
+                    elif cands:
+                        st = max(cands, key=lambda s: s["last"])
+                    elif any(abs(rec.cum - c) < 1e-9 for c in seen):
+                        st = {"last": rec.cum, "ts": row_dt, "pid": None,
+                              "dead": False}
+                        slist.append(st)
+                    else:
+                        st = {"last": 0.0, "ts": row_dt, "pid": None, "dead": False}
+                        slist.append(st)
+                seen.add(rec.cum)
+                delta = rec.cum - st["last"]
+                if delta < 0.0:
+                    delta = 0.0          # never negative by construction; guard anyway
+                if delta > 0.0:
+                    day_sum[key] = day_sum.get(key, 0.0) + delta
+                    acc = split_acc.setdefault(key, {})
+                    h = rec.key_hint or ""
+                    acc[h] = acc.get(h, 0.0) + delta
+                st["last"] = rec.cum
+                st["ts"] = row_dt
+                if pid is not None:
+                    pid_stream[(sid, pid)] = st
             groups[key] = rec              # later line wins
     for key in reset_seen:
         if key in groups:
             groups[key].reset_anchored = True
     for key, rec in groups.items():
-        acc = split_acc.get(key)
-        if key in reset_seen:
-            # pre-reset spend is unrecoverable (floor); the anchored day figure
-            # belongs to the last row's key, matching day_usd's reset semantics
-            rec.key_split = {rec.key_hint: rec.day_usd} if rec.key_hint else {}
-        elif acc:
-            total = sum(acc.values())
-            diff = rec.day_usd - total
-            if abs(diff) > 1e-9:
-                # keep the invariant sum(key_split.values()) == day_usd exactly
-                h = rec.key_hint or ""
-                acc[h] = acc.get(h, 0.0) + diff
-            rec.key_split = acc
+        if key in day_sum:
+            # stream-summed day figure; the split's sum equals it by construction
+            rec.day_override = day_sum[key]
+            rec.key_split = dict(split_acc.get(key) or {})
+        else:
+            rec.key_split = ({rec.key_hint: rec.day_usd} if rec.key_hint else {})
+        rec.reset_recovered = key in reset_seen and key in day_sum
     return groups, quarantined
 
 
@@ -1051,6 +1147,12 @@ def _merged_records(fast=False):
         prior = merged.get(key)
         if prior is not None and prior.reset_anchored:
             r.reset_anchored = True
+        if prior is not None and getattr(prior, "reset_recovered", False):
+            # 0.23.0: only a RECOVERED reset needs history's stream-summed figure — the
+            # single ledger line cannot show the pre-reset spend. Without a reset the
+            # ledger line is simply the newest render and wins on the numbers as before.
+            r.day_override = prior.day_override
+            r.reset_recovered = True
         # A pre-0.10.1 local ledger line ("<day> 0 <base> <phantom>") written after a cloud
         # stretch would erase the cloud figure history just recovered — keep history's.
         if (prior is not None and r.axis == "local" and r.cum == 0.0
@@ -1308,7 +1410,8 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
 
     sessions = defaultdict(lambda: {"period_usd": 0.0, "lifetime_usd": 0.0,
                                     "days": [], "axis": "cloud",
-                                    "reset_anchored": False})
+                                    "reset_anchored": False,
+                                    "reset_recovered": False})
     for (sid, day), rec in sorted(per_session_day.items()):
         s = sessions[sid]
         s["period_usd"] += rec.day_usd
@@ -1318,6 +1421,8 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
         s["days"].append(day)
         if rec.reset_anchored:
             s["reset_anchored"] = True
+        if rec.reset_recovered:
+            s["reset_recovered"] = True
         if rec.axis in ("local", "zero") and s["period_usd"] == 0.0:
             s["axis"] = rec.axis
         if rec.key_hint:
@@ -1476,6 +1581,7 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
                            "lifetime_usd": round(s["lifetime_usd"], 4),
                            "days": s["days"], "axis": s["axis"],
                            "reset_anchored": s["reset_anchored"],
+                           "reset_recovered": s["reset_recovered"],
                            "key_hint": s.get("key_hint")}
                      for sid, s in sorted(sessions.items())},
         "by_key": {h: round(v, 4) for h, v in sorted(by_key.items())},
@@ -1487,6 +1593,8 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
         "local_sessions": sorted(local_sessions),
         "zero_sessions": sorted(zero_sessions),
         "reset_anchored_sessions": sorted(reset_sessions),
+        "reset_recovered_sessions": sorted(
+            sid for sid, s in sessions.items() if s["reset_recovered"]),
         "local_saved_usd": (savings.get("saved_usd") if savings else None),
         # Per-session DISPATCH savings (free-agents `report --json` by_session, 0.43.2). None when
         # the ledger predates it or cannot be read — never an empty dict, because "no dispatches"
@@ -1657,6 +1765,7 @@ def daily_totals(days):
     """
     merged, _quarantined = _merged_records()
     out = {d: {"ours_usd": 0.0, "sessions_counted": 0, "reset_anchored_sessions": 0,
+               "reset_recovered_sessions": 0,
                "estimated_usd": 0.0, "uncovered_usd": 0.0, "classifier_usd": 0.0,
                "phantom_usd": 0.0}
            for d in days}
@@ -1674,6 +1783,8 @@ def daily_totals(days):
             row["sessions_counted"] += 1
         if rec.reset_anchored:
             row["reset_anchored_sessions"] += 1
+        if rec.reset_recovered:
+            row["reset_recovered_sessions"] += 1
     for day, row in out.items():
         row["ours_usd"] = round(row["ours_usd"], 4)
         row["phantom_usd"] = round(row["phantom_usd"], 4)
@@ -1761,6 +1872,7 @@ def calibrate(max_files=500, since_days=365, tolerance=0.01):
             "cap_usd": g["cap_usd"],
             "sessions_counted": o["sessions_counted"],
             "reset_anchored_sessions": o["reset_anchored_sessions"],
+            "reset_recovered_sessions": o["reset_recovered_sessions"],
             "last_refusal_at": g["last_observed_at"],
         })
     under = [r for r in rows if r["verdict"] == "undercount"]
@@ -1982,7 +2094,7 @@ def render_table(data, short_ids=True):
         lines.append("(no sessions in this period)")
     for sid, s in data["sessions"].items():
         sid_disp = sid[:idw] if short_ids else sid
-        mark = "*" if s.get("reset_anchored") else " "
+        mark = "*" if (s.get("reset_anchored") and not s.get("reset_recovered")) else " "
         lines.append(f"{sid_disp:<{idw}}  {s['axis']:<6}  {s['period_usd']:>13.2f}{mark}  "
                      f"{s['lifetime_usd']:>18.2f}")
     lines.append("-" * len(head))
@@ -2081,13 +2193,20 @@ def render_table(data, short_ids=True):
                      "carried-in baseline — either a local render or a just-resumed "
                      "counter; records before 2026-08-29 cannot tell those apart, and "
                      "both are $0")
-    if data.get("reset_anchored_sessions"):
-        lines.append(f"* {len(data['reset_anchored_sessions'])} session(s) RESET their cost "
+    resets = data.get("reset_anchored_sessions") or []
+    unrecovered = [sid for sid in resets
+                   if not (data["sessions"].get(sid) or {}).get("reset_recovered")]
+    recovered = [sid for sid in resets if sid not in set(unrecovered)]
+    if unrecovered:
+        lines.append(f"* {len(unrecovered)} session(s) RESET their cost "
                      "counter mid-period (a resume), so the baseline carried in describes a "
                      "counter that no longer exists. Those figures are anchored at the reset "
                      "and are FLOORS: any spend earlier the same day, before the reset, is "
                      "not recoverable from the ledger. Subtracting the stale baseline instead "
                      "would report the day as free — `cost-tracker doctor` explains.")
+    if recovered:
+        lines.append(f"  {len(recovered)} reset(s) recovered from history rows — "
+                     "pre-reset spend is included, no floor")
     if data["quarantined"]:
         sids = {q["session_id"] or _sid_from_raw(q["raw"]) for q in data["quarantined"]}
         lines.append(f"⚠ {len(data['quarantined'])} record(s) across {len(sids)} session(s) "
@@ -2302,8 +2421,9 @@ def render_calibrate(data):
         flag = {"undercount": "UNDERCOUNT", "no-data": "no data (pre-ledger)"}.get(
             r["verdict"], "ok")
         note = ""
-        if r["reset_anchored_sessions"]:
-            note = f"  (floor: {r['reset_anchored_sessions']} resumed)"
+        floors = r["reset_anchored_sessions"] - r.get("reset_recovered_sessions", 0)
+        if floors:
+            note = f"  (floor: {floors} resumed)"
         # A no-data day has no delta worth printing: the zero is an absent source, not a
         # measurement, and a printed -40.09 reads as a finding.
         ours = ("     —" if r["verdict"] == "no-data"
@@ -2550,7 +2670,8 @@ def render_doctor(data):
                      % len(data["reset_anchored_sessions"]))
         for sid in data["reset_anchored_sessions"]:
             s = data["sessions"][sid]
-            lines.append(f"  {sid}  ${s['period_usd']:.2f}  days {','.join(s['days'])}")
+            tag = "  RESET (recovered from history)" if s.get("reset_recovered") else ""
+            lines.append(f"  {sid}  ${s['period_usd']:.2f}  days {','.join(s['days'])}{tag}")
         lines.append("")
         lines.append("  Claude Code's total_cost_usd restarts at 0 when a session is RESUMED, so")
         lines.append("  the cumulative can fall BELOW the baseline carried into the day. The")
@@ -2558,9 +2679,11 @@ def render_doctor(data):
         lines.append("  gives a negative number, and clamping that to 0 reports the day as free:")
         lines.append("  measured on session e4d10d09, 2026-08-26 — $16.07 of real spend reported")
         lines.append("  as $0.00. These figures are anchored at the reset instead, which makes")
-        lines.append("  them FLOORS: spend earlier the same day, before the reset, is gone from")
-        lines.append("  the ledger. A reset that later climbs back above the stale baseline is")
-        lines.append("  invisible in the final record and is detected from the row sequence.")
+        lines.append("  them FLOORS when no history rows hold the pre-reset spend — that spend is")
+        lines.append("  gone from the ledger. Resets marked RESET (recovered from history) got it")
+        lines.append("  back from the history log's counter streams (0.23.0). A reset that later")
+        lines.append("  climbs back above the stale baseline is invisible in the final record and")
+        lines.append("  is detected from the row sequence.")
         lines.append("")
     if data.get("zero_sessions"):
         lines.append("AMBIGUOUS ZEROS — %d session(s) reported $0 against a carried-in baseline."

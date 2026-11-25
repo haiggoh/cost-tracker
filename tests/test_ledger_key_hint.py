@@ -125,6 +125,8 @@ def test_live_ledger_row_keeps_the_history_rotation_split(tmp_path):
 
 
 def test_history_reset_attributes_the_anchored_day_to_the_last_key(tmp_path):
+    # superseded by counter streams (0.23.0): the pre-reset rows ARE in the history
+    # log, so the day is recovered from streams instead of floored.
     ct, _ = load_ct(tmp_path)
     pathlib.Path(ct.HISTORY_PATH).write_text(
         "2026-09-03T10:00:00Z s1 2026-09-03 10 0 10 k=aaaa\n"
@@ -132,9 +134,11 @@ def test_history_reset_attributes_the_anchored_day_to_the_last_key(tmp_path):
     groups, _ = ct.read_history()
     rec = groups[("s1", "2026-09-03")]
     assert rec.reset_anchored
-    assert rec.key_split == {"bbbb": 2.0}      # pre-reset spend is the unrecoverable floor
+    assert rec.reset_recovered
+    assert rec.key_split == {"aaaa": 10.0, "bbbb": 2.0}   # streams recover the pre-reset spend
     data = ct.collect("today")
-    assert data["by_key"] == {"bbbb": 2.0}
+    assert data["by_key"] == {"aaaa": 10.0, "bbbb": 2.0}
+    assert data["cloud_usd"] == 12.0
 
 
 def test_budget_tally_prefix_reader_survives_the_hint_field(tmp_path, monkeypatch):
