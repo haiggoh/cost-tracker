@@ -1,6 +1,6 @@
 # Per-key budgets — implementation plan
 
-**Status:** in-progress
+**Status:** completed
 
 > **Lasting Plans:** when every task below is done, set the Status line to
 > `completed` by running `lasting-plans complete "<this file>"` as the closing step.

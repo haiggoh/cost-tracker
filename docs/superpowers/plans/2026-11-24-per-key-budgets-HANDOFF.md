@@ -113,3 +113,27 @@ milestone by milestone. 4. Push the branch and append a final "Ready to ship" su
   py_compile + CLI smoke OK. Final whole-branch validator dispatch (Step 5 Preview,
   stepfun family) in flight at wrap time; its findings, if any, land here before the
   Ready-to-ship push.
+- 2026-11-25: final dispatch (nvidia-step5-preview, stepfun) finding verified and FIXED
+  in 3392efe + 6fcead3: mid-day key rotation now splits the day per key (history
+  per-row delta attribution, Record.key_split, ledger-merge keeps the history split);
+  first-hint-collapse mutant red-checked. No other high-confidence violations.
+
+## Ready to ship
+- Branch `feat/per-key-budgets` @ 6fcead3, pushed and verified via ls-remote.
+- Feature: per-key budgets end to end — k=<last4> hint on ledger rows (append-only),
+  read-only per-app probes with URL-allowlist pairing, contract-2 per-key caps from
+  refusal text only (+ `cap --record`, ≈ sibling caps, pooled-budget regression flag),
+  per-key statusline/report/`keys` surfaces, visible joyia-shared retirement,
+  mid-day rotation split. No full key value anywhere (canary tests + diff scan clean).
+- Gate on the final tree: pytest 388 passed (py3.14 venv, -n 8); shell suites
+  105+23+23+111+version(3)+114 all green; node --test green; py3.15 py_compile + CLI
+  smoke OK; portable build regenerated and pinned green.
+- Independent reviews: 4 cross-family validator dispatches (step5-preview ×2,
+  gemini-3.8-flash, glm-5.3-flash); every finding verified against the code, fixed,
+  mutation-checked red. Whole-branch /code-review equivalent done (skill is PR-shaped;
+  no PR exists — review ran as dispatch + own diff read).
+- Open follow-ups waypointed: shell suites missing CLAUDE_CODE_USE_* scrub;
+  CODEX OVERLAY injection block in ~/.codex/config.toml (surfaced to user).
+- NOT done here per rule 3: version bump, CHANGELOG/ROADMAP entry, merge, tag, release,
+  plugin refresh — the paid session ships via rtc-ship (version surfaces:
+  .claude-plugin/plugin.json, CHANGELOG.md, docs/ROADMAP.md).
