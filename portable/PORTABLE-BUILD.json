@@ -124,7 +124,7 @@
     }
   ],
   "files": {
-    ".claude-plugin/plugin.json": "b4466cd00f17e94e59b51b95423576e58424efa580ba2b615670024d25f85cd6",
+    ".claude-plugin/plugin.json": "4cf8740d786ea14592428e720ab73d63b82e1ff362b872304d0371bb86211d20",
     "commands/cost-today.md": "db4e956d0fb0d5aa48819d52b1e64fa5a8c0600f9f10cde431c03b3b2e2c7f3d",
     "docs/history-and-incidents.md": "e7624dbf940eec702e8d46aa9b38c6eb2d6bf31de4fd55f382dbf542b742319a",
     "hooks/cost-panel-register.tsx": "ade1e8d816f9466c944df16f897d0c062541f552e6f33225e984c9fbb0b99cfc",
@@ -132,17 +132,17 @@
     "hooks/hooks.json": "344b8b900cd2f5ad8b5e0aab5e5e5d61b03d3b0eae98408975a78b5ad1d075f5",
     "hooks/session-end-reconcile.py": "91835e3a623f3be564786528a5c038e6c1abd9598fd0d1a116812ed74de3e174",
     "scripts/budget-tally.py": "4141f4630feadd20f0d57c6259befbe175026138695603edcabc97fed2baa315",
-    "scripts/cost-tracker": "10f39f0f4f194feccfd0fcfc885b0af74223030009d2fdb28239374813ea0d93",
+    "scripts/cost-tracker": "7653ef4ede2482015e41e232389f7f86f18e885610d599d825ec85644f69de3f",
     "scripts/cost_connection.py": "da7ccc38ade9efb507f98c0090734dca4fb7a8c5978f0289064823d927ea010b",
     "scripts/cost_tracker_menu.py": "97dcceddc283bfee2a3a2f75570fa4b5d6a081ae16086961498e65b919512c95",
     "scripts/key_identity.py": "facac14e95aff43be646ca9e5ce4f021108323eb948bcace8724a5e3de1b13b7",
     "scripts/proxy_prices.py": "0feba1ff110474915dd462817e6537e781f901d0f25bf34fc87c0c5ff33f877c",
     "scripts/shared_costs.py": "bb4769fd069c527245a330c9f09313881265bcf550d5f9de75ccc4c62eec3a01",
     "scripts/shared_snapshot.py": "0b2a7f1e867e98f2ca189dec7a1ce6620b0510dfcd7b332afd354848443024cc",
-    "skills/cost-tracker/SKILL.md": "e68fb18e08d9e0c6f4fe2a6c709818f98133ff3e410d4ae0eccc72b3de556f02"
+    "skills/cost-tracker/SKILL.md": "d3d4296174c77799d6280d3e53ae3694ddff7593f09524834fd171eda24c2fdc"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "cebc9513f3abcf96be75bebfa286c2a7ff311878",
+  "source_commit": "78b73235d7a1b8f936a744ca48d73af0abf63e15",
   "source_repo": "haiggoh/cost-tracker",
   "transform_version": "1"
 }

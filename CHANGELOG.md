@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.23.0] — 2026-11-25 — Counter-stream recovery: a mid-day counter reset no longer floors the day when history has the rows
+
+- History rows may carry a trailing `p=<pid>` token (field 8, order-free after field 6) naming the owning claude process, found by walking up to 4 parent hops from the capture wrapper. The ledger file is unchanged; old readers ignore trailing tokens. A non-numeric `p=` quarantines as `bad-pid`, an unknown trailing token as `bad-token` — never silently dropped.
+- `read_history()` reads each (session, day) group as monotone counter streams: pid-tagged rows continue their process's stream exactly; untagged legacy rows pick the best stream by a 15-minute liveness window, an exact-restore rule (a previously seen cumulative starts a new stream with delta 0) and a fresh-counter rule. The day's spend is the sum of every stream's growth on that day, so a resumed or relaunched counter's pre-reset spend is recovered instead of discarded (synthetic example: rows at 10 then a fresh counter at 2 now report 12, not `2*`). A first row with a carried-in baseline seeds a dead stream, so the carry-in is never double-booked.
+- `*` now means "reset seen and NO history rows to recover it" — ledger-only sessions keep the old floor semantics. Recovered resets show in `doctor` as `RESET (recovered from history)`; report/doctor no longer print FLOORS for them.
+- Untagged same-stream, same-day spend that precedes the stream's first tagged row is attributed to that key and labelled inferred: `(≈$X inferred)` on the statusline, `of which inferred $X` in the report, `by_key_inferred` in `keys --json`. Inferred spend is never shown as observed and never crosses streams or days.
+- `budget-tally`'s SessionStart warning now reads cost-tracker's merged history+ledger figure (the sibling CLI is found by walking `__file__` through symlinks); on load failure it falls back to the ledger-file read and the warning says `(ledger-file floor)`.
+
 ## [0.22.0] — 2026-11-25 — Per-key budgets: each key against its own cap, never mixed
 
 - Ledger rows carry the paying key's last-4 hint as a trailing `k=` token (append-only; old readers ignore it), probed read-only from each app's own config and paired with the gateway's base URL — an allowlist, never key shape, so a key under api.openai.com is never tagged as a gateway key. A session that rotates keys mid-day splits the day across both keys.

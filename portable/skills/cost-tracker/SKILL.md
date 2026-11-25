@@ -108,11 +108,16 @@ Quote the table rather than retyping numbers out of it.
 - **A period longer than today comes from the history log**, grouped by
   `(session_id, utc_date)` with the last row winning. Rows are cumulative
   snapshots: summing them multiplies a session by how many times it rendered.
+  Since 0.23.0 the day is the sum of the group's counter-stream growth (rows may
+  carry `p=<pid>`).
 - **Local sessions show $0 cloud by design** (a local render zeroes the cost field;
   a 3-field zero is honestly `zero`, not asserted local). Either way it is $0.
-- **A figure marked `*` is a FLOOR, not an estimate.** A resumed session restarts
-  `total_cost_usd` at 0, so the day is anchored at the reset; earlier same-day spend
-  is not in the ledger. Say "at least $X" for those.
+- **A figure marked `*` is a FLOOR, not an estimate**: the reset was seen and NO
+  history rows hold the pre-reset spend (a ledger-only session), so the day is
+  anchored at the reset — say "at least $X". Since 0.23.0, when history has the
+  rows, counter streams recover that spend and no `*` is shown.
+- **`≈ inferred` = untagged rows attributed to the key their own counter stream
+  later showed** — never shown as observed (`by_key_inferred` in `keys --json`).
 
 ## ⚠️ On a reselling gateway, an ACCURATE total still under-predicts the cap
 
@@ -151,7 +156,8 @@ Quote the table rather than retyping numbers out of it.
 Do not "fix" a figure by clamping it. A cumulative BELOW its carried-in baseline is
 a resumed counter, and clamping the negative delta to 0 is what reported $16.07 of
 real spend as $0.00 on 2026-08-26 — a plausible-looking figure hiding a whole
-session. Anchor at the reset and label the result a floor.
+session. Anchor at the reset; since 0.23.0 history streams recover the pre-reset
+spend, and only a ledger-only reset is a floor.
 
 ## Wiring on a machine
 

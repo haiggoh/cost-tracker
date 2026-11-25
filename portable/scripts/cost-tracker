@@ -627,7 +627,12 @@ class Record:
         baseline of $17.35, so the day was reported as $0.00. Anchoring at the
         reset recovers it. The known cost is that any spend EARLIER the same day,
         before the reset, is not recoverable from the ledger — so this figure is a
-        floor, and it is labelled as one wherever it is printed."""
+        floor, and it is labelled as one wherever it is printed.
+
+        0.23.0: for history groups day_usd is instead the sum of the group's
+        counter-stream deltas (read_history sets day_override), so a mid-day reset
+        whose pre-drop rows are in the history log is recovered, not floored. The
+        floor semantics above remain for ledger-only records (no history rows)."""
         if not self.valid or self.axis in ("local", "zero"):
             return 0.0
         if self.day_override is not None:
