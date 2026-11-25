@@ -34,8 +34,22 @@
 # parser peels a trailing k= token), so the format stays append-only. Local renders
 # never carry it — free compute is no key's gateway spend.
 #
+# The HISTORY row alone may also carry `p=<pid>` (field 8, 0.23.0): the owning
+# `claude` process, found by walking up to 4 parent hops from this wrapper. It lets
+# read_history() attribute counter streams exactly; legacy rows without it keep the
+# inference rules. The session (ledger) line is NOT tagged.
+#
 # FAIL-SAFE: every capture step is guarded; the passthrough ALWAYS runs, so a
 # bug here can never blank the statusline.
+
+# COST_TRACKER_PS is a TEST-ONLY override for the ps binary used by the pid-tag
+# walk below. A set-but-not-executable override is a hard error, never a silent
+# fallthrough to the real ps (which would let a test pass against the machine's
+# real process table instead of the stub).
+if [ -n "${COST_TRACKER_PS:-}" ] && [ ! -x "$COST_TRACKER_PS" ]; then
+  printf 'cost-ledger-capture.sh: COST_TRACKER_PS is set but not executable: %s\n' "$COST_TRACKER_PS" >&2
+  exit 2
+fi
 
 INPUT="$(cat)"
 
@@ -211,6 +225,27 @@ if command -v jq >/dev/null 2>&1; then
         *) if [ "${#KEY_HINT}" -eq 4 ]; then HINT_TOK=" k=$KEY_HINT"; else HINT_TOK=""; fi ;;
       esac
     fi
+    # PID TAG (0.23.0): a trailing `p=<pid>` token on the HISTORY row only, naming the
+    # owning `claude` process so read_history() can attribute counter streams exactly.
+    # Walk from this wrapper's parent up at most 4 hops (the statusline chain is
+    # sh -> claude, so the common case matches on the first hop). Best-effort: no
+    # claude found, or a non-numeric pid, -> no token. The ledger line is never tagged.
+    PID_TOK=""
+    _ocp_pid="${PPID:-}"
+    case "$_ocp_pid" in ''|*[!0-9]*) _ocp_pid=$(LC_ALL=C "${COST_TRACKER_PS:-ps}" -o ppid= -p $$ 2>/dev/null | tr -d ' ') ;; esac
+    _ocp_hops=0
+    while [ "$_ocp_hops" -lt 4 ]; do
+      case "$_ocp_pid" in ''|*[!0-9]*) break ;; esac
+      _ocp_line=$(LC_ALL=C "${COST_TRACKER_PS:-ps}" -o ppid=,comm= -p "$_ocp_pid" 2>/dev/null)
+      _ocp_ppid=${_ocp_line%% *}
+      _ocp_comm=${_ocp_line#* }
+      if [ "${_ocp_comm##*/}" = "claude" ]; then
+        PID_TOK=" p=$_ocp_pid"
+        break
+      fi
+      _ocp_pid="$_ocp_ppid"
+      _ocp_hops=$((_ocp_hops+1))
+    done
     # HISTORY (added 2026-08-18): the per-session file is OVERWRITTEN every render, so when a
     # figure looks wrong the state that produced it is already gone. That is exactly why the
     # 2026-08-08 over-report ($33.41 reported vs $8.37 authoritative) could not be root-caused:
@@ -228,7 +263,7 @@ if command -v jq >/dev/null 2>&1; then
     # so the history shows the phantom accruing while local instead of a flat run of zeros, and
     # a handoff is legible after the fact rather than looking like a sudden spike.
     [ -n "$NOW_TS" ] && [ -n "$TODAY_UTC" ] && \
-      printf '%s %s %s %s %s %s%s\n' "$NOW_TS" "$SID" "$TODAY_UTC" "$COST" "$BASE" "$RAW_COST" "$HINT_TOK" \
+      printf '%s %s %s %s %s %s%s%s\n' "$NOW_TS" "$SID" "$TODAY_UTC" "$COST" "$BASE" "$RAW_COST" "$HINT_TOK" "$PID_TOK" \
       >> "$HIST" 2>/dev/null || true
     # Keep it bounded: trim to the most recent 20000 lines (~weeks of renders) when it grows past
     # 25000, so an append-only file cannot grow without limit.
