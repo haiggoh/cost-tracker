@@ -79,3 +79,19 @@ def test_sibling_resolution_walks_through_symlink(tmp_path, monkeypatch):
     out = bt.read_ledger_today()
     assert out[sid] == pytest.approx(32.25 + 9.48)
     assert bt._LEDGER_TODAY_SOURCE == "history+ledger"
+
+
+def test_history_readers_accept_the_pid_token(tmp_path, monkeypatch):
+    """Receipt 0's inventory found two more positional history readers in
+    budget-tally.py: _ledger_first_cum (fields 1 and 3) and local_lane_sessions
+    (fields 1,2,3,5 with a len<6 guard). Both index fixed columns and ignore
+    trailing tokens, so an 8-field k=+p= row must parse exactly like a 6-field one."""
+    ledger = tmp_path / "cost-ledger"
+    ledger.mkdir()
+    hist = tmp_path / "cost-ledger-history.log"
+    hist.write_text(
+        f"2026-09-03T10:00:00Z s1 {D} 3.0 0 3.0\n"
+        f"2026-09-03T11:00:00Z s1 {D} 0 0 9.0 k=aaaa p=1\n")
+    bt = _load_bt(ROOT / "bin" / "budget-tally.py", ledger, monkeypatch)
+    assert bt._ledger_first_cum("s1") == 3.0          # field 4 of the FIRST row, unshifted
+    assert "s1" in bt.local_lane_sessions(D)          # 8-field local row still detected
