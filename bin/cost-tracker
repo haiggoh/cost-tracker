@@ -828,9 +828,9 @@ def read_history():
     # the last row's key. "" means unattributed.
     split_acc = {}
     # 0.23.0 counter streams (per sid, carried across days in this one pass):
-    streams = {}       # sid -> [ {last, ts, pid, dead} ]
+    streams = {}       # sid -> [ {last, ts, pid, dead, day} ]
     pid_stream = {}    # (sid, pid) -> stream
-    seen_cum = {}      # sid -> set of cum values ever seen (exact-restore rule)
+    seen_cum = {}      # (sid, day) -> cum values seen THAT day (exact-restore rule)
     sid_nonzero = set()
     day_sum = {}       # (sid, day) -> sum of stream deltas booked on that day
     pending = {}       # (id(stream), day) -> untagged deltas awaiting a same-stream tag
@@ -868,11 +868,17 @@ def read_history():
             bad = None
             for tok in parts[6:]:
                 if tok.startswith("k="):
-                    hint_tok = tok
+                    if hint_tok is not None:
+                        bad = "bad-token"   # duplicate k= — quarantine, never last-wins
+                    else:
+                        hint_tok = tok
                 elif tok.startswith("p="):
-                    pid = tok[2:]
-                    if not PID_RE.match(pid or ""):
-                        bad = "bad-pid"
+                    if pid is not None:
+                        bad = "bad-token"   # duplicate p=
+                    else:
+                        pid = tok[2:]
+                        if not PID_RE.match(pid or ""):
+                            bad = "bad-pid"
                 else:
                     bad = "bad-token"
                 if bad:
@@ -909,14 +915,19 @@ def read_history():
                 reset_seen.add(key)
             # --- counter streams (0.23.0): book this row's delta to its stream ---
             if rec.cum > 0.0:
-                seen = seen_cum.setdefault(sid, set())
+                seen = seen_cum.setdefault((sid, key[1]), set())
                 slist = streams.setdefault(sid, [])
-                if (sid not in sid_nonzero and rec.baseline and rec.baseline > 0
-                        and rec.cum >= rec.baseline):
+                # A previous DAY's stream may only be continued when this row shows the
+                # carry-in (baseline > 0 and <= cum). A fresh counter on a new day whose
+                # first render coincidentally matches an old cum must not be read as a
+                # continued/restored stream (whole-branch review finding, 0.23.0).
+                carry_in = bool(rec.baseline and rec.baseline > 0
+                                and rec.baseline <= rec.cum)
+                if (sid not in sid_nonzero and carry_in and rec.cum >= rec.baseline):
                     # carry-in from before the history log: seed a DEAD stream at the
                     # baseline so the carried-in amount is never booked to this day
                     slist.append({"last": rec.baseline, "ts": None, "pid": None,
-                                  "dead": True})
+                                  "dead": True, "day": key[1]})
                 sid_nonzero.add(sid)
                 row_dt = _parse_ts(_ts)
                 st = None
@@ -930,22 +941,25 @@ def read_history():
                             if s["ts"] is not None and (recent is None
                                                         or s["ts"] > recent["ts"]):
                                 recent = s
-                        if recent is not None and rec.cum >= recent["last"]:
+                        if (recent is not None and rec.cum >= recent["last"]
+                                and (recent.get("day") == key[1] or carry_in)):
                             # restored lifetime counter: continue the most recently
                             # updated stream and remap this pid onto it
                             st = recent
                         elif any(abs(rec.cum - c) < 1e-9 for c in seen):
                             # restore-to-point: a new stream starting AT cum (delta 0)
                             st = {"last": rec.cum, "ts": row_dt, "pid": pid,
-                                  "dead": False}
+                                  "dead": False, "day": key[1]}
                             slist.append(st)
                         else:
                             # fresh counter: a new stream starting at 0
                             st = {"last": 0.0, "ts": row_dt, "pid": pid,
-                                  "dead": False}
+                                  "dead": False, "day": key[1]}
                             slist.append(st)
                 else:
-                    cands = [s for s in slist if s["last"] <= rec.cum]
+                    cands = [s for s in slist
+                             if s["last"] <= rec.cum
+                             and (s.get("day") == key[1] or carry_in)]
                     alive = [s for s in cands
                              if s["ts"] is not None and row_dt is not None
                              and abs((row_dt - s["ts"]).total_seconds()) <= 900]
@@ -955,10 +969,11 @@ def read_history():
                         st = max(cands, key=lambda s: s["last"])
                     elif any(abs(rec.cum - c) < 1e-9 for c in seen):
                         st = {"last": rec.cum, "ts": row_dt, "pid": None,
-                              "dead": False}
+                              "dead": False, "day": key[1]}
                         slist.append(st)
                     else:
-                        st = {"last": 0.0, "ts": row_dt, "pid": None, "dead": False}
+                        st = {"last": 0.0, "ts": row_dt, "pid": None,
+                              "dead": False, "day": key[1]}
                         slist.append(st)
                 seen.add(rec.cum)
                 delta = rec.cum - st["last"]
@@ -989,6 +1004,7 @@ def read_history():
                             pending[sday] = pending.get(sday, 0.0) + delta
                 st["last"] = rec.cum
                 st["ts"] = row_dt
+                st["day"] = key[1]
                 if pid is not None:
                     pid_stream[(sid, pid)] = st
             groups[key] = rec              # later line wins

@@ -216,3 +216,28 @@ def test_backfill_does_not_cross_streams(tmp_path):
     assert data["by_key"] == {"bbbb": 2.0}
     assert data["by_key_inferred"] == {}
     assert data["unattributed_usd"] == 8.0
+
+
+def test_fresh_counter_next_day_matching_yesterdays_cum_books_fully(tmp_path):
+    """Cross-day contamination (review finding 1): a NEW process whose first Day-2
+    render happens to equal Day-1's final cum must NOT be treated as a continued or
+    restored stream. Day-2 rows here carry baseline 0 (no carry-in); only rows whose
+    baseline shows the carry-in may continue a previous day's stream."""
+    ct, _ = load_ct(tmp_path)
+    hist(ct,
+         f"2026-09-02T10:00:00Z s1 {Y} 5.0 0 5.0 p=1",
+         f"2026-09-02T11:00:00Z s1 {Y} 10.0 0 10.0 p=1",
+         f"2026-09-03T10:00:00Z s1 {D} 10.0 0 10.0 p=2",
+         f"2026-09-03T11:00:00Z s1 {D} 15.0 0 15.0 p=2")
+    data = ct.collect("today")
+    assert data["cloud_usd"] == pytest.approx(15.0)
+
+
+def test_duplicate_k_token_quarantined(tmp_path):
+    """Review finding 3: two k= tokens in one row are malformed — quarantine as
+    bad-token, never silently last-wins."""
+    ct, _ = load_ct(tmp_path)
+    hist(ct, f"2026-09-03T10:00:00Z s1 {D} 10 0 10 k=aaaa k=bbbb")
+    groups, quarantined = ct.read_history()
+    assert groups == {}
+    assert any(reason == "bad-token" for _l, reason, _raw in quarantined)

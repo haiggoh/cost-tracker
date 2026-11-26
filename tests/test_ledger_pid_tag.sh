@@ -154,6 +154,15 @@ else
   bad "P6: row well-formed (6 fields, or 7th = p=<digits>)" "6 fields or p=[0-9]+" "$# fields: $hist_line"
 fi
 
+# --- P7: a claude ancestor whose comm is NOT exactly "claude" yields no p= token
+# (renamed binary / wrapper -> silent inference fallback, row still well-formed)
+setchain "100 claude-wrapper" "1 sh" "0 none"
+resetstub
+render 6.5 "" "" > /dev/null
+# shellcheck disable=SC2046
+set -- $(tail -1 "$HISTF")
+is "P7: non-claude comm yields 6 fields, no p= token" "$#" "6"
+
 echo
 printf 'passed %s, failed %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

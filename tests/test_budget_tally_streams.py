@@ -21,6 +21,10 @@ def _load_bt(path, ledger_dir, monkeypatch):
     monkeypatch.setenv("BUDGET_TALLY_LEDGER_DIR", str(ledger_dir))
     monkeypatch.setenv("BUDGET_TALLY_TODAY", D)
     monkeypatch.setenv("BUDGET_TALLY_PROJECTS_DIR", str(pathlib.Path(ledger_dir).parent / "none"))
+    # Pin the module-level HISTORY_PATH too: an ambient COST_TRACKER_HISTORY leaked by
+    # another test's conftest would otherwise win at import and read a foreign log.
+    monkeypatch.setenv("COST_TRACKER_HISTORY",
+                       str(pathlib.Path(ledger_dir).parent / "cost-ledger-history.log"))
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     loader = importlib.machinery.SourceFileLoader("bt_streams_under_test", str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
