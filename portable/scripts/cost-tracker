@@ -931,7 +931,16 @@ def read_history():
                 sid_nonzero.add(sid)
                 row_dt = _parse_ts(_ts)
                 st = None
-                if pid is not None:
+                exact = [s for s in slist if abs(s["last"] - rec.cum) < 1e-9
+                         and (s.get("day") == key[1] or carry_in)]
+                if exact:
+                    # restore-to-point: the counter jumped back to a stream's exact
+                    # last value — delta 0, never spend. This must win over the
+                    # 15-min alive window, which would otherwise continue a
+                    # recently-updated LOWER stream and book a phantom delta equal
+                    # to the gap between the streams (measured live on 2026-11-25).
+                    st = max(exact, key=lambda s: s["last"])
+                elif pid is not None:
                     cand = pid_stream.get((sid, pid))
                     if cand is not None and rec.cum >= cand["last"]:
                         st = cand                      # this process's own stream
@@ -1206,6 +1215,10 @@ def _merged_records(fast=False):
             # group saw every render, so its per-key split (including a mid-day
             # key rotation) is the complete one — keep it over the single-row one.
             r.key_split = prior.key_split
+        if prior is not None and getattr(prior, "key_split_inferred", None):
+            # same for the inferred subset — otherwise by_key_inferred reads empty
+            # whenever a live ledger file wins the merge (0.23.1)
+            r.key_split_inferred = prior.key_split_inferred
         merged[key] = r
     return merged, quarantined
 

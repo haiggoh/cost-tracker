@@ -124,7 +124,7 @@
     }
   ],
   "files": {
-    ".claude-plugin/plugin.json": "4cf8740d786ea14592428e720ab73d63b82e1ff362b872304d0371bb86211d20",
+    ".claude-plugin/plugin.json": "f98b13ce474ba4986e521156ac1f40342800718930c51ceb728e69c55e148d07",
     "commands/cost-today.md": "db4e956d0fb0d5aa48819d52b1e64fa5a8c0600f9f10cde431c03b3b2e2c7f3d",
     "docs/history-and-incidents.md": "e7624dbf940eec702e8d46aa9b38c6eb2d6bf31de4fd55f382dbf542b742319a",
     "hooks/cost-panel-register.tsx": "ade1e8d816f9466c944df16f897d0c062541f552e6f33225e984c9fbb0b99cfc",
@@ -132,7 +132,7 @@
     "hooks/hooks.json": "344b8b900cd2f5ad8b5e0aab5e5e5d61b03d3b0eae98408975a78b5ad1d075f5",
     "hooks/session-end-reconcile.py": "91835e3a623f3be564786528a5c038e6c1abd9598fd0d1a116812ed74de3e174",
     "scripts/budget-tally.py": "4141f4630feadd20f0d57c6259befbe175026138695603edcabc97fed2baa315",
-    "scripts/cost-tracker": "eb2a82d9cf938c3404b1c3e7d227c4a919124174cd1af3b694114b789b480d48",
+    "scripts/cost-tracker": "dc968bdfaa374a7c71399b887251521f50b5f187f28166ef751797780898fbe0",
     "scripts/cost_connection.py": "da7ccc38ade9efb507f98c0090734dca4fb7a8c5978f0289064823d927ea010b",
     "scripts/cost_tracker_menu.py": "97dcceddc283bfee2a3a2f75570fa4b5d6a081ae16086961498e65b919512c95",
     "scripts/key_identity.py": "facac14e95aff43be646ca9e5ce4f021108323eb948bcace8724a5e3de1b13b7",
@@ -142,7 +142,7 @@
     "skills/cost-tracker/SKILL.md": "d3d4296174c77799d6280d3e53ae3694ddff7593f09524834fd171eda24c2fdc"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "75255e7d3fa73fb268c85bb2b4bc1ee5226bcc11",
+  "source_commit": "daffe91bf193313858ca83eafe6fe8159e9c34c2",
   "source_repo": "haiggoh/cost-tracker",
   "transform_version": "1"
 }

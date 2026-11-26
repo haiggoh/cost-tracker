@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.23.1] — 2026-11-26 — Fix-forward: restore-to-point no longer books phantom spend; inferred split survives the ledger merge
+
+- A history row whose cumulative exactly equals an existing counter stream's last value (same day, or with a shown carry-in) is a restore-to-point with delta 0, decided BEFORE the 15-minute alive window. Before, a recently-updated lower stream could be continued instead, booking a phantom delta equal to the gap between the streams (measured on a live 2026-11-25 session: two restore rows over-booked the day; synthetic example: rows at 10, 5, then 10 again reported 20 instead of 15).
+- `_merged_records` now carries the history group's `key_split_inferred` onto the ledger-won record, so `by_key_inferred` (`keys --json`, statusline `≈ inferred`, report `of which inferred`) is populated for sessions that also have a live ledger file.
+
 ## [0.23.0] — 2026-11-25 — Counter-stream recovery: a mid-day counter reset no longer floors the day when history has the rows
 
 - History rows may carry a trailing `p=<pid>` token (field 8, order-free after field 6) naming the owning claude process, found by walking up to 4 parent hops from the capture wrapper. The ledger file is unchanged; old readers ignore trailing tokens. A non-numeric `p=` quarantines as `bad-pid`, an unknown trailing token as `bad-token` — never silently dropped.

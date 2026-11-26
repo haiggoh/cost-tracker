@@ -241,3 +241,29 @@ def test_duplicate_k_token_quarantined(tmp_path):
     groups, quarantined = ct.read_history()
     assert groups == {}
     assert any(reason == "bad-token" for _l, reason, _raw in quarantined)
+
+
+def test_restore_to_stream_last_wins_over_alive_window(tmp_path):
+    """A row whose cum exactly equals an existing stream's last is a restore-to-point
+    (delta 0) — the 15-min alive window must NOT continue a recently-updated lower
+    stream instead and book a phantom delta (found live on 2026-11-25: two restore
+    rows over-booked a session by the full gap between the streams)."""
+    ct, _ = load_ct(tmp_path)
+    hist(ct,
+         f"2026-09-03T10:00:00Z s1 {D} 10.0 0 10.0",
+         f"2026-09-03T10:20:00Z s1 {D} 5.0 0 5.0",
+         f"2026-09-03T10:25:00Z s1 {D} 10.0 0 10.0")
+    assert ct.collect("today")["cloud_usd"] == pytest.approx(15.0)
+
+
+def test_ledger_merge_carries_inferred_split(tmp_path):
+    """The live ledger file wins the merge for (sid, day); the history group's
+    key_split_inferred must be carried onto it or by_key_inferred reads empty."""
+    ct, ledger = load_ct(tmp_path)
+    hist(ct,
+         f"2026-09-03T10:00:00Z s1 {D} 8 0 8",
+         f"2026-09-03T11:00:00Z s1 {D} 10 0 10 k=aaaa")
+    (ledger / "s1").write_text(f"{D} 10 0 k=aaaa\n")
+    data = ct.collect("today")
+    assert data["by_key"] == {"aaaa": 10.0}
+    assert data["by_key_inferred"] == {"aaaa": 8.0}
