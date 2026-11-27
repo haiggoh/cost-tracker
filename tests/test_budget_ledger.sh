@@ -13,6 +13,11 @@
 #
 # Written for bash 3.2 (/bin/bash on macOS) — no associative arrays, no ${var^^}.
 set -u
+# Hermetic connection: a cloud-provider flag in the CALLER's env (a vestige like
+# CLAUDE_CODE_USE_VERTEX left by an abandoned trial) must not decide this suite's
+# connection kind — same scrub as tests/conftest.py (2026-11-27: 16 checks went red).
+unset CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_FOUNDRY \
+      ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION CLAUDE_CODE_SKIP_VERTEX_AUTH
 
 # This machine's locale is comma-decimal (de_DE), which makes awk PRINT "1,07813" and, worse,
 # would make it PARSE "40.42" as 40 if any arithmetic were added here. Pin the numeric locale so

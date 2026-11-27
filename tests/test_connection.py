@@ -239,3 +239,42 @@ def test_learn_gap_stores_the_gap_and_leaves_the_fee(tmp_path, monkeypatch, caps
     assert cfg["gap"]["factor"] == 1.047 and "fee" not in cfg and "markup" not in cfg
     assert "fee is unchanged" in capsys.readouterr().out
     assert ct.markup_factor() == 1.05 and ct.gap_factor() == 1.047
+
+
+# --- 0.24.0: a KNOWN gateway host outranks a cloud-provider flag (user, 2026-11-27) ------
+# Measured: CLAUDE_CODE_USE_VERTEX set machine-wide while every request went through the
+# gateway at ANTHROPIC_BASE_URL (its refusals, its per-key dashboard matched x1.10) — the
+# flag made cost-tracker price at list (x1.0) with "no limit knowable".
+
+def test_vertex_flag_with_registry_gateway_host_is_gateway(cc):
+    c = cc.resolve_connection({"CLAUDE_CODE_USE_VERTEX": "1",
+                               "ANTHROPIC_BASE_URL": "https://api.llmgateway.io/v1"})
+    assert c["kind"] == "gateway" and c["fee"] == 1.05
+
+
+def test_vertex_flag_with_host_mapped_gateway_is_gateway(cc, tmp_path):
+    _cfg(tmp_path, {"contract": 2, "connection": {"host_map": {"gw-a.example": "llmgateway.io"}},
+                    "key": {"cap_usd": 40.0, "scope": "key"}})
+    c = cc.resolve_connection({"CLAUDE_CODE_USE_VERTEX": "1",
+                               "ANTHROPIC_BASE_URL": "https://gw-a.example"})
+    assert c["kind"] == "gateway"
+    # the dollar cap is filled in by cost-tracker from the learned refusals; at this layer
+    # the gateway branch decides the cap KIND (cloud-provider would say "none")
+    assert c["cap_kind"] == "daily-key"
+
+
+@pytest.mark.parametrize("flag", ["CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_BEDROCK",
+                                  "CLAUDE_CODE_USE_FOUNDRY"])
+def test_cloud_flag_with_unknown_host_stays_cloud_provider(cc, flag):
+    c = cc.resolve_connection({flag: "1", "ANTHROPIC_BASE_URL": "https://gw.example.test"})
+    assert c["kind"] == "cloud-provider"
+
+
+@pytest.mark.parametrize("val", ["0", "false", "FALSE", "no", "off"])
+def test_a_falsy_cloud_flag_is_off(cc, val):
+    """CLAUDE_CODE_USE_VERTEX="0" is a vestige that Claude Code reads as OFF (measured
+    2026-11-27 in a real settings.json after an abandoned Vertex trial); any non-empty
+    string used to count as ON here."""
+    assert cc.resolve_connection({"CLAUDE_CODE_USE_VERTEX": val}, SUB)["kind"] == "subscription"
+    assert cc.resolve_connection({"CLAUDE_CODE_USE_BEDROCK": val,
+                                  "ANTHROPIC_BASE_URL": "https://gw.example.test"})["kind"] == "gateway"

@@ -9,6 +9,11 @@
 # \037 (ASCII US) is not whitespace, so empty fields survive. That bug was hit in real
 # use; this asserts it stays fixed.
 set -uo pipefail
+# Hermetic connection: a cloud-provider flag in the CALLER's env (a vestige like
+# CLAUDE_CODE_USE_VERTEX left by an abandoned trial) must not decide this suite's
+# connection kind — same scrub as tests/conftest.py (2026-11-27: 16 checks went red).
+unset CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_FOUNDRY \
+      ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION CLAUDE_CODE_SKIP_VERTEX_AUTH
 export LC_ALL=C
 
 HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

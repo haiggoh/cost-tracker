@@ -196,11 +196,31 @@ def _env_float(env, *names):
     return None
 
 
+def _known_gateway_host(host, env):
+    """A host we have EVIDENCE is a gateway: a provider-registry host, a local host_map
+    entry, or a cached gateway price table for it. Shape alone never counts."""
+    if not host or host in LOCAL_HOSTS or host in ANTHROPIC_HOSTS:
+        return False
+    if _provider_for(host, read_registry(), read_config() or {})[0]:
+        return True
+    return bool(_proxy_entry(env))
+
+
+def _env_truthy(env, name):
+    """Claude Code's own reading of a boolean env flag: only 1/true/yes/on (any case) are
+    ON. "0" or "false" left behind by an abandoned trial is OFF — measured 2026-11-27,
+    CLAUDE_CODE_USE_VERTEX="0" in a real settings.json was being read here as ON."""
+    return str(env.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _kind(env, payload):
-    if any(env.get(v) for v in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
-                                "CLAUDE_CODE_USE_FOUNDRY")):
-        return "cloud-provider"
     host = _host(env.get("ANTHROPIC_BASE_URL", ""))
+    if any(_env_truthy(env, v) for v in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                                         "CLAUDE_CODE_USE_FOUNDRY")):
+        # 0.24.0 (user, 2026-11-27): a KNOWN gateway at ANTHROPIC_BASE_URL wins over the
+        # flag — measured, the flag was set machine-wide while every request (refusals,
+        # per-key dashboard at x1.10) went through the gateway. Unknown host: unchanged.
+        return "gateway" if _known_gateway_host(host, env) else "cloud-provider"
     if host in LOCAL_HOSTS:
         return "local"
     if host and host not in ANTHROPIC_HOSTS:
