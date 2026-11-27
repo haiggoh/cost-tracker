@@ -218,7 +218,9 @@ if command -v jq >/dev/null 2>&1; then
         case "$LINK" in /*) KISELF="$LINK" ;; *) KISELF="$(dirname "$KISELF")/$LINK" ;; esac
         HOPS=$(( HOPS + 1 ))
       done
-      KEY_HINT="$(python3 "$(dirname "$KISELF")/key_identity.py" --probe-claude-cli 2>/dev/null | awk '{print $2}')"
+      # --register also records the key's login route (gateway host) in keys.json, so a
+      # key without a refusal of its own inherits a cap only from a same-route sibling.
+      KEY_HINT="$(python3 "$(dirname "$KISELF")/key_identity.py" --probe-claude-cli --register 2>/dev/null | awk '{print $2}')"
       # exactly 4 non-whitespace chars (anything hint_of can produce), nothing else
       case "$KEY_HINT" in
         ""|*[[:space:]]*) HINT_TOK="" ;;

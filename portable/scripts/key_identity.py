@@ -299,8 +299,10 @@ def save_registry(config_dir, data):
     os.replace(tmp, path)
 
 
-def register(data, hint, app, now=None):
-    """Register a key seen on an app. `first_seen` is set once; apps dedupe."""
+def register(data, hint, app, now=None, host=None):
+    """Register a key seen on an app. `first_seen` is set once; apps dedupe.
+    `host` (0.24.0) is the gateway host the probe paired the key with — its LOGIN
+    ROUTE; a key's cap is only ever inherited from a key on the same route."""
     if not HINT_RE.match(hint or ""):
         raise ValueError("invalid key hint: " + repr(hint))
     now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -315,6 +317,11 @@ def register(data, hint, app, now=None):
     if app not in apps:
         apps.append(app)
         apps.sort()
+    if host:
+        routes = entry.setdefault("routes", [])
+        if isinstance(routes, list) and host not in routes:
+            routes.append(host)
+            routes.sort()
     return data
 
 
@@ -353,12 +360,27 @@ def main(argv=None):
                     help="print '<host> <hint>' for THIS process's env, or an empty line "
                          "when the endpoint is not a known gateway — the capture wrapper "
                          "calls this once per statusline render")
+    ap.add_argument("--register", action="store_true",
+                    help="with --probe-claude-cli: also record the key's login route "
+                         "(its gateway host) in keys.json under COST_TRACKER_CONFIG_DIR; "
+                         "written only when something changed")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     if args.probe_claude_cli:
         out = probe_claude_cli(dict(os.environ))
         if out and HINT_RE.match(out["hint"]):
             print(out["host"] + " " + out["hint"])
+            if args.register:
+                try:
+                    cfg = os.environ.get("COST_TRACKER_CONFIG_DIR") or os.path.expanduser(
+                        "~/.claude/cost-tracker")
+                    reg = load_registry(cfg)
+                    before = json.dumps(reg, sort_keys=True)
+                    register(reg, out["hint"], out["app"], host=out["host"])
+                    if json.dumps(reg, sort_keys=True) != before:
+                        save_registry(cfg, reg)
+                except (OSError, ValueError):
+                    pass    # the render must never break on the registry
         else:
             print("")
         return 0

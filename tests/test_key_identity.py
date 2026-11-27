@@ -309,3 +309,30 @@ def test_resolve_labels_precedence_joyia_then_refusal_then_file(tmp_path):
                                joyia={"aaaa": "Joyia-Name"})
     assert labels == {"aaaa": "Joyia-Name", "bbbb": "Refusal-Label",
                       "cccc": "File-Label", "dddd": "sk-...dddd"}
+
+
+def test_register_records_route():
+    ki = load_ki()
+    data = ki.register({"keys": {}}, "abcd", "claude-code", host="gw-a.example")
+    ki.register(data, "abcd", "claude-code", host="gw-a.example")
+    assert data["keys"]["abcd"]["routes"] == ["gw-a.example"]
+
+
+def test_probe_register_writes_route_to_registry(tmp_path, capsys):
+    ki = load_ki()
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "cap.json").write_text(json.dumps(
+        {"contract": 2, "connection": {"host_map": {"gw-a.example": "fake"}}}))
+    env = {"ANTHROPIC_BASE_URL": "https://gw-a.example", "ANTHROPIC_AUTH_TOKEN": "sk-xxxxabcd",
+           "COST_TRACKER_CONFIG_DIR": str(cfg)}
+    old = dict(os.environ)
+    try:
+        os.environ.update(env)
+        assert ki.main(["--probe-claude-cli", "--register"]) == 0
+    finally:
+        os.environ.clear()
+        os.environ.update(old)
+    assert capsys.readouterr().out.strip() == "gw-a.example abcd"
+    reg = json.loads((cfg / "keys.json").read_text())
+    assert reg["keys"]["abcd"]["routes"] == ["gw-a.example"]

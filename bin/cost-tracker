@@ -284,7 +284,7 @@ def merge_learned(old, learned):
     return out
 
 
-def caps_for_hints(cfg=None, hints_with_spend=None):
+def caps_for_hints(cfg=None, hints_with_spend=None, routes=None):
     """{hint: {"cap_usd", "approx"}}. A hint with spend but no refusal of its own
     inherits the newest sibling key's cap marked approx (≈) — sibling keys on the
     same gateway refused at one Max budget (spec decision 5)."""
@@ -297,18 +297,29 @@ def caps_for_hints(cfg=None, hints_with_spend=None):
                 out[hint] = {"cap_usd": float(obs["cap_usd"]), "approx": False}
             except (TypeError, ValueError):
                 continue
-    if hints_with_spend and keys:
-        newest = max((o for o in keys.values() if isinstance(o, dict)),
-                     key=lambda o: o.get("observed_at") or "", default=None)
-        if newest and newest.get("cap_usd"):
+    # 0.24.0: inherit ONLY within a login route (user, 2026-11-26). A key with no
+    # refusal of its own takes the newest refusal among keys sharing one of its
+    # routes (gateway hosts); a key on another route, or with no known route,
+    # inherits nothing — a missing denominator is honest, a borrowed one is not.
+    routes = routes or {}
+    for h in (hints_with_spend or ()):
+        if not h or h in out:                    # None/empty hints are legacy rows
+            continue
+        mine = set(routes.get(h) or ())
+        best = None
+        for sib, obs in keys.items():
+            if not isinstance(obs, dict) or not obs.get("cap_usd"):
+                continue
+            shared = mine & set(routes.get(sib) or ())
+            if shared and (best is None
+                           or (obs.get("observed_at") or "") > (best[1].get("observed_at") or "")):
+                best = (sorted(shared)[0], obs)
+        if best is not None:
             try:
-                cap = float(newest["cap_usd"])
+                out[h] = {"cap_usd": float(best[1]["cap_usd"]), "approx": True,
+                          "route": best[0]}
             except (TypeError, ValueError):
-                cap = None
-            if cap is not None:
-                for h in hints_with_spend:
-                    if h and h not in out:      # None/empty hints are legacy rows
-                        out[h] = {"cap_usd": cap, "approx": True}
+                continue
     return out
 
 
@@ -1601,8 +1612,12 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
     # and auto-registration of newly seen keys (written only when something changed).
     cfg_keys = read_config() or {}
     single_day = len(days) == 1
-    key_caps = caps_for_hints(cfg_keys, hints_with_spend=set(by_key))
     ki = _key_identity()
+    # login routes per key, recorded by the capture probe (key_identity --register)
+    key_routes = {h: set(e.get("routes") or ())
+                  for h, e in (ki.load_registry(CONFIG_DIR).get("keys") or {}).items()
+                  if isinstance(e, dict)}
+    key_caps = caps_for_hints(cfg_keys, hints_with_spend=set(by_key), routes=key_routes)
     try:
         joyia = ki.joyia_labels()
     except Exception:

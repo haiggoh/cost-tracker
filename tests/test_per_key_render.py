@@ -115,6 +115,10 @@ def test_statusline_cap_reached_and_approx(tmp_path):
         "s1": "2026-09-03 7.5 2.5 k=aaaa",     # 5.00 vs cap 4 -> CAP REACHED
         "s2": "2026-09-03 4 0 k=cccc",         # no refusal of its own -> approx sibling cap
     })
+    # 0.24.0: inheritance needs a shared login route (all three on one gateway here)
+    (pathlib.Path(ct.CONFIG_DIR) / "keys.json").write_text(json.dumps({"keys": {
+        h: {"apps": ["claude-code"], "routes": ["gw-a.example"]}
+        for h in ("aaaa", "bbbb", "cccc")}}))
     data = ct.collect("today", fast=True)
     out = ct.render_statusline(data)
     assert "Fake-A $5.00/$4 CAP REACHED" in out
@@ -259,3 +263,76 @@ def test_fast_path_splits_resumed_session_across_keys(tmp_path):
     full = ct.collect("today")["by_key"]
     assert fast == pytest.approx({"aaaa": 10.0, "bbbb": 3.0})
     assert fast == pytest.approx(full)
+
+
+# --- 0.24.0: a cap is inherited only within one login route (user, 2026-11-26) ------
+R_A = _key_obs("aaaa", "Fake-A", 25.0, 25.3, "2026-09-03T09:00:00Z")
+
+
+def test_new_key_inherits_cap_from_same_route_only(tmp_path):
+    ct, _ = _load(tmp_path)
+    caps = ct.caps_for_hints({"keys": {"aaaa": R_A}}, hints_with_spend={"aaaa", "bbbb", "cccc"},
+                             routes={"aaaa": {"gw-a.example"}, "bbbb": {"gw-a.example"},
+                                     "cccc": {"gw-b.example"}})
+    assert caps["aaaa"] == {"cap_usd": 25.0, "approx": False}
+    assert caps["bbbb"]["cap_usd"] == 25.0 and caps["bbbb"]["approx"] is True
+    assert "cccc" not in caps
+
+
+def test_own_refusal_beats_route_sibling(tmp_path):
+    ct, _ = _load(tmp_path)
+    own = _key_obs("bbbb", "Fake-B", 60.0, 60.2, "2026-09-02T09:00:00Z")
+    caps = ct.caps_for_hints({"keys": {"aaaa": R_A, "bbbb": own}}, hints_with_spend={"bbbb"},
+                             routes={"aaaa": {"gw-a.example"}, "bbbb": {"gw-a.example"}})
+    assert caps["bbbb"] == {"cap_usd": 60.0, "approx": False}
+
+
+def test_unknown_route_inherits_nothing(tmp_path):
+    ct, _ = _load(tmp_path)
+    caps = ct.caps_for_hints({"keys": {"aaaa": R_A}}, hints_with_spend={"bbbb"},
+                             routes={"aaaa": {"gw-a.example"}})
+    assert "bbbb" not in caps
+
+
+def test_collect_reads_routes_from_the_registry(tmp_path):
+    ct, _ = _load(tmp_path)
+    _write_cap(ct, {"aaaa": R_A})
+    (pathlib.Path(ct.CONFIG_DIR) / "keys.json").write_text(json.dumps({"keys": {
+        "aaaa": {"apps": ["claude-code"], "routes": ["gw-a.example"]},
+        "bbbb": {"apps": ["claude-code"], "routes": ["gw-a.example"]},
+        "cccc": {"apps": ["claude-code"], "routes": ["gw-b.example"]}}}))
+    _write_ledger(tmp_path, {"s1": "2026-09-03 3 0 k=bbbb", "s2": "2026-09-03 2 0 k=cccc"})
+    out = ct.render_statusline(ct.collect("today", fast=True))
+    assert "sk-...bbbb $3.00/≈$25" in out
+    assert "sk-...cccc $2.00" in out and "sk-...cccc $2.00/" not in out
+
+
+def test_no_literal_cap_in_bin():
+    """No cap value is ever hardcoded (user, 2026-11-26): caps come from refusals."""
+    import ast
+    import re
+    dollar40 = re.compile(r"\$40\b")
+    hits = []
+    for p in sorted((ROOT / "bin").iterdir()):
+        if not p.is_file() or p.suffix == ".pyc":
+            continue
+        src = p.read_text(errors="ignore")
+        if src.startswith("#!") and "python" in src.splitlines()[0] or p.suffix == ".py":
+            tree = ast.parse(src)
+            docs = {id(n.body[0].value) for n in ast.walk(tree)
+                    if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef))
+                    and n.body and isinstance(n.body[0], ast.Expr)
+                    and isinstance(n.body[0].value, ast.Constant)}
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Constant) and id(n) not in docs:
+                    v = n.value
+                    if (type(v) in (int, float) and v == 40) or \
+                            (isinstance(v, str) and dollar40.search(v)):
+                        hits.append(f"{p.name}:{n.lineno}: {v!r}")
+        else:
+            for i, line in enumerate(src.splitlines(), 1):
+                code = re.sub(r"(^|\s)#.*$", "", line)
+                # a cap in shell would be written 40.0 / $40 — a bare 40 is a count (tail -n 40)
+                if re.search(r"(?<![\d.])40\.0+(?![\d])|\$40\b", code):
+                    hits.append(f"{p.name}:{i}: {line.strip()}")
+    assert hits == []

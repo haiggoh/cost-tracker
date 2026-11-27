@@ -163,6 +163,21 @@ render 6.5 "" "" > /dev/null
 set -- $(tail -1 "$HISTF")
 is "P7: non-claude comm yields 6 fields, no p= token" "$#" "6"
 
+echo "R. login route recorded per key (0.24.0)"
+# --- R1: a gateway render records the key's route (gateway host) in keys.json
+setchain "4242 sh" "1 /usr/local/bin/claude" "0 none"
+resetstub
+rm -f "$KEYCFG/keys.json"
+render 7.0 "https://gw-key.example.test/v1" "sk-fake-00000000rt01" > /dev/null
+ROUTES=$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["keys"]["rt01"]["routes"]))' "$KEYCFG/keys.json" 2>&1)
+is "R1: capture records the route of the paying key" "$ROUTES" "gw-key.example.test"
+# --- R2: a local (non-gateway) render records nothing
+rm -f "$KEYCFG/keys.json"
+resetstub
+render 7.5 "http://localhost:4141" "sk-fake-00000000rt02" > /dev/null
+if [ -f "$KEYCFG/keys.json" ]; then R2="written"; else R2="absent"; fi
+is "R2: a non-gateway render writes no route" "$R2" "absent"
+
 echo
 printf 'passed %s, failed %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
