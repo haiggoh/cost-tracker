@@ -107,6 +107,10 @@ def migrate_config(cfg):
                                        "measured_at": m.get("measured_at")})
     if not isinstance(out.get("keys"), dict):
         out["keys"] = {}
+        if (cfg.get("contract") or 1) < 2:
+            # The lift below holds ONE (possibly months-old) refusal, not each key's
+            # newest — learned_cap(auto_learn=True) re-scans once when it sees this.
+            out["lifted_from_contract"] = cfg.get("contract") or 1
     if isinstance(out.get("key"), dict):
         hint = hint_from_display(out["key"].get("key_hint") or "")
         # never insert an empty/invalid hint (refusal without a parenthesized token)

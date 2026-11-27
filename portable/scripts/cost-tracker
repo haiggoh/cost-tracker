@@ -253,6 +253,37 @@ def learn_cap(max_files=500, since_days=365):
     }
 
 
+LEARNED_FIELDS = ("contract", "learned_at", "files_scanned", "files_available",
+                  "found", "key", "keys", "team")
+
+
+def merge_learned(old, learned):
+    """A fresh learn_cap() result replaces ONLY the refusal-derived fields; everything
+    else in cap.json (hand-set fee, measured gap, connection.host_map) is kept. Before
+    0.24.0 `cap --learn` wrote the learn result wholesale and dropped those fields."""
+    old = old or {}
+    out = {k: v for k, v in old.items()
+           if k not in LEARNED_FIELDS and k != "lifted_from_contract"}
+    out.update({k: learned[k] for k in LEARNED_FIELDS if k in learned})
+
+    def _ts(o):
+        return (o or {}).get("observed_at") or ""
+    # Per key, the NEWEST record wins — and a record the scan no longer sees (its
+    # transcript was pruned) is kept, never forgotten: an empty re-scan is not
+    # evidence that a key has no cap.
+    keys = {h: o for h, o in (old.get("keys") or {}).items() if isinstance(o, dict)}
+    for h, o in (learned.get("keys") or {}).items():
+        if isinstance(o, dict) and (h not in keys or _ts(o) >= _ts(keys[h])):
+            keys[h] = o
+    out["keys"] = keys
+    for slot in ("key", "team"):
+        prev, new = old.get(slot), learned.get(slot)
+        if isinstance(prev, dict) and (not isinstance(new, dict) or _ts(prev) > _ts(new)):
+            out[slot] = prev
+    out["found"] = bool(out.get("key"))
+    return out
+
+
 def caps_for_hints(cfg=None, hints_with_spend=None):
     """{hint: {"cap_usd", "approx"}}. A hint with spend but no refusal of its own
     inherits the newest sibling key's cap marked approx (≈) — sibling keys on the
@@ -281,7 +312,7 @@ def caps_for_hints(cfg=None, hints_with_spend=None):
     return out
 
 
-def detect_shared_budget(observations, per_key_day_usd, markup=1.0):
+def detect_shared_budget(observations, per_key_day_usd, markup=1.0, day=None):
     """Pooled-budget REGRESSION detection (spec 5b): if admins pool the keys again,
     a key's refusal quotes a Current cost far above that key's own ledger spend
     (own ledger is LIST price, the refusal is GATEWAY dollars — hence the markup),
@@ -301,6 +332,11 @@ def detect_shared_budget(observations, per_key_day_usd, markup=1.0):
         # only keys with spend TODAY are comparable — a refusal for a key that
         # spent nothing today may be old and must not flag (date scope)
         if hint not in (per_key_day_usd or {}):
+            continue
+        # ...and only a refusal FROM that day: a cap is daily, so yesterday's (or
+        # September's) Current cost says nothing about today's own spend (2026-11-26:
+        # a 2026-09-02 refusal flagged a pooled budget and dropped every denominator)
+        if day is not None and str(o.get("observed_at") or "")[:10] != day:
             continue
         try:
             cost = float(o.get("cost_at_kill_usd") or 0.0)
@@ -334,8 +370,10 @@ def learned_cap(auto_learn=False):
     demand; that is what "the daily budget cap changed" should run.
     """
     cfg = read_config()
-    if cfg is None and auto_learn:
-        cfg = learn_cap()
+    if auto_learn and (cfg is None or cfg.get("lifted_from_contract")):
+        # first run, or a contract-1 file whose single refusal was only lifted in
+        # memory: scan once and persist real per-key records (never on the fast path)
+        cfg = merge_learned(cfg, learn_cap())
         write_config(cfg)
     if not cfg:
         return None, None
@@ -1577,7 +1615,7 @@ def collect(period="today", since=None, fast=False, days=None, ndays=None,
     if single_day:
         shared_budget = detect_shared_budget(
             list((cfg_keys.get("keys") or {}).values()),
-            {h: v for h, v in by_key.items() if v > 0}, markup=markup)
+            {h: v for h, v in by_key.items() if v > 0}, markup=markup, day=sorted(days)[0])
     else:
         shared_budget = {"suspected": False, "detail": []}
     reg = ki.load_registry(CONFIG_DIR)
@@ -3185,7 +3223,7 @@ def main(argv=None):
                 print(f"cost-tracker: could not write {CONFIG_PATH}", file=sys.stderr)
                 return 0
         elif args.learn:
-            cfg = learn_cap()
+            cfg = merge_learned(read_config(), learn_cap())
             write_config(cfg)
         else:
             cfg = read_config()

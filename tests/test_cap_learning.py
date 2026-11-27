@@ -204,3 +204,84 @@ def test_a_malformed_config_is_ignored_not_fatal(tmp_path):
     cfg.write_text("{ not json")
     assert ct.read_config() is None
     assert ct.main(["cap"]) == 0
+
+
+def _obs(hint, cost, ts, cap=40.0):
+    return {"cap_usd": cap, "cost_at_kill_usd": cost, "scope": "key", "label": "Fake",
+            "key_hint": "sk-..." + hint, "observed_at": ts, "source_file": "x.jsonl",
+            "raw": "..."}
+
+
+def test_old_refusal_never_flags_shared_budget(tmp_path):
+    """2026-11-26: a 2026-09-02 refusal (40.02) was compared with today's $5.67 for the
+    same key and flagged a pooled budget, dropping every per-key denominator."""
+    ct, _ = _load(tmp_path)
+    old = _obs("aaaa", 40.02, "2026-09-02T02:17:19Z")
+    out = ct.detect_shared_budget([old], {"aaaa": 5.67}, day="2026-09-03")
+    assert out["suspected"] is False
+
+
+def test_same_day_inconsistent_refusal_still_flags(tmp_path):
+    ct, _ = _load(tmp_path)
+    same = _obs("aaaa", 40.02, "2026-09-03T02:17:19Z")
+    out = ct.detect_shared_budget([same], {"aaaa": 5.67}, day="2026-09-03")
+    assert out["suspected"] is True
+
+
+def test_collect_ignores_a_previous_days_refusal(tmp_path):
+    ct, ledger = _load(tmp_path)
+    ct.write_config({"contract": 2, "found": True, "learned_at": "2026-09-03T00:00:00Z",
+                     "keys": {"aaaa": _obs("aaaa", 40.01, "2026-09-02T21:24:00Z")},
+                     "key": _obs("aaaa", 40.01, "2026-09-02T21:24:00Z"), "team": None})
+    (ledger / "s1").write_text("2026-09-03 24 0 k=aaaa\n")
+    assert ct.collect("today", fast=True)["shared_budget"]["suspected"] is False
+
+
+def test_contract1_cap_json_relearns_per_key(tmp_path):
+    """A contract-1 cap.json holds ONE old refusal; read-time migration lifts it into
+    `keys` but never writes, so per-key refusals were never learned. An auto-learn
+    pass must re-scan once and persist contract 2 with every key's newest refusal."""
+    rec_a = _rec(KILL.format(cost="40.04", cap="40.0"), "2026-09-03T11:36:37.000Z")
+    rec_b = _rec(KILL.replace("Joyia-Code-M4m (sk-...YxHg)", "Other (sk-...k4vA)")
+                 .format(cost="40.72", cap="40.0"), "2026-09-03T18:14:50.000Z")
+    _transcripts(tmp_path, [rec_a, rec_b])
+    ct, _ = _load(tmp_path)
+    pathlib.Path(ct.CONFIG_DIR).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(ct.CONFIG_PATH).write_text(json.dumps(
+        {"contract": 1, "found": True, "learned_at": "2026-09-02T00:00:00Z",
+         "key": _obs("YxHg", 40.01803685, "2026-09-02T02:17:19.496Z"), "team": None}))
+    ct.learned_cap(auto_learn=True)
+    raw = json.loads(pathlib.Path(ct.CONFIG_PATH).read_text())
+    assert raw["contract"] == 2
+    assert set(raw["keys"]) == {"YxHg", "k4vA"}
+    assert raw["keys"]["YxHg"]["observed_at"].startswith("2026-09-03")
+
+
+def test_relearn_keeps_non_refusal_config(tmp_path):
+    """cap --learn used to overwrite cap.json wholesale, dropping the hand-set fee,
+    the measured gap and connection.host_map (found 2026-11-27)."""
+    _transcripts(tmp_path, [_rec(KILL.format(cost="40.04", cap="40.0"),
+                                 "2026-09-03T11:36:37.000Z")])
+    ct, _ = _load(tmp_path)
+    ct.write_config({"contract": 2, "found": False, "keys": {}, "key": None, "team": None,
+                     "connection": {"host_map": {"gw-a.example": "x"}},
+                     "gap": {"factor": 1.04}, "fee": {"factor": 1.05}})
+    assert ct.main(["cap", "--learn"]) == 0
+    raw = json.loads(pathlib.Path(ct.CONFIG_PATH).read_text())
+    assert raw["connection"] == {"host_map": {"gw-a.example": "x"}}
+    assert raw["gap"] == {"factor": 1.04} and raw["fee"] == {"factor": 1.05}
+    assert set(raw["keys"]) == {"YxHg"}
+
+
+def test_relearn_never_forgets_a_refusal_the_scan_can_no_longer_see(tmp_path):
+    """Transcripts are pruned; a re-scan that finds nothing must keep the learned cap."""
+    ct, _ = _load(tmp_path)
+    pathlib.Path(ct.CONFIG_DIR).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(ct.CONFIG_PATH).write_text(json.dumps(
+        {"contract": 1, "found": True,
+         "key": _obs("YxHg", 40.01, "2026-09-02T02:17:19Z", cap=25.0)}))
+    cap, _cfg = ct.learned_cap(auto_learn=True)
+    assert cap == 25.0
+    raw = json.loads(pathlib.Path(ct.CONFIG_PATH).read_text())
+    assert raw["contract"] == 2 and raw["keys"]["YxHg"]["cap_usd"] == 25.0
+    assert "lifted_from_contract" not in raw
