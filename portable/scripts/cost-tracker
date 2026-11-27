@@ -1341,11 +1341,22 @@ def _merged_records(fast=False):
         if (prior is not None and r.axis == "local" and r.cum == 0.0
                 and prior.axis == "cloud" and prior.cum > 0.0):
             continue
-        if prior is not None and getattr(prior, "key_split", None) and r.key_hint:
+        if prior is not None and getattr(prior, "key_split", None) and (
+                r.key_hint or any(k for k in prior.key_split)):
             # The ledger file holds only the LAST render of the day; the history
             # group saw every render, so its per-key split (including a mid-day
             # key rotation) is the complete one — keep it over the single-row one.
-            r.key_split = prior.key_split
+            # 0.24.1: also when the ledger line carries NO hint (written before
+            # per-key tagging) — that case used to drop the split, overlay
+            # corrections included, and read the day as all-unattributed.
+            split = dict(prior.key_split)
+            if not r.key_hint:
+                fig = r.day_override if getattr(r, "day_override", None) is not None \
+                    else r.day_usd
+                rest = fig - sum(split.values())
+                if rest > 1e-9:       # newer than history, no key evidence: unattributed
+                    split[""] = split.get("", 0.0) + rest
+            r.key_split = split
         if prior is not None and getattr(prior, "key_split_inferred", None):
             # same for the inferred subset — otherwise by_key_inferred reads empty
             # whenever a live ledger file wins the merge (0.23.1)
@@ -2469,7 +2480,10 @@ def render_statusline(data):
         # caps are DAILY; a multi-day period must not compare its sum to one day's cap
         single_day = bool(data.get("per_key_single_day", len(data["period_days_utc"]) == 1))
         parts = []
-        for h, v in sorted(by_key.items(), key=lambda kv: (-kv[1], kv[0])):
+        # a key with $0.00 today is noise on the status line (user, 2026-11-27) — unless
+        # every key is at zero, when the segment would otherwise render empty
+        shown_keys = {h: v for h, v in by_key.items() if round(v * markup, 2) > 0} or by_key
+        for h, v in sorted(shown_keys.items(), key=lambda kv: (-kv[1], kv[0])):
             shown = v * markup
             name = klabels.get(h) or _key_identity().hint_display(h)
             ci = caps.get(h) if single_day else None

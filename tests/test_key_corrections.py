@@ -117,3 +117,24 @@ def test_rewrite_replaces_only_the_named_days(ct):
     assert doc["days"]["2026-09-01"] == keep and D in doc["days"]
     backups = list(_overlay(ct).parent.glob("key-corrections.json.bak-*"))
     assert len(backups) == 1
+
+
+def test_hintless_ledger_line_keeps_the_history_split(ct):
+    """0.24.1: a live ledger line WITHOUT a k= tag (written before per-key tagging) won
+    the merge and dropped history's per-key split — overlay corrections included — so
+    the day read as all-unattributed (measured 2026-11-27: 8 sessions, $111.25 on
+    2026-11-24). History saw every render, so its split is the complete one."""
+    assert ct.main(["keys", "--reconstruct", "--since", D, "--write"]) == 0
+    (pathlib.Path(ct.LEDGER_DIR) / SID).write_text(f"{D} 35 0\n")    # legacy, no hint
+    data = ct.collect("today")
+    assert data["by_key"] == pytest.approx({"aaaa": 30.0, "bbbb": 5.0})
+    assert not data["unattributed_usd"]
+
+
+def test_ledger_figure_above_the_history_split_keeps_the_rest_unattributed(ct):
+    """The ledger line is the newest render: spend it shows beyond history's split is
+    real but has no key evidence — it stays unattributed, never folded into a key."""
+    (pathlib.Path(ct.LEDGER_DIR) / SID).write_text(f"{D} 37 0\n")
+    data = ct.collect("today")
+    assert sum(data["by_key"].values()) == pytest.approx(35.0)
+    assert data["unattributed_usd"] == pytest.approx(2.0)

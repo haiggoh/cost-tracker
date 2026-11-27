@@ -336,3 +336,12 @@ def test_no_literal_cap_in_bin():
                 if re.search(r"(?<![\d.])40\.0+(?![\d])|\$40\b", code):
                     hits.append(f"{p.name}:{i}: {line.strip()}")
     assert hits == []
+
+
+def test_statusline_omits_a_zero_spend_key(tmp_path):
+    """A key with $0.00 today is noise on the statusline (user, 2026-11-27)."""
+    ct, _ = _load(tmp_path)
+    _write_ledger(tmp_path, {"s1": "2026-09-03 5 0 k=aaaa", "s2": "2026-09-03 2 2 k=zero"})
+    out = ct.render_statusline(ct.collect("today", fast=True))
+    assert "sk-...aaaa $5.00" in out
+    assert "zero" not in out
