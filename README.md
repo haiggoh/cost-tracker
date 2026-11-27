@@ -145,6 +145,7 @@ against its own cap — numbers from different keys are never mixed.
   ledger spend, or two keys quote the same cost inconsistent with their own spends,
   the report/statusline flag "keys appear to share one budget" and per-key headroom
   stops being shown as real.
+- **The status line shows the current key by default** (`COST_TRACKER_STATUSLINE_KEYS=all` for every key used today; an unknown current key falls back to all). A prefix shared by all key labels is shortened to `key` there (`Joyia-Code4` / `Joyia-Code-M4m` → `key4` / `key-M4m`); a key at $0.00 is left out unless it is the current one.
 - **Labels are display sugar**, resolved in order: joyia's native key store
   (`joyia keys list` / read-only `ai_keys` last-4), the refusal's `Key=` label, an
   optional `key-labels.json` in the config dir; no label → the bare hint.
@@ -427,6 +428,7 @@ that figure and never recomputes or rewrites it.
 | `COST_TRACKER_TODAY` | today, UTC — override for tests |
 | `COST_TRACKER_SAVINGS_CMD` | auto-discovered `local-agents` savings ledger |
 | `COST_TRACKER_STATUSLINE` | `1` — set `0` to keep the `today:` segment out of the status line |
+| `COST_TRACKER_STATUSLINE_KEYS` | `current` — per-key segment shows only the key this session pays with; `all` lists every key used today (`cost-tracker keys` shows them on demand). Any other value renders a visible warning |
 | `COST_TRACKER_CODEX_HOME` | `~/.codex` — Codex home probed for the per-app key |
 | `COST_TRACKER_JOYIA_HOME` | `~/.joyia` — joyia key store read (last-4 only) for labels |
 | `COST_TRACKER_KEY_CORRECTIONS` | `<config dir>/key-corrections.json` — the hindsight per-key overlay; set but missing → every command except `statusline` exits 2 |

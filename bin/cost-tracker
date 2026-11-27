@@ -2424,6 +2424,43 @@ def render_table(data, short_ids=True):
     return "\n".join(lines)
 
 
+STATUSLINE_KEYS_ENV = "COST_TRACKER_STATUSLINE_KEYS"
+
+
+def _current_key_hint():
+    """Last-4 hint of the key THIS process pays with (the statusline is a child of the
+    claude process, so its env is the session's), or None when unknowable."""
+    try:
+        out = _key_identity().probe_claude_cli(dict(os.environ))
+    except Exception:
+        return None
+    return (out or {}).get("hint") or None
+
+
+def short_key_labels(labels):
+    """{hint: label} with a prefix SHARED by every real label replaced by "key", so
+    near-identical names stay tellable apart in little space (user, 2026-11-27):
+    Joyia-Code4 / Joyia-Code-M4m / Joyia-Code -> key4 / key-M4m / key. Bare hints
+    (sk-...xxxx) are left alone; one label, nothing shared, or a collision -> unchanged."""
+    prefix_shown = _key_identity().DISPLAY_PREFIX
+    real = {h: lab for h, lab in labels.items() if lab and not lab.startswith(prefix_shown)}
+    if len(set(real.values())) < 2:
+        return dict(labels)
+    vals = list(real.values())
+    pre = vals[0]
+    for v in vals[1:]:       # plain string prefix (os.path.commonprefix is deprecated, py3.15)
+        while not v.startswith(pre):
+            pre = pre[:-1]
+    if len(pre) < 3:
+        return dict(labels)
+    out = dict(labels)
+    for h, lab in real.items():
+        out[h] = "key" + lab[len(pre):]
+    if len({out[h] for h in real}) != len(set(real.values())):
+        return dict(labels)
+    return out
+
+
 def render_statusline(data):
     """The frozen one-line statusline segment.
 
@@ -2480,12 +2517,26 @@ def render_statusline(data):
         # caps are DAILY; a multi-day period must not compare its sum to one day's cap
         single_day = bool(data.get("per_key_single_day", len(data["period_days_utc"]) == 1))
         parts = []
-        # a key with $0.00 today is noise on the status line (user, 2026-11-27) — unless
-        # every key is at zero, when the segment would otherwise render empty
-        shown_keys = {h: v for h, v in by_key.items() if round(v * markup, 2) > 0} or by_key
+        # 0.25.0 (user, 2026-11-27): by default only the key THIS session pays with;
+        # COST_TRACKER_STATUSLINE_KEYS=all lists every key used today (`cost-tracker keys`
+        # shows them on demand). Unknown current key -> all, so the segment never blanks.
+        mode = (os.environ.get(STATUSLINE_KEYS_ENV) or "current").strip().lower()
+        if mode not in ("current", "all"):
+            return (f"{label}: ⚠ {STATUSLINE_KEYS_ENV}={os.environ.get(STATUSLINE_KEYS_ENV)} "
+                    "is not current|all")
+        cur = _current_key_hint() if mode == "current" else None
+        if cur:
+            shown_keys = {cur: by_key.get(cur, 0.0)}     # the current key even at $0.00
+        else:
+            # a key with $0.00 today is noise on the status line (user, 2026-11-27) —
+            # unless every key is at zero, when the segment would otherwise render empty
+            shown_keys = {h: v for h, v in by_key.items() if round(v * markup, 2) > 0} or by_key
+        ki = _key_identity()
+        names = short_key_labels({h: klabels.get(h) or ki.hint_display(h)
+                                  for h in set(by_key) | set(shown_keys)})
         for h, v in sorted(shown_keys.items(), key=lambda kv: (-kv[1], kv[0])):
             shown = v * markup
-            name = klabels.get(h) or _key_identity().hint_display(h)
+            name = names.get(h) or ki.hint_display(h)
             ci = caps.get(h) if single_day else None
             if suspected or not single_day:
                 parts.append(f"{name} ${shown:.2f}")
@@ -3117,7 +3168,8 @@ def main(argv=None):
         epilog="Environment variables (all optional): COST_TRACKER_CAP_USD, COST_TRACKER_FEE "
                "(alias COST_TRACKER_MARKUP), COST_TRACKER_APPLY_GAP, COST_TRACKER_PROVIDERS, "
                "COST_TRACKER_CONFIG_DIR, COST_TRACKER_LEDGER_DIR, COST_TRACKER_HISTORY, "
-               "COST_TRACKER_PROJECTS_DIR, COST_TRACKER_STATUSLINE, COST_TRACKER_NO_MENU, "
+               "COST_TRACKER_PROJECTS_DIR, COST_TRACKER_STATUSLINE, COST_TRACKER_STATUSLINE_KEYS, "
+               "COST_TRACKER_NO_MENU, "
                "COST_TRACKER_CODEX_HOME, COST_TRACKER_CODEX_TOKEN, COST_TRACKER_JOYIA_HOME, "
                "COST_TRACKER_DESKTOP_CONFIG_LIBRARY, COST_TRACKER_KEY_CORRECTIONS. "
                "See README 'Environment'.")

@@ -102,9 +102,10 @@ def test_statusline_per_key_segment(tmp_path):
         "s3": "2026-09-03 3 1",
     })
     data = ct.collect("today", fast=True)
-    # the unattributed remainder ($2.00 from s3) stays visible on the budget line
+    # the unattributed remainder ($2.00 from s3) stays visible on the budget line;
+    # 0.25.0: the shared label prefix "Fake-" shortens to "key" (no current key -> all)
     assert ct.render_statusline(data) == \
-        "today: Fake-B $10.00/$25 · Fake-A $5.00/$40 · unattributed $2.00"
+        "today: keyB $10.00/$25 · keyA $5.00/$40 · unattributed $2.00"
 
 
 def test_statusline_cap_reached_and_approx(tmp_path):
@@ -345,3 +346,71 @@ def test_statusline_omits_a_zero_spend_key(tmp_path):
     out = ct.render_statusline(ct.collect("today", fast=True))
     assert "sk-...aaaa $5.00" in out
     assert "zero" not in out
+
+
+# --- 0.25.0: the statusline shows the CURRENT key by default; similar labels shortened ----
+def _labelled(ct, tmp_path):
+    _write_cap(ct, {
+        # yesterday's refusals: they teach the caps without tripping today's pooled check
+        "aaaa": _key_obs("aaaa", "Joyia-Code4", 40.0, 40.1, "2026-09-02T09:00:00Z"),
+        "bbbb": _key_obs("bbbb", "Joyia-Code-M4m", 40.0, 40.2, "2026-09-02T08:00:00Z"),
+        "cccc": _key_obs("cccc", "Joyia-Code", 40.0, 40.3, "2026-09-02T07:00:00Z")})
+    _write_ledger(tmp_path, {"s1": "2026-09-03 12 0 k=aaaa", "s2": "2026-09-03 7 0 k=bbbb",
+                             "s3": "2026-09-03 3 0 k=cccc"})
+
+
+def test_statusline_shows_only_the_current_key_by_default(tmp_path, monkeypatch):
+    ct, _ = _load(tmp_path)
+    _labelled(ct, tmp_path)
+    monkeypatch.delenv("COST_TRACKER_STATUSLINE_KEYS", raising=False)
+    monkeypatch.setattr(ct, "_current_key_hint", lambda: "bbbb")
+    out = ct.render_statusline(ct.collect("today", fast=True))
+    assert "key-M4m $7.00/$40" in out
+    assert "key4" not in out and "$12.00" not in out
+
+
+def test_statusline_all_mode_lists_every_key_shortened(tmp_path, monkeypatch):
+    ct, _ = _load(tmp_path)
+    _labelled(ct, tmp_path)
+    monkeypatch.setenv("COST_TRACKER_STATUSLINE_KEYS", "all")
+    monkeypatch.setattr(ct, "_current_key_hint", lambda: "bbbb")
+    out = ct.render_statusline(ct.collect("today", fast=True))
+    assert "key4 $12.00/$40" in out and "key-M4m $7.00/$40" in out and "key $3.00/$40" in out
+    assert "Joyia" not in out
+
+
+def test_statusline_unknown_current_key_falls_back_to_all(tmp_path, monkeypatch):
+    ct, _ = _load(tmp_path)
+    _labelled(ct, tmp_path)
+    monkeypatch.delenv("COST_TRACKER_STATUSLINE_KEYS", raising=False)
+    monkeypatch.setattr(ct, "_current_key_hint", lambda: None)
+    out = ct.render_statusline(ct.collect("today", fast=True))
+    assert "key4 $12.00/$40" in out and "key $3.00/$40" in out
+
+
+def test_statusline_current_key_shown_even_at_zero(tmp_path, monkeypatch):
+    ct, _ = _load(tmp_path)
+    _labelled(ct, tmp_path)
+    monkeypatch.setattr(ct, "_current_key_hint", lambda: "dddd")   # fresh key, no spend yet
+    out = ct.render_statusline(ct.collect("today", fast=True))
+    assert "sk-...dddd $0.00" in out
+
+
+def test_statusline_invalid_keys_setting_is_visible_not_silent(tmp_path, monkeypatch):
+    ct, _ = _load(tmp_path)
+    _labelled(ct, tmp_path)
+    monkeypatch.setenv("COST_TRACKER_STATUSLINE_KEYS", "everything")
+    out = ct.render_statusline(ct.collect("today", fast=True))
+    assert "COST_TRACKER_STATUSLINE_KEYS" in out and "current|all" in out
+
+
+@pytest.mark.parametrize("labels,expected", [
+    ({"a": "Joyia-Code4", "b": "Joyia-Code-M4m", "c": "Joyia-Code"},
+     {"a": "key4", "b": "key-M4m", "c": "key"}),
+    ({"a": "Joyia-Code4"}, {"a": "Joyia-Code4"}),                       # one label: unchanged
+    ({"a": "Work", "b": "Home"}, {"a": "Work", "b": "Home"}),             # nothing shared
+    ({"a": "Joyia-Code4", "b": "sk-...mote"}, {"a": "Joyia-Code4", "b": "sk-...mote"}),
+])
+def test_short_labels_strip_only_a_shared_prefix(tmp_path, labels, expected):
+    ct, _ = _load(tmp_path)
+    assert ct.short_key_labels(labels) == expected

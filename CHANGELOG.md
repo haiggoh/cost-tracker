@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.25.0] — 2026-11-27 — The status line shows the current key, shortened; reconstructed days survive untagged ledger lines
+
+- **The status line shows only the key this session pays with** by default. `COST_TRACKER_STATUSLINE_KEYS=all` lists every key used today; `cost-tracker keys` and `/cost-today` show them on demand. An unknown current key (local lane, unprobeable app) falls back to all, and an invalid setting renders a visible warning instead of a silent default.
+- **Similar key labels are shortened on the status line.** A prefix shared by every label becomes `key` (`Joyia-Code4` / `Joyia-Code-M4m` / `Joyia-Code` → `key4` / `key-M4m` / `key`); bare hints and labels with nothing in common are unchanged.
+- **A key at $0.00 is left out of the status line** unless it is the current key.
+- **Fixed: an untagged live ledger line no longer drops history's per-key split.** A ledger line written before per-key tagging won the merge and discarded the split — overlay corrections included — so the day read as all-unattributed (measured 2026-11-27: 8 sessions, $111.25 on 2026-11-24). Spend the ledger line shows beyond history's split stays unattributed.
 ## [0.24.0] — 2026-11-27 — Per-key attribution you can trust after a key switch, route-scoped caps, and hindsight reconstruction
 
 - **A resumed session is split across the keys that actually paid.** The fast path (`keys`, statusline renders) now reads the history log too. Before, it read only the overwritten per-session ledger line, so a session resumed under a new key booked its whole day to that last key (measured 2026-11-26: one key at $51.46 on the fast path vs $24.02 from history).
