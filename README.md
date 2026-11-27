@@ -136,9 +136,12 @@ against its own cap — numbers from different keys are never mixed.
 - **Caps come only from refusal text** (`Budget has been exceeded! Key=… Current
   cost: X, Max budget: Y`, matched as text, not status code), newest per key wins;
   `cost-tracker cap --record "<pasted refusal>"` records one you saw. A key with
-  spend but no refusal of its own shows the newest sibling cap marked `≈`. No
-  refusal anywhere → spend with no denominator, never an invented one.
-- **Pooled-budget regression**: if a refusal quotes a cost far above the key's own
+  spend but no refusal of its own shows, marked `≈`, the newest refusal's cap among
+  keys on the **same login route** (the gateway host its probe paired it with,
+  recorded per key in `keys.json`); a key on another route, or with no known route,
+  inherits nothing. No cap value is built in. No refusal anywhere → spend with no
+  denominator, never an invented one.
+- **Pooled-budget regression** (same-UTC-day refusals only): if a refusal quotes a cost far above the key's own
   ledger spend, or two keys quote the same cost inconsistent with their own spends,
   the report/statusline flag "keys appear to share one budget" and per-key headroom
   stops being shown as real.
@@ -148,8 +151,19 @@ against its own cap — numbers from different keys are never mixed.
 - The legacy `joyia-shared` scope is retired by a visible migration (the
   `budget-scopes.json` rewrite is on disk, logged in `migrations.log`).
 
+- **Hindsight re-attribution (0.24.0)**: `cost-tracker keys --reconstruct --since
+  YYYY-MM-DD [--until YYYY-MM-DD]` re-attributes past days from the gateway's own
+  refusals (a refusal at/over the cap closes that key for the UTC day, allowing a 5%
+  in-flight overshoot of its own cap; a refusal anchors the session window that led to
+  it; a resume with no evidence takes the single open key a concurrent session was
+  billing, else stays unattributed; over-cap is reported as a violation, never
+  clamped). It is a DRY RUN printing before → after; `--write` stores the result in
+  `key-corrections.json` (backed up first), which every report applies on top of the
+  raw history as `≈ inferred`. The history log itself is never edited.
+
 Known limitations: two keys with the same last-4 merge (documented); days before
-the release are not retro-split — only days after the release are per-key.
+per-key tagging carry no `k=` tags, so their split is only what `--reconstruct` can
+infer from refusals.
 
 ## Commands
 
@@ -184,7 +198,7 @@ normalises a `v`-prefixed tag, preserves the file's mode, and `--check` gates a 
 | `cost-tracker doctor` | quarantined records grouped by (reason, session) + resolved config |
 | `cost-tracker connection [--map-host HOST PROVIDER] [--json]` | how this session connects, and which limit, fee and gap apply |
 | `cost-tracker cap [--learn] [--set USD] [--record TEXT]` | per-key daily caps and the refusals they were read from; `--record` parses a pasted `Key=…` refusal (newest per key wins) |
-| `cost-tracker keys [--json]` | per-key registry, today's spend per key, caps, labels, and the pooled-budget flag — hints only |
+| `cost-tracker keys [--json] [--reconstruct --since D [--until D] [--write]]` | per-key registry, today's spend per key, caps, labels, and the pooled-budget flag — hints only; `--reconstruct` re-attributes past days from refusals (dry run unless `--write`) |
 | `cost-tracker fee [--set F] [--clear] [--json]` | the gateway's published fee, its source, and why a direct account has none |
 | `cost-tracker calibrate [--json] [--tolerance USD] [--since-days N] [--learn-gap]` | our daily total (list × fee) vs the gateway's own figure; **exits 1 on a measured undercount** |
 | `cost-tracker markup [--set F] [--clear] [--json]` | pre-0.12 name: fee and measured gap together |
@@ -415,6 +429,7 @@ that figure and never recomputes or rewrites it.
 | `COST_TRACKER_STATUSLINE` | `1` — set `0` to keep the `today:` segment out of the status line |
 | `COST_TRACKER_CODEX_HOME` | `~/.codex` — Codex home probed for the per-app key |
 | `COST_TRACKER_JOYIA_HOME` | `~/.joyia` — joyia key store read (last-4 only) for labels |
+| `COST_TRACKER_KEY_CORRECTIONS` | `<config dir>/key-corrections.json` — the hindsight per-key overlay; set but missing → every command except `statusline` exits 2 |
 | `COST_TRACKER_DESKTOP_CONFIG_LIBRARY` | `~/Library/Application Support/Claude-3p/configLibrary` — Desktop 3P probe |
 
 MIT.

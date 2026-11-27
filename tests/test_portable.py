@@ -58,7 +58,7 @@ def test_host_to_portable_file_set_is_pinned():
     """The bin/ -> scripts/ move is byte-identical for the CLI and its sibling modules;
     skill/command/hook/manifest verbatim (skill/command get the command-reference rewrite)."""
     for rel in ("cost-tracker", "cost_connection.py", "budget-tally.py", "proxy_prices.py",
-                "cost_tracker_menu.py", "key_identity.py"):
+                "cost_tracker_menu.py", "key_identity.py", "key_reconstruct.py"):
         assert (PORTABLE / "scripts" / rel).is_file(), rel
         assert (PORTABLE / "scripts" / rel).read_bytes() == (ROOT / "bin" / rel).read_bytes(), rel
     for rel in ("skills/cost-tracker/SKILL.md", "commands/cost-today.md",

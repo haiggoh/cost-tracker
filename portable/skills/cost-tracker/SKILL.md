@@ -118,6 +118,10 @@ Quote the table rather than retyping numbers out of it.
   rows, counter streams recover that spend and no `*` is shown.
 - **`≈ inferred` = untagged rows attributed to the key their own counter stream
   later showed** — never shown as observed (`by_key_inferred` in `keys --json`).
+- **Reconstructed past days are `≈ inferred` too.** `python3 '$CLAUDE_PLUGIN_ROOT/scripts/cost-tracker' keys --reconstruct
+  --since D` re-attributes from refusals as a DRY RUN; show the user its before → after
+  table and violations, and only `--write` on their OK. A cap is inherited only within
+  one login route — never quote one key's cap for a key on another gateway.
 
 ## ⚠️ On a reselling gateway, an ACCURATE total still under-predicts the cap
 
