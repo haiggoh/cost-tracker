@@ -1166,13 +1166,13 @@ def _merged_records(fast=False):
     reported total and the calibrated total are assembled by two different code paths.
     """
     ledger = read_ledger()
-    # FAST PATH (statusline): the per-session ledger dir alone answers "today", so the
-    # history log — hundreds of thousands of lines on a long-lived machine — is not read
-    # at all. It is only needed for periods the overwritten ledger file cannot describe.
-    if fast:
-        hist_groups, hist_bad = {}, []
-    else:
-        hist_groups, hist_bad = read_history()
+    # History is read on the FAST path too (0.24.0). The per-session ledger file holds
+    # only the LAST render, so without history a session resumed under a new key booked
+    # its whole day to that last key (2026-11-26: Code4 $51.46 on the fast path vs
+    # $24.02 from history), which also fed the pooled-budget check a near-empty old key.
+    # Cost measured that day: 20,357 rows / 1.9 MB, sub-second CPU. `fast` still skips
+    # the slow side-spend work in collect().
+    hist_groups, hist_bad = read_history()
 
     quarantined = [
         {"source": "ledger", "session_id": r.session_id, "reason": r.reason, "raw": r.raw}
