@@ -133,7 +133,7 @@
     "hooks/session-end-reconcile.py": "91835e3a623f3be564786528a5c038e6c1abd9598fd0d1a116812ed74de3e174",
     "scripts/budget-tally.py": "4141f4630feadd20f0d57c6259befbe175026138695603edcabc97fed2baa315",
     "scripts/cost-tracker": "c0b7af97e3e91189d15c3e1924e29e096c8bcd2cfeca1002fca0496dd50575b3",
-    "scripts/cost_connection.py": "20bbcc31e8e9762d9d34f2451528231017bccfdfa8f0c1b432e97e06bb86bcaa",
+    "scripts/cost_connection.py": "d702a0c4b4a47811746a7b007789aadebd69d9a2cfb939289d7bf1016fc31361",
     "scripts/cost_tracker_menu.py": "97dcceddc283bfee2a3a2f75570fa4b5d6a081ae16086961498e65b919512c95",
     "scripts/key_identity.py": "3f3ecb8c32dedf4af206ed8819d2b2ebe06a765c5a564245c5f3c226a4dbd809",
     "scripts/key_reconstruct.py": "0fc9e7fd689214d8aebc42582188827f16ca7a9edfc3f0fcc5b5c178187c4502",
@@ -143,7 +143,7 @@
     "skills/cost-tracker/SKILL.md": "59827b046713be09e8176499187e3bf87ab9795e3d279350dfccb9a7df12cc91"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "a8798bd2a72c5956991f00751be14418ccb2a311",
+  "source_commit": "df6dbca6d80ff7114233be4857dcdb079112054e",
   "source_repo": "haiggoh/cost-tracker",
   "transform_version": "1"
 }

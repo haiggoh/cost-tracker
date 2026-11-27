@@ -213,13 +213,40 @@ def _env_truthy(env, name):
     return str(env.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+PROVIDER_FLAGS = (("CLAUDE_CODE_USE_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL"),
+                  ("CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_BASE_URL"),
+                  ("CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_FOUNDRY_BASE_URL"))
+
+
+def _active_provider(env):
+    """(flag, provider base-URL var) of the first provider flag Claude Code reads as ON."""
+    for flag, url_var in PROVIDER_FLAGS:
+        if _env_truthy(env, flag):
+            return flag, url_var
+    return None, None
+
+
+def _effective_env(env):
+    """The env as the ENDPOINT sees it. With a provider flag ON, Claude Code sends to that
+    provider's own base URL, not ANTHROPIC_BASE_URL — so the provider URL takes that slot
+    here (absent -> no base URL), and every downstream lookup (host, fee, price table) is
+    about the endpoint actually used. This is what tells a genuine Vertex session apart
+    from a vestige (user question, 2026-11-27)."""
+    _flag, url_var = _active_provider(env)
+    if url_var is None:
+        return env
+    out = dict(env)
+    out.pop("ANTHROPIC_BASE_URL", None)
+    if env.get(url_var):
+        out["ANTHROPIC_BASE_URL"] = env[url_var]
+    return out
+
+
 def _kind(env, payload):
     host = _host(env.get("ANTHROPIC_BASE_URL", ""))
-    if any(_env_truthy(env, v) for v in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
-                                         "CLAUDE_CODE_USE_FOUNDRY")):
-        # 0.24.0 (user, 2026-11-27): a KNOWN gateway at ANTHROPIC_BASE_URL wins over the
-        # flag — measured, the flag was set machine-wide while every request (refusals,
-        # per-key dashboard at x1.10) went through the gateway. Unknown host: unchanged.
+    if _active_provider(env)[0]:
+        # env is already _effective_env(): the host here is the PROVIDER's base URL. A
+        # known gateway there = routed through a gateway; anything else = the provider.
         return "gateway" if _known_gateway_host(host, env) else "cloud-provider"
     if host in LOCAL_HOSTS:
         return "local"
@@ -238,7 +265,7 @@ def _kind(env, payload):
 
 
 def resolve_connection(env=None, payload=None):
-    env = os.environ if env is None else env
+    env = _effective_env(os.environ if env is None else env)
     cfg = read_config()
     kind = _kind(env, payload)
     host = _host(env.get("ANTHROPIC_BASE_URL", ""))

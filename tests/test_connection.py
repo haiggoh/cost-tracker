@@ -241,32 +241,45 @@ def test_learn_gap_stores_the_gap_and_leaves_the_fee(tmp_path, monkeypatch, caps
     assert ct.markup_factor() == 1.05 and ct.gap_factor() == 1.047
 
 
-# --- 0.24.0: a KNOWN gateway host outranks a cloud-provider flag (user, 2026-11-27) ------
-# Measured: CLAUDE_CODE_USE_VERTEX set machine-wide while every request went through the
-# gateway at ANTHROPIC_BASE_URL (its refusals, its per-key dashboard matched x1.10) — the
-# flag made cost-tracker price at list (x1.0) with "no limit knowable".
+# --- 0.24.0: telling a genuine cloud-provider session from a vestige (user, 2026-11-27) ----
+# Claude Code reads a provider flag as ON only for 1/true/yes/on, and with a flag ON it routes
+# through THAT provider's own base URL (ANTHROPIC_VERTEX_BASE_URL / _BEDROCK_ / _FOUNDRY_) —
+# ANTHROPIC_BASE_URL is not the endpoint then. So: flag ON + provider URL at a KNOWN gateway
+# = gateway; flag ON otherwise = genuine cloud provider, even if a stale ANTHROPIC_BASE_URL
+# points at a known gateway.
 
-def test_vertex_flag_with_registry_gateway_host_is_gateway(cc):
+def test_vertex_via_known_gateway_provider_url_is_gateway(cc):
     c = cc.resolve_connection({"CLAUDE_CODE_USE_VERTEX": "1",
-                               "ANTHROPIC_BASE_URL": "https://api.llmgateway.io/v1"})
+                               "ANTHROPIC_VERTEX_BASE_URL": "https://api.llmgateway.io/v1"})
     assert c["kind"] == "gateway" and c["fee"] == 1.05
+    assert c["host"] == "api.llmgateway.io"
 
 
-def test_vertex_flag_with_host_mapped_gateway_is_gateway(cc, tmp_path):
+def test_bedrock_via_host_mapped_gateway_is_gateway(cc, tmp_path):
     _cfg(tmp_path, {"contract": 2, "connection": {"host_map": {"gw-a.example": "llmgateway.io"}},
                     "key": {"cap_usd": 40.0, "scope": "key"}})
-    c = cc.resolve_connection({"CLAUDE_CODE_USE_VERTEX": "1",
-                               "ANTHROPIC_BASE_URL": "https://gw-a.example"})
+    c = cc.resolve_connection({"CLAUDE_CODE_USE_BEDROCK": "true",
+                               "ANTHROPIC_BEDROCK_BASE_URL": "https://gw-a.example"})
     assert c["kind"] == "gateway"
     # the dollar cap is filled in by cost-tracker from the learned refusals; at this layer
     # the gateway branch decides the cap KIND (cloud-provider would say "none")
     assert c["cap_kind"] == "daily-key"
 
 
-@pytest.mark.parametrize("flag", ["CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_BEDROCK",
-                                  "CLAUDE_CODE_USE_FOUNDRY"])
-def test_cloud_flag_with_unknown_host_stays_cloud_provider(cc, flag):
-    c = cc.resolve_connection({flag: "1", "ANTHROPIC_BASE_URL": "https://gw.example.test"})
+def test_genuine_vertex_with_a_stale_gateway_base_url_stays_cloud_provider(cc):
+    """The inverse vestige: a real Vertex user whose old ANTHROPIC_BASE_URL still names a
+    known gateway. Claude Code does not send there in Vertex mode, so neither do we."""
+    c = cc.resolve_connection({"CLAUDE_CODE_USE_VERTEX": "1",
+                               "ANTHROPIC_BASE_URL": "https://api.llmgateway.io/v1"})
+    assert c["kind"] == "cloud-provider"
+
+
+@pytest.mark.parametrize("flag,url", [
+    ("CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_BASE_URL"),
+    ("CLAUDE_CODE_USE_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL"),
+    ("CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_FOUNDRY_BASE_URL")])
+def test_cloud_flag_with_unknown_provider_host_stays_cloud_provider(cc, flag, url):
+    c = cc.resolve_connection({flag: "1", url: "https://my-resource.example.test"})
     assert c["kind"] == "cloud-provider"
 
 
