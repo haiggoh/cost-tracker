@@ -211,10 +211,15 @@ def test_caps_for_hints_marks_sibling_cap_approx(tmp_path):
     ])
     ct, _ = _load(tmp_path)
     ct.write_config(ct.learn_cap())
-    caps = ct.caps_for_hints(hints_with_spend={"aaaa", "cccc"})
+    # 0.24.0: inheritance needs a shared login route (user, 2026-11-26)
+    same = {"aaaa": {"gw-a.example"}, "cccc": {"gw-a.example"}}
+    caps = ct.caps_for_hints(hints_with_spend={"aaaa", "cccc"}, routes=same)
     assert caps["aaaa"] == {"cap_usd": 40.0, "approx": False}
-    assert caps["cccc"] == {"cap_usd": 40.0, "approx": True}
-    caps = ct.caps_for_hints(hints_with_spend={"aaaa"})
+    assert caps["cccc"] == {"cap_usd": 40.0, "approx": True, "route": "gw-a.example"}
+    caps = ct.caps_for_hints(hints_with_spend={"aaaa"}, routes=same)
+    assert "cccc" not in caps
+    # without a shared route the unseen key inherits nothing
+    caps = ct.caps_for_hints(hints_with_spend={"aaaa", "cccc"})
     assert "cccc" not in caps
 
 
