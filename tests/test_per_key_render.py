@@ -241,3 +241,21 @@ def test_keys_subcommand_json(tmp_path, capsys):
     assert out["labels"]["aaaa"] == "Fake-A"
     assert out["registry"]["keys"]["aaaa"]["apps"] == ["claude-code"]
     assert out["shared_budget"]["suspected"] is False
+
+
+def test_fast_path_splits_resumed_session_across_keys(tmp_path):
+    """A session resumed under a NEW key: its ledger file holds only the last render
+    (k=bbbb), but history shows $10 billed under aaaa before the switch. The fast
+    path (keys, statusline) must split the day like the full path, never book the
+    whole day to the last key (2026-11-26: Code4 $51.46 vs $24.02 on the full path)."""
+    ct, _ = _load(tmp_path)
+    pathlib.Path(ct.HISTORY_PATH).write_text(
+        "2026-09-03T08:00:00Z s1 2026-09-03 4 0 4 k=aaaa p=1\n"
+        "2026-09-03T09:00:00Z s1 2026-09-03 10 0 10 k=aaaa p=1\n"
+        "2026-09-03T10:00:00Z s1 2026-09-03 10 0 10 k=bbbb p=2\n"
+        "2026-09-03T11:00:00Z s1 2026-09-03 13 0 13 k=bbbb p=2\n")
+    _write_ledger(tmp_path, {"s1": "2026-09-03 13 0 k=bbbb"})
+    fast = ct.collect("today", fast=True)["by_key"]
+    full = ct.collect("today")["by_key"]
+    assert fast == pytest.approx({"aaaa": 10.0, "bbbb": 3.0})
+    assert fast == pytest.approx(full)
