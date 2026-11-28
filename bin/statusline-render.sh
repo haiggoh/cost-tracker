@@ -46,7 +46,7 @@ Reads the statusLine JSON payload on stdin and prints up to three lines:
     <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
     local session saved $<session_phantom> · today: $<daily_saved> saved with free agents
     (no JoyIA mark, no cloud spend, no cap)
-  FREE_API SESSION (ANTHROPIC_BASE_URL=localhost:4141-4151):
+  FREE_API SESSION (loopback ANTHROPIC_BASE_URL on a proxy-band port, default 4141-4190):
     <model> <effort> · ctx <tokens> <pct>% · 5h <pct>% · 7d <pct>%
     free api session saved $<session_phantom> · today: $<daily_saved> saved with free agents
     (no JoyIA mark, no cloud spend, no cap, no local RAM/tok/s telemetry)
@@ -69,11 +69,12 @@ shows "local session saved $X · today: $Y saved with free agents" (LOCAL) or
 "free api session saved $X · today: $Y saved with free agents" (FREE_API) where X is this
 session's phantom (what local/free work would have cost at Opus rates) and Y is the combined
 daily savings across all local sessions + free API sessions + dispatch savings from the
-savings-ledger. Detection is via ANTHROPIC_BASE_URL (ports 8000-8010 = LOCAL, 4141-4151 = FREE_API),
+savings-ledger. Detection is via ANTHROPIC_BASE_URL (ports 8000-8010 = LOCAL, the proxy band
+LA_REMOTE_PROXY_PORT_MIN..MAX, default 4141-4190 = FREE_API),
 never CLAUDE_IS_LOCAL (which leaks into later cloud sessions).
 
 Local telemetry (Metal RAM usage, MLX token generation rate) is ONLY shown for LOCAL sessions
-(ports 8000-8010). FREE_API sessions (ports 4141-4151) run on remote providers and have no
+(ports 8000-8010). FREE_API sessions (proxy-band ports) run on remote providers and have no
 local Metal RAM or local tok/s to report.
 
 Every field is optional — anything missing or null is dropped rather than printed as
@@ -291,6 +292,29 @@ else
     USE_LEGACY_FALLBACK=1
 fi
 
+# free_api iff the URL host is loopback and its port is inside the proxy band
+# [LA_REMOTE_PROXY_PORT_MIN, LA_REMOTE_PROXY_PORT_MAX] (exported into the session by the
+# free-agents launcher; fallback = the shipped default 4141-4190). bash 3.2: no ${var,,};
+# parse by parameter expansion. A set-but-non-numeric bound falls back to the default.
+_url_in_free_api_band() {
+    local url="$1" rest host port lo hi
+    case "$url" in
+        http://*|https://*) rest="${url#*://}" ;;
+        *) return 1 ;;
+    esac
+    rest="${rest%%/*}"      # drop path
+    rest="${rest%%\?*}"     # drop query
+    host="${rest%%:*}"
+    port="${rest##*:}"
+    [ "$host" = "localhost" ] || [ "$host" = "127.0.0.1" ] || return 1
+    case "$port" in ''|*[!0-9]*) return 1 ;; esac
+    lo="${LA_REMOTE_PROXY_PORT_MIN:-4141}"
+    hi="${LA_REMOTE_PROXY_PORT_MAX:-4190}"
+    case "$lo" in ''|*[!0-9]*) lo=4141 ;; esac
+    case "$hi" in ''|*[!0-9]*) hi=4190 ;; esac
+    [ "$port" -ge "$lo" ] && [ "$port" -le "$hi" ]
+}
+
 if [ "$USE_LEGACY_FALLBACK" = "1" ]; then
     # Legacy fallback: derive from ANTHROPIC_BASE_URL (matches old logic)
     SESSION_KIND="unknown"
@@ -302,15 +326,20 @@ if [ "$USE_LEGACY_FALLBACK" = "1" ]; then
             SESSION_EMOJI="🦾"
             PROVIDER_DISPLAY="Local (unknown backend)"
             ;;
-        http://localhost:414[1-9]|http://localhost:415[01]|http://127.0.0.1:414[1-9]|http://127.0.0.1:415[01])
-            SESSION_KIND="free_api"
-            SESSION_EMOJI="🌐"
-            PROVIDER_DISPLAY="Free API (NVIDIA Nemotron)"
-            ;;
-        https://api.anthropic.com*|*anthropic.com*|*llmgw*)
-            SESSION_KIND="cloud"
-            SESSION_EMOJI="☁️"
-            PROVIDER_DISPLAY="Anthropic (cloud)"
+        *)
+            if _url_in_free_api_band "${ANTHROPIC_BASE_URL:-}"; then
+                SESSION_KIND="free_api"
+                SESSION_EMOJI="🌐"
+                PROVIDER_DISPLAY="Free API (NVIDIA Nemotron)"
+            else
+                case "${ANTHROPIC_BASE_URL:-}" in
+                    https://api.anthropic.com*|*anthropic.com*|*llmgw*)
+                        SESSION_KIND="cloud"
+                        SESSION_EMOJI="☁️"
+                        PROVIDER_DISPLAY="Anthropic (cloud)"
+                        ;;
+                esac
+            fi
             ;;
     esac
     # Preserve MODEL from input for backward compat
@@ -548,7 +577,7 @@ fi
 # Three session types, each with their own SPEND line format:
 #   LOCAL (ports 8000-8010):      "local session saved $X · today: $Y saved with free agents"
 #                                 X = this session's phantom, Y = combined daily savings
-#   FREE_API (ports 4141-4151):   "free api session saved $X · today: $Y saved with free agents"
+#   FREE_API (proxy-band ports, default 4141-4190): "free api session saved $X · today: $Y saved with free agents"
 #                                 X = this session's phantom, Y = combined daily savings
 #   CLOUD (default):              "session $X · today: $Z/$cap · local saved $W"
 TODAY_LINE=

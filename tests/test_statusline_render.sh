@@ -428,18 +428,18 @@ has "…and still reports a zero saving rather than nothing" \
     "$(spend_line "$OFFOUT")" 'saved $0.00'
 
 # --- the free-API lane spans the launcher's WHOLE port scan range ---------------------
-# remote-session.sh scans LA_REMOTE_PROXY_PORT_MIN..MAX (default 4141-4151) and takes the
+# remote-session.sh scans LA_REMOTE_PROXY_PORT_MIN..MAX (default 4141-4190) and takes the
 # first FREE port, so a session launched while an earlier proxy is alive lands on 4142+.
 # Matching only 4141 rendered those as CLOUD sessions -- a cap and a gateway figure on a
 # session that bills nothing, the exact lie this lane exists to remove. A 4141-only
 # fixture cannot catch that, so these probe NON-FIRST ports deliberately.
-for port in 4142 4145 4151; do
+for port in 4142 4145 4151 4190; do
     RANGED="$(spend_line "$(frender "http://127.0.0.1:$port")")"
     has "port $port renders as a free session, not a gateway one" "$RANGED" "free api session"
     hasnt "port $port shows no cap" "$RANGED" "/\$40"
 done
-FOUT="$(spend_line "$(frender http://127.0.0.1:4152)")"
-has "port 4152 (outside the range) is still a cloud session" "$FOUT" "today:"
+FOUT="$(spend_line "$(frender http://127.0.0.1:4191)")"
+has "port 4191 (outside the band) is still a cloud session" "$FOUT" "today:"
 hasnt "…and is not claimed as free" "$FOUT" "free api session"
 
 # --- line 1 names the model even when the payload omits display_name ------------------
